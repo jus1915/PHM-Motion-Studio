@@ -1,0 +1,15 @@
+# Build
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# 로컬 설정 (개인 환경 파일)
+layout.xml
+axis_config.json
+
+# 패키지 (NuGet restore로 복원 가능)
+packages/
