@@ -33,13 +33,14 @@ namespace PHM_Project_DockPanel.Windows
         private const int COL_MODE = 1;     // "Single" | "Multi"
         private const int COL_AXIS = 2;     // Single에서 사용
         private const int COL_SINGLE_TGT = 3; // Single Target
+        private const int COL_VEL_OVERRIDE = 4; // 속도 배율 (%)
         // 다축 타겟은 이후에 동적 생성 (이들 다음에 들어감)
         // 마지막에 Wait(ms) 컬럼을 둔다
 
         private const string MODE_SINGLE = "Single";
         private const string MODE_MULTI = "Multi";
         private const string MULTI_COL_PREFIX = "T"; // T0, T1, ...
-        private const string DefaultTeachingDir = @"E:\Data\PHM_Logs\Teaching";
+        private const string DefaultTeachingDir = @"C:\Data\PHM_Logs\Teaching";
 
         public TeachingForm(PHM_Motion pHM_motion)
         {
@@ -89,7 +90,8 @@ namespace PHM_Project_DockPanel.Windows
             btnAdd.Click += (s, e) =>
             {
                 EnsureDynamicTargetColumns();
-                _teachingGrid.Rows.Add(false, MODE_SINGLE, 0, 0.0);
+                var newRow = _teachingGrid.Rows[_teachingGrid.Rows.Add(false, MODE_SINGLE, 0, 0.0)];
+                newRow.Cells[COL_VEL_OVERRIDE].Value = 100;
                 var waitCol = FindWaitColumnIndex();
                 if (waitCol >= 0)
                     _teachingGrid.Rows[_teachingGrid.Rows.Count - 1].Cells[waitCol].Value = 500;
@@ -145,6 +147,19 @@ namespace PHM_Project_DockPanel.Windows
                 // [Target(mm)] (Single에서 사용)
                 _teachingGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Target(mm)", Width = 100 });
 
+                // [VelOverride(%)] 행별 속도 배율 (10~100%, 기본 100)
+                _teachingGrid.Columns.Add(new DataGridViewTextBoxColumn
+                {
+                    Name = "VelOverride",
+                    HeaderText = "Vel(%)",
+                    Width = 60,
+                    DefaultCellStyle = new DataGridViewCellStyle
+                    {
+                        Alignment = DataGridViewContentAlignment.MiddleCenter,
+                        BackColor = Color.LightYellow
+                    }
+                });
+
                 // 동적 다축 타겟 컬럼 생성
                 EnsureDynamicTargetColumns();
 
@@ -159,6 +174,7 @@ namespace PHM_Project_DockPanel.Windows
                     r[COL_MODE] = MODE_SINGLE;
                     r[COL_AXIS] = 0;
                     r[COL_SINGLE_TGT] = 0.0;
+                    r[COL_VEL_OVERRIDE] = 100;
                     var waitCol = FindWaitColumnIndex();
                     if (waitCol >= 0) r[waitCol] = 500;
                     _teachingGrid.Rows.Add(r);
@@ -384,67 +400,71 @@ namespace PHM_Project_DockPanel.Windows
 
                     foreach (var step in steps)
                     {
+                        // 속도 배율 적용: AxisConfigs의 MaxVel을 임시로 스케일
+                        double ratio = (step.VelOverride > 0 && step.VelOverride < 100)
+                            ? step.VelOverride / 100.0
+                            : 1.0;
+                        double[] origVels = null;
+                        if (ratio < 1.0 && _motion.AxisConfigs != null)
+                        {
+                            origVels = _motion.AxisConfigs.Select(c => c?.MaxVel ?? 0).ToArray();
+                            foreach (var cfg in _motion.AxisConfigs)
+                                if (cfg != null) cfg.MaxVel *= ratio;
+                        }
+
                         bool success;
-
-                        if (step.IsMulti)
+                        try
                         {
-                            // 유효 타겟만 선택
-                            var axesList = new List<int>();
-                            var valsList = new List<double>();
-                            int axisCount = _motion?.AxisConfigs?.Length ?? 0;
-
-                            for (int ax = 0; ax < axisCount; ax++)
+                            if (step.IsMulti)
                             {
-                                double? v = (step.Targets != null && ax < step.Targets.Length) ? step.Targets[ax] : null;
-                                if (v.HasValue)
+                                var axesList = new List<int>();
+                                var valsList = new List<double>();
+                                int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+
+                                for (int ax = 0; ax < axisCount; ax++)
                                 {
-                                    axesList.Add(ax);
-                                    valsList.Add(v.Value);
+                                    double? v = (step.Targets != null && ax < step.Targets.Length) ? step.Targets[ax] : null;
+                                    if (v.HasValue) { axesList.Add(ax); valsList.Add(v.Value); }
                                 }
-                            }
 
-                            if (axesList.Count == 0)
+                                if (axesList.Count == 0)
+                                {
+                                    AppEvents.RaiseLog("[경고] 다축 행에 유효 타겟이 없습니다. 스킵.");
+                                    continue;
+                                }
+
+                                success = await _motion.RunMotionWithLogging(
+                                    axesList.ToArray(), true, valsList.ToArray(), null, plan.Loop);
+                            }
+                            else
                             {
-                                AppEvents.RaiseLog("[경고] 다축 행에 유효 타겟이 없습니다. 스킵.");
-                                continue;
-                            }
+                                if (step.Axis < 0 || step.Axis >= (_motion.AxisConfigs?.Length ?? 0))
+                                {
+                                    MessageBox.Show($"Axis {step.Axis} 인덱스가 잘못되었습니다.", "입력 오류",
+                                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                    abort = true; break;
+                                }
 
-                            success = await _motion.RunMotionWithLogging(
-                                axesList.ToArray(), /*ABS*/ true, valsList.ToArray(),
-                                null,   // <-- 대기 제거
-                                plan.Loop);
+                                success = await _motion.RunMotionWithLogging(
+                                    new[] { step.Axis }, true, step.Target, null, plan.Loop);
+                            }
                         }
-                        else
+                        finally
                         {
-                            // 단축
-                            if (step.Axis < 0 || step.Axis >= (_motion.AxisConfigs?.Length ?? 0))
+                            // 속도 원복
+                            if (origVels != null && _motion.AxisConfigs != null)
                             {
-                                MessageBox.Show($"Axis {step.Axis} 인덱스가 잘못되었습니다.", "입력 오류",
-                                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                                abort = true; break;
+                                for (int i = 0; i < Math.Min(origVels.Length, _motion.AxisConfigs.Length); i++)
+                                    if (_motion.AxisConfigs[i] != null) _motion.AxisConfigs[i].MaxVel = origVels[i];
                             }
-
-                            success = await _motion.RunMotionWithLogging(
-                                new[] { step.Axis }, /*ABS*/ true, step.Target,
-                                null,   // <-- 대기 제거
-                                plan.Loop);
                         }
 
-                        // 실행 실패나 취소되면 중단
                         if (!success || token.IsCancellationRequested) { abort = true; break; }
 
-                        // ✅ RunMotionWithLogging 종료 후 대기
                         if (step.WaitMs > 0)
                         {
-                            try
-                            {
-                                await Task.Delay(step.WaitMs, token);
-                            }
-                            catch (TaskCanceledException)
-                            {
-                                abort = true;
-                                break;
-                            }
+                            try { await Task.Delay(step.WaitMs, token); }
+                            catch (TaskCanceledException) { abort = true; break; }
                         }
                     }
 
@@ -502,6 +522,14 @@ namespace PHM_Project_DockPanel.Windows
                     }
                 }
 
+                // VelOverride (%)
+                int velOverride = 100;
+                {
+                    var velVal = row.Cells[COL_VEL_OVERRIDE].Value;
+                    if (velVal != null && int.TryParse(velVal.ToString(), out int vo))
+                        velOverride = Math.Max(1, Math.Min(100, vo));
+                }
+
                 if (isMulti)
                 {
                     // 다축: 축별 타겟 읽기 (빈 칸은 null)
@@ -526,6 +554,7 @@ namespace PHM_Project_DockPanel.Windows
                         Enabled = enabled,
                         IsMulti = true,
                         Targets = targets,
+                        VelOverride = velOverride,
                         WaitMs = waitMs
                     });
                 }
@@ -549,6 +578,7 @@ namespace PHM_Project_DockPanel.Windows
                         IsMulti = false,
                         Axis = axis,
                         Target = target,
+                        VelOverride = velOverride,
                         WaitMs = waitMs
                     });
                 }
@@ -673,6 +703,8 @@ namespace PHM_Project_DockPanel.Windows
                 int waitCol = FindWaitColumnIndex();
                 if (waitCol >= 0) row.Cells[waitCol].Value = s.WaitMs;
 
+                row.Cells[COL_VEL_OVERRIDE].Value = s.VelOverride > 0 ? s.VelOverride : 100;
+
                 _teachingGrid.Rows.Add(row);
             }
             ApplyMultiColsVisibilityByMode();
@@ -773,6 +805,9 @@ namespace PHM_Project_DockPanel.Windows
         // Multi 모드 확장
         public bool IsMulti { get; set; } = false;
         public double?[] Targets { get; set; }  // 축별 절대 타겟(mm). null은 무시
+
+        /// <summary>이 행의 속도 배율 (1~100%). 0이면 100%로 처리.</summary>
+        public int VelOverride { get; set; } = 100;
 
         public int WaitMs { get; set; }
     }

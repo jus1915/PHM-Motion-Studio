@@ -9,8 +9,9 @@ namespace PHM_Project_DockPanel.Controller
     /// </summary>
     public class SimulationController : IMotionController
     {
-        public bool IsConnected => true;   // UI상 "연결됨"으로 표시
+        public bool IsConnected => true;
         public bool IsSimulationMode => true;
+        public bool PosIsAlreadyMm => true;  // 시뮬: 항상 0 반환이라 무관
 
         public void SetAxisConfigs(AxisConfig[] configs) { }
 

@@ -310,7 +310,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 // 초기 디렉터리: 기존 경로가 유효하면 그곳, 아니면 C:\PHM_Logs
                 string start = (!string.IsNullOrEmpty(_csvRoot) && Directory.Exists(_csvRoot))
                     ? _csvRoot
-                    : @"E:\Data\PHM_Logs\Signals";
+                    : @"C:\Data\PHM_Logs\Signals";
 
                 try { Directory.CreateDirectory(start); } catch { /* ignore */ }
                 ofd.InitialDirectory = start;

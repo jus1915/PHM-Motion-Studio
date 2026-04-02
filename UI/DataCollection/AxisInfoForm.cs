@@ -46,8 +46,8 @@ namespace PHM_Project_DockPanel.Windows
         public CheckBox TorqueCheckBox => _chkTorqueCollect;
         [Obsolete("Use AccelCheckBox or TorqueCheckBox instead.")]
         public CheckBox LogCheckBox => _chkLogCombined;
-        public CheckBox RealtimeSendCheckBox =>_chkRealtime;
-        
+        public CheckBox RealtimeSendCheckBox => _chkRealtime;
+
         // DGV 컬럼 인덱스 (체크박스 컬럼 추가)
         private const int COL_SEL = 0;
         private const int COL_AXIS = 1;
@@ -72,7 +72,7 @@ namespace PHM_Project_DockPanel.Windows
 
         // --- 상태/데이터 ---
         private int _selectedAxis = -1;           // 단일 선택(서보/파라미터용)
-        private int _axisCount = 5;
+        private int _axisCount = 0;               // Connect 후 실제 축 수로 설정됨
 
         private PHM_Motion _motion;
         private AxisConfig[] _axisConfigs;
@@ -355,7 +355,20 @@ namespace PHM_Project_DockPanel.Windows
             try
             {
                 _motion.Controller.Connect();
-                _axisCount = _motion.Controller.GetStatus().AxesStatus.Count(a => !a.ServoOffline);
+
+                // 실제 연결된 축 수 결정
+                // - WMX3: AxesStatus에서 ServoOffline=false인 축만 카운트
+                // - Ajin : GetAxisCount() 직접 사용 (AxesStatus 구조가 다름)
+                var status = _motion.Controller.GetStatus();
+                int detectedCount = status.AxesStatus?.Count(a => !a.ServoOffline) ?? 0;
+                if (detectedCount <= 0 || detectedCount > 64)
+                {
+                    // Ajin 또는 WMX3 상태가 비정상인 경우 GetAxisCount 시도
+                    var ajin = _motion.Controller.AsAjin;
+                    if (ajin != null)
+                        detectedCount = ajin.GetAxisCount();
+                }
+                _axisCount = Math.Max(1, detectedCount);
                 AxisConfig.AxisCount = _axisCount;
 
                 // 데이터 버퍼 준비
@@ -619,12 +632,13 @@ namespace PHM_Project_DockPanel.Windows
             var grid = new TableLayoutPanel
             {
                 ColumnCount = 2,
-                RowCount = 2,
+                RowCount = 3,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink
             };
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -633,6 +647,41 @@ namespace PHM_Project_DockPanel.Windows
             btnAbsMoveGlobal = new Button { Text = "ABS Move", Height = BTN_H, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 6, 0) };
             btnRelMoveGlobal = new Button { Text = "REL Move", Height = BTN_H, Dock = DockStyle.Fill, Margin = new Padding(6, 6, 0, 0) };
 
+            // Set Zero: 체크된 축 모두의 현재 위치를 0으로 설정
+            var btnSetZero = new Button
+            {
+                Text = "Set Zero",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 6, 0, 0),
+                BackColor = Color.MistyRose
+            };
+            btnSetZero.Click += (s, e) =>
+            {
+                var axes = CheckedAxes();
+                if (axes.Length == 0 && _selectedAxis >= 0)
+                    axes = new[] { _selectedAxis };
+
+                if (axes.Length == 0)
+                {
+                    MessageBox.Show("축을 체크하거나 선택하세요.", "Set Zero", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                var ajin = _motion?.Controller?.AsAjin;
+                if (ajin == null)
+                {
+                    MessageBox.Show("Set Zero는 Ajin 제어기에서만 지원됩니다.", "Set Zero", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                foreach (int ax in axes)
+                {
+                    ajin.SetZeroPos(ax);
+                    AppEvents.RaiseLog($"[Set Zero] Axis {ax} 위치 초기화");
+                }
+            };
+
             btnServoOnGlobal.Click += (s, e) => { if (_selectedAxis >= 0) _motion.Controller.SetServo(_selectedAxis, true); };
             btnServoOffGlobal.Click += (s, e) => { if (_selectedAxis >= 0) _motion.Controller.SetServo(_selectedAxis, false); };
             btnAbsMoveGlobal.Click += async (s, e) => await MultiMove(true);
@@ -640,10 +689,17 @@ namespace PHM_Project_DockPanel.Windows
 
             SetActionButtonsEnabled(false);
 
+            grid.RowCount = 3;
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
             grid.Controls.Add(btnServoOnGlobal, 0, 0);
             grid.Controls.Add(btnServoOffGlobal, 1, 0);
             grid.Controls.Add(btnAbsMoveGlobal, 0, 1);
             grid.Controls.Add(btnRelMoveGlobal, 1, 1);
+
+            // Set Zero는 2행 전체(colspan=2)
+            grid.SetColumnSpan(btnSetZero, 2);
+            grid.Controls.Add(btnSetZero, 0, 2);
 
             root.Controls.Add(lblCheckedAxes);
             root.Controls.Add(lblTarget);

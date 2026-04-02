@@ -1,12 +1,4 @@
-﻿using PHM_Project_DockPanel.Controller;
-using PHM_Project_DockPanel.DebugTools;
-using PHM_Project_DockPanel.Services;
-using PHM_Project_DockPanel.Services.DAQ;
-using PHM_Project_DockPanel.Services.WMX;
-using PHM_Project_DockPanel.UI.Dashboard;
-using PHM_Project_DockPanel.UI.DataAnalysis;
-using PHM_Project_DockPanel.Windows;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -15,8 +7,16 @@ using System.Text.Json;
 using System.Windows.Forms;
 using System.Xml;
 using WeifenLuo.WinFormsUI.Docking;
-using WMX3ApiCLR;
+using PHM_Project_DockPanel.Windows;
+using PHM_Project_DockPanel.Services;
+using PHM_Project_DockPanel.Services.WMX;
+using PHM_Project_DockPanel.Services.DAQ;
+using PHM_Project_DockPanel.Controller;
+using PHM_Project_DockPanel.UI.DataAnalysis;
+using PHM_Project_DockPanel.UI.Dashboard;
+using PHM_Project_DockPanel.DebugTools;
 using static PHM_Project_DockPanel.Windows.AxisInfoForm;
+using WMX3ApiCLR;
 
 namespace PHM_Project_DockPanel
 {
@@ -104,23 +104,30 @@ namespace PHM_Project_DockPanel
         private void InitAxisConfigs()
         {
             _axisConfigs = new AxisConfig[5];
+            for (int i = 0; i < _axisConfigs.Length; i++)
+                _axisConfigs[i] = new AxisConfig();
         }
+
         private void InitMotion()
         {
-            if (!_controller.IsSimulationMode)
+            // WMX3 제어기일 때만 Log(WMX3 전용 클래스)를 생성합니다.
+            // Ajin 또는 시뮬레이션에서 new Log()를 호출하면
+            // LogApi_CLRLib.dll 로드를 시도해 FileNotFoundException이 발생합니다.
+            if (_controller.IsWmx3)
             {
                 _torqueLogger = new WmxTorqueLogger(
                     new Log(), channelIndex: 0, logAction: msg => AppEvents.RaiseLog(msg));
             }
             else
             {
-                AppEvents.RaiseLog("[Sim] WmxTorqueLogger 건너뜀 (시뮬레이션 모드)");
+                AppEvents.RaiseLog($"[모션] WmxTorqueLogger 건너뜀 ({(_controller.IsSimulationMode ? "시뮬레이션" : "Ajin")} 모드)");
             }
 
+            // _axisInfo는 나중에 생성되므로 람다에서 null-safe하게 접근
             _motion = new PHM_Motion(
                 _controller,
                 _axisConfigs,
-                _torqueLogger,
+                _torqueLogger,           // WMX3가 아니면 null → PHM_Motion 내부에서 null-safe 처리됨
                 isAccelEnabled: () => _axisInfo?.AccelCheckBox?.Checked ?? false,
                 isTorqueEnabled: () => _axisInfo?.TorqueCheckBox?.Checked ?? false);
         }
@@ -178,7 +185,7 @@ namespace PHM_Project_DockPanel
         /// <summary>E:\Data\PHM_Logs 가 있으면 그 경로, 없으면 C:\PHM_Logs 를 루트로 사용합니다.</summary>
         private static string ResolveCfgDir()
         {
-            var root = Directory.Exists(@"E:\Data\PHM_Logs") ? @"E:\Data\PHM_Logs" : @"C:\PHM_Logs";
+            var root = Directory.Exists(@"C:\Data\PHM_Logs") ? @"C:\Data\PHM_Logs" : @"C:\PHM_Logs";
             return Path.Combine(root, "Tests");
         }
 

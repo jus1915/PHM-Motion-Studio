@@ -82,8 +82,17 @@ namespace PHM_Project_DockPanel.Services
                 throw new IndexOutOfRangeException("축 인덱스가 유효하지 않습니다.");
 
             var status = _controller.GetStatus();
+            double rawPos = status.AxesStatus[axisIndex].ActualPos;
+
+            // ✅ Ajin이면 그대로 사용 (이미 unit/mm)
+            if (_controller.AsAjin != null)
+            {
+                return rawPos;
+            }
+
+            // ✅ WMX 등은 encoder → mm 변환
             return UnitConverter.EncoderToMm(
-                status.AxesStatus[axisIndex].ActualPos,
+                rawPos,
                 _axisConfigs[axisIndex].PitchMmPerRev
             );
         }
@@ -195,7 +204,7 @@ namespace PHM_Project_DockPanel.Services
 
             // === 기존 CSV/토크 로깅 준비 ===
             string folderName = $"{DateTime.Now:yyyyMMdd}_Axis{active[0]}";
-            string baseRoot = @"E:\Data\PHM_Logs\Signals";
+            string baseRoot = @"C:\Data\PHM_Logs\Signals";
             string rootDir = Path.Combine(baseRoot, folderName);
             string torqueDir = Path.Combine(rootDir, "Torque");
             string accelDir = Path.Combine(rootDir, "Accel");

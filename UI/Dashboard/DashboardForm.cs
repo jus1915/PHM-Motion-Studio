@@ -60,7 +60,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private const int ChartKeepPoints = 300;
         private double MotionEps { get; set; } = 0.010;  // 움직임 판정(Δpos) 기본값
         private double DefaultThreshold { get; set; } = 1.000; // 기본 임계값(필요 시)
-        private const string DefaultLogsPath = @"E:\Data\PHM_Logs";
+        private const string DefaultLogsPath = @"C:\Data\PHM_Logs";
         private const int SampleMinTileWidth = 320;   // 한 타일의 최소 가로폭(px)
         private const int SampleMaxColumns = 3;     // 최대 열 수(원하면 4 등으로 조절)
 

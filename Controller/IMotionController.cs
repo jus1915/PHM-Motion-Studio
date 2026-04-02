@@ -12,6 +12,12 @@ namespace PHM_Project_DockPanel.Controller
         bool IsConnected { get; }
         bool IsSimulationMode { get; }
 
+        /// <summary>
+        /// false = encoder pulse 단위 → AxisMonitor에서 UnitConverter로 변환 필요
+        ///         (WMX3)
+        /// </summary>
+        bool PosIsAlreadyMm { get; }
+
         void Connect();
         void Disconnect();
         void Dispose();

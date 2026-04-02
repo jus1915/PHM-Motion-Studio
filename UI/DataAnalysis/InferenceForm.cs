@@ -275,7 +275,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ofd.FileName = "폴더 선택";              // 폴더 픽커 트릭
 
                 // 초기 디렉터리: C:\PHM_Logs (없으면 생성)
-                string start = @"E:\Data\PHM_Logs";
+                string start = @"C:\Data\PHM_Logs";
                 try { Directory.CreateDirectory(start); } catch { /* ignore */ }
                 ofd.InitialDirectory = start;
 

@@ -18,8 +18,8 @@ namespace PHM_Project_DockPanel.Controller
         private const uint AXT_RT_SUCCESS = 0;
         private const uint SERVO_ON = 1;
         private const uint SERVO_OFF = 0;
-        private const uint ABS_MODE = 0;   // 절대 좌표
-        private const uint REL_MODE = 1;   // 상대 좌표
+        private const uint ABS_MODE = 0;
+        private const uint REL_MODE = 1;
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxlOpen(int nIRQ);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxlClose();
@@ -57,11 +57,18 @@ namespace PHM_Project_DockPanel.Controller
         private const double DefaultUnit = 20.0;
         private const int DefaultPulse = 8388608;
 
+        // OperationState.Pos = 절대 이동 중 상태 (WMX3 enum 기준)
+        // PHM_Motion.WaitForMotionsEnd()가 OpState != Idle 로 모션 중 판단
+        private const OperationState StateMoving = OperationState.Pos;
+
         // ────────────────────────────────────────────────────────────
         // IMotionController 구현
         // ────────────────────────────────────────────────────────────
         public bool IsConnected => _connected;
         public bool IsSimulationMode => false;
+        // Ajin: AxmMotSetMoveUnitPerPulse(unit=20mm, pulse=8388608) 설정으로
+        // AxmStatusGetActPos가 이미 mm 단위 반환
+        public bool PosIsAlreadyMm => true;
 
         public void SetAxisConfigs(AxisConfig[] configs)
         {
@@ -70,10 +77,6 @@ namespace PHM_Project_DockPanel.Controller
                 ApplyAxisParams();
         }
 
-        /// <summary>
-        /// AXL 라이브러리를 초기화하고 모든 축의 기본 파라미터를 설정합니다.
-        /// IRQ: -1(자동) 또는 7(권장)
-        /// </summary>
         public void Connect(int irq = -1)
         {
             try
@@ -100,7 +103,6 @@ namespace PHM_Project_DockPanel.Controller
             }
         }
 
-        // IMotionController.Connect() — 파라미터 없는 버전
         void IMotionController.Connect() => Connect();
 
         public void Disconnect()
@@ -110,9 +112,8 @@ namespace PHM_Project_DockPanel.Controller
             {
                 int count = GetAxisCount();
                 for (int i = 0; i < count; i++)
-                {
                     try { AxmSignalServoOn(i, SERVO_OFF); } catch { }
-                }
+
                 AxlClose();
                 AppEvents.RaiseLog("[Ajin] 연결 해제 완료");
             }
@@ -133,9 +134,6 @@ namespace PHM_Project_DockPanel.Controller
             _disposed = true;
         }
 
-        /// <summary>
-        /// Ajin 상태를 WMX3 호환 CoreMotionStatus로 변환합니다.
-        /// </summary>
         public CoreMotionStatus GetStatus()
         {
             var status = new CoreMotionStatus();
@@ -150,7 +148,9 @@ namespace PHM_Project_DockPanel.Controller
                     double actPos = 0; AxmStatusGetActPos(i, ref actPos);
                     uint servoOn = 0; AxmSignalIsServoOn(i, ref servoOn);
 
-                    status.AxesStatus[i].OpState = inMotion != 0 ? OperationState.Moving : OperationState.Idle;
+                    // OperationState.Moving이 WMX3 enum에 없을 수 있으므로
+                    // inMotion 플래그로 Idle/Moving 구분
+                    status.AxesStatus[i].OpState = inMotion != 0 ? StateMoving : OperationState.Idle;
                     status.AxesStatus[i].ActualPos = actPos;
                     status.AxesStatus[i].ServoOn = servoOn != 0;
                 }
@@ -173,7 +173,6 @@ namespace PHM_Project_DockPanel.Controller
                 AppEvents.RaiseLog($"[Ajin] Axis {axis} ServoOn 실패 (0x{ret:X})");
         }
 
-        /// <summary>절대 좌표 다축 동시 이동.</summary>
         public void MoveAbs(int[] axes, double[] target, double[] vel, double[] acc, double[] dec)
         {
             ValidateArgs(axes, target, vel, acc, dec);
@@ -184,23 +183,18 @@ namespace PHM_Project_DockPanel.Controller
 
             if (axes.Length == 1)
             {
-                // 단축 이동
                 uint ret = AxmMoveStartPos(axes[0], target[0], vel[0], acc[0], dec[0]);
                 if (ret != AXT_RT_SUCCESS)
                     throw new InvalidOperationException($"[Ajin] MoveAbs axis={axes[0]} 실패 (0x{ret:X})");
             }
             else
             {
-                // 다축 동시 이동 — AxmMoveMultiPos는 vel/acc/dec를 단일값으로 받음
                 uint ret = AxmMoveMultiPos(axes.Length, axes, target, vel[0], acc[0], dec[0]);
                 if (ret != AXT_RT_SUCCESS)
                     throw new InvalidOperationException($"[Ajin] MoveMultiPos 실패 (0x{ret:X})");
             }
         }
 
-        /// <summary>
-        /// 상대 좌표 이동 — 현재 실제 위치(ActPos)에 delta를 더해 절대 이동으로 변환합니다.
-        /// </summary>
         public void MoveRel(int[] axes, double[] delta, double[] vel, double[] acc, double[] dec)
         {
             ValidateArgs(axes, delta, vel, acc, dec);
@@ -256,19 +250,23 @@ namespace PHM_Project_DockPanel.Controller
         // ────────────────────────────────────────────────────────────
         // 내부 헬퍼
         // ────────────────────────────────────────────────────────────
-
-        /// <summary>연결 후 _axisConfigs 기준으로 각 축 파라미터를 일괄 적용합니다.</summary>
         private void ApplyAxisParams()
         {
-            for (int i = 0; i < _axisConfigs.Length; i++)
+            int actualCount = GetAxisCount();
+            int applyCount = actualCount > 0
+                ? Math.Min(actualCount, _axisConfigs.Length)
+                : _axisConfigs.Length;
+
+            for (int i = 0; i < applyCount; i++)
             {
                 var cfg = _axisConfigs[i];
                 if (cfg == null) continue;
 
-                // UnitPerPulse: WMX3와 동일 기준 사용
-                AxmMotSetMoveUnitPerPulse(i, DefaultUnit, DefaultPulse);
+                // ✅ 핵심: Pitch 사용
+                double unit = cfg.PitchMmPerRev > 0 ? cfg.PitchMmPerRev : 10.0;
 
-                // 절대 모드 + 대칭 사다리꼴 프로파일
+                AxmMotSetMoveUnitPerPulse(i, unit, DefaultPulse);
+
                 AxmMotSetAbsRelMode(i, ABS_MODE);
                 AxmMotSetProfileMode(i, 0);
 
@@ -279,7 +277,7 @@ namespace PHM_Project_DockPanel.Controller
                     AxmMotSetMaxDecel(i, cfg.Dec);
                 }
 
-                AppEvents.RaiseLog($"[Ajin] Axis {i} 파라미터 적용 (vel={cfg.MaxVel}, acc={cfg.Acc})");
+                AppEvents.RaiseLog($"[Ajin] Axis {i} unit={unit} 적용");
             }
         }
 

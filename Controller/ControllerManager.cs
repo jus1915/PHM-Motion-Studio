@@ -16,6 +16,29 @@ namespace PHM_Project_DockPanel.Controller
         public bool IsConnected => _controller?.IsConnected ?? false;
         public bool IsSimulationMode => _controller?.IsSimulationMode ?? true;
 
+        /// <summary>WMX3 제어기일 때만 true — Log(WMX3 전용 클래스) 생성 여부 판단에 사용</summary>
+        public bool IsWmx3 => _controller is WMX3Controller;
+
+        /// <summary>Ajin 제어기일 때만 true — 축 수 감지 등 Ajin 전용 분기에 사용</summary>
+        public bool IsAjin => _controller is AjinController;
+
+        /// <summary>Ajin 제어기로 캐스팅하여 반환. Ajin이 아니면 null.</summary>
+        public AjinController AsAjin => _controller as AjinController;
+
+        public bool PosIsAlreadyMm
+        {
+            get
+            {
+                // Ajin: 이미 mm
+                if (IsAjin) return true;
+
+                // WMX3: pulse → 변환 필요
+                if (IsWmx3) return false;
+
+                // 기본값
+                return false;
+            }
+        }
         /// <summary>
         /// 선택된 제어기를 주입합니다. Connect() 호출 전에 반드시 설정하세요.
         /// </summary>

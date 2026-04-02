@@ -4,7 +4,7 @@
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
     <ProjectGuid>{1F412B35-543D-4DD3-B684-91C04FCF12E8}</ProjectGuid>
     <OutputType>WinExe</OutputType>
     <RootNamespace>PHM_Project_DockPanel</RootNamespace>
@@ -16,18 +16,8 @@
     <NuGetPackageImportStamp>
     </NuGetPackageImportStamp>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <PlatformTarget>AnyCPU</PlatformTarget>
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <PlatformTarget>AnyCPU</PlatformTarget>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x64' ">
+    <PlatformTarget>x64</PlatformTarget>
     <DebugType>pdbonly</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
@@ -43,7 +33,6 @@
     <PlatformTarget>x64</PlatformTarget>
     <LangVersion>7.3</LangVersion>
     <ErrorReport>prompt</ErrorReport>
-    <Prefer32Bit>true</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
     <OutputPath>bin\x64\Release\</OutputPath>
@@ -53,33 +42,59 @@
     <PlatformTarget>x64</PlatformTarget>
     <LangVersion>7.3</LangVersion>
     <ErrorReport>prompt</ErrorReport>
-    <Prefer32Bit>true</Prefer32Bit>
   </PropertyGroup>
   <ItemGroup>
+    <!-- ── WMX3 SDK (Private=true → bin 폴더로 자동 복사) ── -->
     <Reference Include="AdvancedMotionApi_CLRLib">
       <HintPath>lib\WMX3\AdvancedMotionApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
     <Reference Include="ApiBufferApi_CLRLib">
       <HintPath>lib\WMX3\ApiBufferApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
     <Reference Include="CompensationApi_CLRLib">
       <HintPath>lib\WMX3\CompensationApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
     <Reference Include="CoreMotionApi_CLRLib">
       <HintPath>lib\WMX3\CoreMotionApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
     <Reference Include="CyclicBufferApi_CLRLib">
       <HintPath>lib\WMX3\CyclicBufferApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
     <Reference Include="EventApi_CLRLib">
       <HintPath>lib\WMX3\EventApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
     <Reference Include="IOApi_CLRLib">
       <HintPath>lib\WMX3\IOApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
     <Reference Include="LogApi_CLRLib">
       <HintPath>lib\WMX3\LogApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
     </Reference>
+    <Reference Include="UserMemoryApi_CLRLib">
+      <HintPath>lib\WMX3\UserMemoryApi_CLRLib.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="WMX3Api_CLRLib">
+      <HintPath>lib\WMX3\WMX3Api_CLRLib.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <!-- ── NI-DAQ (Private=true) ── -->
+    <Reference Include="NationalInstruments.Common">
+      <HintPath>lib\NationalInstruments\NationalInstruments.Common.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="NationalInstruments.DAQmx">
+      <HintPath>lib\NationalInstruments\NationalInstruments.DAQmx.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <!-- ── NuGet 패키지 ── -->
     <Reference Include="MathNet.Numerics, Version=5.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>packages\MathNet.Numerics.5.0.0\lib\net48\MathNet.Numerics.dll</HintPath>
     </Reference>
@@ -88,12 +103,6 @@
     </Reference>
     <Reference Include="Microsoft.ML.OnnxRuntime, Version=1.23.0.0, Culture=neutral, PublicKeyToken=f27f157f0a5b7bb6, processorArchitecture=MSIL">
       <HintPath>packages\Microsoft.ML.OnnxRuntime.Managed.1.23.0\lib\netstandard2.0\Microsoft.ML.OnnxRuntime.dll</HintPath>
-    </Reference>
-    <Reference Include="NationalInstruments.Common">
-      <HintPath>lib\NationalInstruments\NationalInstruments.Common.dll</HintPath>
-    </Reference>
-    <Reference Include="NationalInstruments.DAQmx">
-      <HintPath>lib\NationalInstruments\NationalInstruments.DAQmx.dll</HintPath>
     </Reference>
     <Reference Include="Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
       <HintPath>packages\Newtonsoft.Json.13.0.4\lib\net45\Newtonsoft.Json.dll</HintPath>
@@ -139,17 +148,11 @@
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml" />
-    <Reference Include="UserMemoryApi_CLRLib">
-      <HintPath>lib\WMX3\UserMemoryApi_CLRLib.dll</HintPath>
-    </Reference>
     <Reference Include="WeifenLuo.WinFormsUI.Docking, Version=1.0.0.0, Culture=neutral, PublicKeyToken=5cded1a1a0a7b481, processorArchitecture=MSIL">
       <HintPath>packages\DockPanelSuite.3.1.1\lib\net40\WeifenLuo.WinFormsUI.Docking.dll</HintPath>
     </Reference>
     <Reference Include="WeifenLuo.WinFormsUI.Docking.ThemeVS2015, Version=1.0.0.0, Culture=neutral, PublicKeyToken=5cded1a1a0a7b481, processorArchitecture=MSIL">
       <HintPath>packages\DockPanelSuite.ThemeVS2015.3.1.1\lib\net40\WeifenLuo.WinFormsUI.Docking.ThemeVS2015.dll</HintPath>
-    </Reference>
-    <Reference Include="WMX3Api_CLRLib">
-      <HintPath>lib\WMX3\WMX3Api_CLRLib.dll</HintPath>
     </Reference>
   </ItemGroup>
   <ItemGroup>
@@ -221,7 +224,7 @@
     <Compile Include="UI\DataCollection\TeachingForm.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="WMX3Controller.cs" />
+    <Compile Include="Controller\WMX3Controller.cs" />
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
@@ -264,6 +267,12 @@
     <Error Condition="!Exists('packages\Microsoft.ML.OnnxRuntime.Managed.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.ML.OnnxRuntime.Managed.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets'))" />
     <Error Condition="!Exists('packages\Microsoft.ML.OnnxRuntime.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.ML.OnnxRuntime.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props'))" />
     <Error Condition="!Exists('packages\Microsoft.ML.OnnxRuntime.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.ML.OnnxRuntime.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets'))" />
+  </Target>
+  <Target Name="CopyAjinDLL" AfterTargets="Build">
+    <Copy SourceFiles="$(ProjectDir)lib\Ajin\AXL.dll;$(ProjectDir)lib\Ajin\AXL.lib;$(ProjectDir)lib\Ajin\EzBasicAxl.dll" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="CopyIMDLL" AfterTargets="Build">
+    <Copy SourceFiles="$(ProjectDir)lib\WMX3\IMDLL.dll" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
   </Target>
   <Import Project="packages\Microsoft.ML.OnnxRuntime.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets" Condition="Exists('packages\Microsoft.ML.OnnxRuntime.1.23.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" />
 </Project>

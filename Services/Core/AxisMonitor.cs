@@ -54,18 +54,24 @@ namespace PHM_Project_DockPanel.Services
             if (_configs == null || _axisCount <= 0)
                 return;
 
+            // Ajin은 AxmMotSetMoveUnitPerPulse로 이미 mm 단위 반환 → 변환 불필요
+            // WMX3는 encoder pulse 단위 → UnitConverter.EncoderToMm 필요
+            bool posAlreadyMm = _controller.PosIsAlreadyMm;
+
             float[] positionsMm = new float[_axisCount];
 
             for (int i = 0; i < _axisCount; i++)
             {
-                double posMm = UnitConverter.EncoderToMm(status.AxesStatus[i].ActualPos, _configs[i].PitchMmPerRev);
+                double rawPos = status.AxesStatus[i].ActualPos;
+                double posMm = posAlreadyMm
+                    ? rawPos
+                    : UnitConverter.EncoderToMm(rawPos, _configs[i]?.PitchMmPerRev ?? 30.0);
+
                 bool servoOn = status.AxesStatus[i].ServoOn;
-                bool alarm = status.AxesStatus[i].AmpAlarm; // true=알람 발생
+                bool alarm = status.AxesStatus[i].AmpAlarm;
                 string opStr = status.AxesStatus[i].OpState.ToString();
 
                 positionsMm[i] = (float)posMm;
-
-                // UI는 폼 쪽에서: alarmOk = !alarm
                 StatusUpdated?.Invoke(i, servoOn, !alarm, opStr);
             }
 
