@@ -24,6 +24,7 @@ namespace PHM_Project_DockPanel.Services
         private WmxTorqueLogger _torqueLogger;
         private DaqAccelCsvLogger _accelLogger;
         private DaqAccelHttpSender _accelHttpSender;
+        private AjinCsvLogger _ajinLogger;   // Ajin 전용 폴링 로거
 
         // ▶ 분리된 로깅 토글 (주입식)
         private readonly Func<bool> _isAccelEnabled;   // 가속도 수집 여부
@@ -68,7 +69,12 @@ namespace PHM_Project_DockPanel.Services
         public void SetAccelHttpSender(DaqAccelHttpSender accelHttpSender)
         {
             _accelHttpSender = accelHttpSender;
+        }
 
+        /// <summary>Ajin 전용 폴링 로거를 주입합니다. MainForm에서 Ajin 선택 시 호출.</summary>
+        public void SetAjinLogger(AjinCsvLogger ajinLogger)
+        {
+            _ajinLogger = ajinLogger;
         }
         public void SetAxisConfigs(AxisConfig[] configs)
         {
@@ -217,33 +223,42 @@ namespace PHM_Project_DockPanel.Services
 
             bool startedAccelCsvRun = false;
             bool startedTorqueRun = false;
+            bool startedAjinRun = false;
 
             try
             {
                 if (anyLog)
                 {
-                    if (_torqueLogger == null)
-                        _torqueLogger = new WmxTorqueLogger(new Log(), 0, msg => AppEvents.RaiseLog(msg));
+                    bool isAjin = _controller.IsAjin;
 
-                    // CSV 로거 실행
-                    if (logAccel && _accelLogger != null)
+                    // ── Ajin: 폴링 로거 ────────────────────────────────────
+                    if (logTorque && isAjin && _ajinLogger != null)
                     {
-                        try { startedAccelCsvRun = _accelLogger.Start(active.ToArray(), accelDir, baseName, 0); }
-                        catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (DAQ CSV) {ex.Message}"); }
+                        try
+                        {
+                            startedAjinRun = _ajinLogger.Start(active.ToArray(), torqueDir, baseName);
+                        }
+                        catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (Ajin) {ex.Message}"); }
                     }
 
-                    // 토크 로거 실행
-                    if (logTorque)
+                    // ── WMX3: SDK 토크 로거 ───────────────────────────────
+                    if (logTorque && !isAjin)
                     {
+                        if (_torqueLogger == null)
+                            _torqueLogger = new WmxTorqueLogger(new Log(), 0, msg => AppEvents.RaiseLog(msg));
                         try
                         {
                             _torqueLogger.Start(active.ToArray(), torqueDir, Path.GetFileName(torqueCsvPath), 5000);
                             startedTorqueRun = true;
                         }
-                        catch (Exception ex)
-                        {
-                            AppEvents.RaiseLog($"[로깅 오류] (WMX) {ex.Message}");
-                        }
+                        catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (WMX) {ex.Message}"); }
+                    }
+
+                    // ── DAQ 가속도 CSV 로거 (공통) ─────────────────────────
+                    if (logAccel && _accelLogger != null)
+                    {
+                        try { startedAccelCsvRun = _accelLogger.Start(active.ToArray(), accelDir, baseName, 0); }
+                        catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (DAQ CSV) {ex.Message}"); }
                     }
                 }
 
@@ -271,6 +286,9 @@ namespace PHM_Project_DockPanel.Services
                 var stopTasks = new List<Task>();
                 if (startedTorqueRun)
                     stopTasks.Add(Task.Run(() => { try { _torqueLogger.Stop(); } catch { } }));
+
+                if (startedAjinRun)
+                    stopTasks.Add(Task.Run(() => { try { _ajinLogger.Stop(); } catch { } }));
 
                 if (startedAccelCsvRun)
                     stopTasks.Add(Task.Run(() => { try { _accelLogger.Stop(); } catch { } }));

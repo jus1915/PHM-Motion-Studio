@@ -44,6 +44,7 @@ namespace PHM_Project_DockPanel.Controller
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusGetActPos(int lAxisNo, ref double dpActPos);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusSetActPos(int lAxisNo, double dActPos);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusSetCmdPos(int lAxisNo, double dCmdPos);
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusReadActVel(int lAxisNo, ref double dpActVel);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusReadTorque(int lAxisNo, ref double dpTorque);
 
         // ────────────────────────────────────────────────────────────
@@ -223,6 +224,14 @@ namespace PHM_Project_DockPanel.Controller
             double pos = 0;
             AxmStatusGetActPos(axisNo, ref pos);
             return pos;
+        }
+
+        public double GetActVel(int axisNo)
+        {
+            CheckConnected();
+            double vel = 0;
+            AxmStatusReadActVel(axisNo, ref vel);
+            return vel;
         }
 
         public double GetTorque(int axisNo)

@@ -130,6 +130,18 @@ namespace PHM_Project_DockPanel
                 _torqueLogger,           // WMX3가 아니면 null → PHM_Motion 내부에서 null-safe 처리됨
                 isAccelEnabled: () => _axisInfo?.AccelCheckBox?.Checked ?? false,
                 isTorqueEnabled: () => _axisInfo?.TorqueCheckBox?.Checked ?? false);
+
+            // Ajin 전용: 폴링 방식 모션 데이터 로거 주입
+            if (_controller.IsAjin)
+            {
+                var ajin = _controller.AsAjin;
+                var ajinLogger = new AjinCsvLogger(
+                    getPos: ax => ajin.GetActPos(ax),
+                    getTorque: ax => ajin.GetTorque(ax),
+                    log: msg => AppEvents.RaiseLog(msg));
+                _motion.SetAjinLogger(ajinLogger);
+                AppEvents.RaiseLog("[Ajin] AjinCsvLogger 주입 완료");
+            }
         }
 
         private void InitDaq()
@@ -185,7 +197,7 @@ namespace PHM_Project_DockPanel
         /// <summary>E:\Data\PHM_Logs 가 있으면 그 경로, 없으면 C:\PHM_Logs 를 루트로 사용합니다.</summary>
         private static string ResolveCfgDir()
         {
-            var root = Directory.Exists(@"C:\Data\PHM_Logs") ? @"C:\Data\PHM_Logs" : @"C:\PHM_Logs";
+            var root = Directory.Exists(@"E:\Data\PHM_Logs") ? @"E:\Data\PHM_Logs" : @"C:\PHM_Logs";
             return Path.Combine(root, "Tests");
         }
 

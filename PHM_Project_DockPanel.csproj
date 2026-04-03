@@ -175,6 +175,7 @@
     <Compile Include="Services\Logging\CompositeLogger.cs" />
     <Compile Include="Services\Logging\IMeasurementLogger.cs" />
     <Compile Include="Services\PHM_Motion.cs" />
+    <Compile Include="Services\WMX\AjinCsvLogger.cs" />
     <Compile Include="Services\WMX\WmxTorqueLogger.cs" />
     <Compile Include="Services\Core\UnitConverter.cs" />
     <Compile Include="UI\Dashboard\DashboardForm.cs">
