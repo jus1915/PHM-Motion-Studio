@@ -213,11 +213,14 @@ namespace PHM_Project_DockPanel.Windows
                     _teachingGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
             };
 
-            // 모드 값 바뀔 때마다 A4/A3/A2/A1 보이기/숨기기 갱신
+            // 모드 값 바뀔 때마다 다축 컬럼 재구성 + 보이기/숨기기 갱신
             _teachingGrid.CellValueChanged += (s, e) =>
             {
                 if (e.RowIndex >= 0 && e.ColumnIndex == COL_MODE)
+                {
+                    EnsureDynamicTargetColumns(); // 축 수가 바뀌었을 수 있으므로 재구성
                     ApplyMultiColsVisibilityByMode();
+                }
             };
 
             // 행 추가/삭제 시도 후에도 갱신
@@ -321,14 +324,22 @@ namespace PHM_Project_DockPanel.Windows
                 .ToList();
             foreach (var n in toRemove) _teachingGrid.Columns.Remove(n);
 
-            // 다축 컬럼들을 Wait 앞에 배치 (순서만 조정)
-            waitColIdx = FindWaitColumnIndex(); // 제거 안 했지만 안전하게 재확인
-            foreach (DataGridViewColumn c in _teachingGrid.Columns)
+            // 다축 컬럼들을 Wait 앞에 A0→A1→…→A{n-1} 순으로 배치
+            // ※ 역순(마지막→첫번째)으로 DisplayIndex를 같은 위치에 넣으면
+            //   T{n-1}부터 T0 순으로 앞쪽 자리를 차지해 결과적으로 T0,T1,…,T{n-1} 순이 됩니다.
+            waitColIdx = FindWaitColumnIndex();
+            if (waitColIdx >= 0)
             {
-                if (c.Name != null && c.Name.StartsWith(MULTI_COL_PREFIX, StringComparison.OrdinalIgnoreCase))
-                {
-                    c.DisplayIndex = waitColIdx; // 이 줄이 Wait을 자동으로 뒤로 밀어줌
-                }
+                var multiColsSorted = _teachingGrid.Columns
+                    .Cast<DataGridViewColumn>()
+                    .Where(c => c.Name != null &&
+                                c.Name.StartsWith(MULTI_COL_PREFIX, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(c => GetAxisIndexFromMultiColName(c.Name))
+                    .ToList();
+
+                int baseDisplay = _teachingGrid.Columns[waitColIdx].DisplayIndex;
+                for (int i = multiColsSorted.Count - 1; i >= 0; i--)
+                    multiColsSorted[i].DisplayIndex = baseDisplay;
             }
         }
 
@@ -637,11 +648,12 @@ namespace PHM_Project_DockPanel.Windows
             return false;
         }
 
-        // ── Single 모드만 있을 땐 A4,A3,A2,A1 숨기기 ──
+        // ── Single 모드만 있을 땐 다축 컬럼 전체 숨기기 ──
         private void SetMultiColsVisible(bool visible)
         {
-            // 요청대로 A1~A4만 제어 (A0는 그대로 둠)
-            foreach (int ax in new[] { 1, 2, 3, 4, 0 })
+            int axisCount = GetCurrentAxisCount();
+            // 현재 생성되어 있는 다축 컬럼 전체를 대상으로 한다
+            for (int ax = 0; ax < axisCount; ax++)
             {
                 int idx = FindMultiTargetColumn(ax);
                 if (idx >= 0) _teachingGrid.Columns[idx].Visible = visible;
