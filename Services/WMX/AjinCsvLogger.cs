@@ -33,6 +33,7 @@ namespace PHM_Project_DockPanel.Services.WMX
         private string _filePath;
 
         public bool IsLogging => _task != null && !_task.IsCompleted;
+        public string OutputPath => _filePath;
 
         public AjinCsvLogger(
             Func<int, double> getPos,

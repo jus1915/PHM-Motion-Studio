@@ -232,19 +232,24 @@ namespace PHM_Project_DockPanel
             // LogGraph에 파일 로드 요청 (단순)
             AppEvents.ShowLogGraphRequested += filePath =>
             {
-                FindOpenForm<LogGraphForm>()?.LoadCsv(filePath);
+                this.BeginInvoke(new Action(() =>
+                {
+                    var logGraph = EnsureLogGraphOpen();
+                    logGraph.LoadCsv(filePath);
+                }));
             };
 
             // LogGraph에 파일 로드 요청 (종류 포함)
             AppEvents.ShowLogGraphRequestedEx += (kind, filePath) =>
             {
-                var logGraph = FindOpenForm<LogGraphForm>();
-                if (logGraph == null) return;
-
-                var tgt = kind == AppEvents.LogDataKind.Accel
-                    ? LogGraphForm.LogKind.Accel
-                    : LogGraphForm.LogKind.Torque;
-                logGraph.LoadCsv(filePath, tgt);
+                this.BeginInvoke(new Action(() =>
+                {
+                    var logGraph = EnsureLogGraphOpen();
+                    var tgt = kind == AppEvents.LogDataKind.Accel
+                        ? LogGraphForm.LogKind.Accel
+                        : LogGraphForm.LogKind.Torque;
+                    logGraph.LoadCsv(filePath, tgt);
+                }));
             };
         }
 
@@ -610,6 +615,15 @@ namespace PHM_Project_DockPanel
         /// <summary>DockPanel에서 현재 열려 있는 특정 타입의 창을 반환합니다.</summary>
         private T FindOpenForm<T>() where T : DockContent
             => _dockPanel.Contents.OfType<T>().FirstOrDefault(f => !f.IsDisposed);
+
+        private LogGraphForm EnsureLogGraphOpen()
+        {
+            var existing = FindOpenForm<LogGraphForm>();
+            if (existing != null) { existing.Activate(); return existing; }
+            _logGraph = _logGraph ?? new LogGraphForm();
+            _logGraph.Show(_dockPanel, DockState.Document);
+            return _logGraph;
+        }
 
         /// <summary>윈도우 사각형이 어느 화면과도 50×50 이상 겹치지 않으면 false.</summary>
         private static bool IsOnAnyScreen(Rectangle rect)

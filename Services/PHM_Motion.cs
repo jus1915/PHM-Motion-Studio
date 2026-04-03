@@ -285,6 +285,8 @@ namespace PHM_Project_DockPanel.Services
                 if (startedTorqueRun)
                     stopTasks.Add(Task.Run(() => { try { _torqueLogger.Stop(); } catch { } }));
 
+                string ajinOutputPath = startedAjinRun ? _ajinLogger?.OutputPath : null;
+
                 if (startedAjinRun)
                     stopTasks.Add(Task.Run(() => { try { _ajinLogger.Stop(); } catch { } }));
 
@@ -292,6 +294,10 @@ namespace PHM_Project_DockPanel.Services
                     stopTasks.Add(Task.Run(() => { try { _accelLogger.Stop(); } catch { } }));
 
                 if (stopTasks.Count > 0) await Task.WhenAll(stopTasks);
+
+                // 로깅 완료 → Log Graph Viewer에 파일 전달
+                if (!string.IsNullOrEmpty(ajinOutputPath) && File.Exists(ajinOutputPath))
+                    AppEvents.RaiseShowLogGraph(AppEvents.LogDataKind.Torque, ajinOutputPath);
             }
 
             return true;

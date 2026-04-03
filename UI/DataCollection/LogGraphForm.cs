@@ -88,11 +88,27 @@ namespace PHM_Project_DockPanel.Windows
                 FlowDirection = FlowDirection.LeftToRight
             };
 
+            var btnOpen = new Button { Text = "파일 열기...", Width = 90, Margin = new Padding(0, 0, 8, 0) };
+            btnOpen.Click += (s, e) =>
+            {
+                using (var dlg = new OpenFileDialog
+                {
+                    Title = "CSV 로그 파일 선택",
+                    Filter = "CSV 파일 (*.csv)|*.csv|모든 파일 (*.*)|*.*",
+                    InitialDirectory = @"C:\Data\PHM_Logs\Signals"
+                })
+                {
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                        LoadCsv(dlg.FileName);
+                }
+            };
+
             _btnFeedback = new Button { Text = "Feedback View", Enabled = false };
             _btnResidual = new Button { Text = "Residual View", Enabled = false };
             _btnFeedback.Click += (s, e) => { if (_kind == LogKind.Torque) DrawFeedbackView(); };
             _btnResidual.Click += (s, e) => { if (_kind == LogKind.Torque) DrawResidualView(); };
 
+            _buttonPanel.Controls.Add(btnOpen);
             _buttonPanel.Controls.Add(_btnFeedback);
             _buttonPanel.Controls.Add(_btnResidual);
             Controls.Add(_buttonPanel);
@@ -429,15 +445,27 @@ namespace PHM_Project_DockPanel.Windows
                 (lower.Any(h => h.Contains("cmdpos")) || lower.Any(h => h.Contains("commandpos"))) &&
                 (lower.Any(h => h.Contains("fbpos")) || lower.Any(h => h.Contains("feedbackpos")));
 
+            // AjinMotion / Simulation CSV: Timestamp_ms, Ax0_Pos(mm), Ax0_Vel(mm/s), Ax0_Trq(%)
+            bool looksAjinMotion =
+                lower.Any(h => h == "timestamp_ms") &&
+                lower.Any(h => h.Contains("_pos")) &&
+                lower.Any(h => h.Contains("_vel")) &&
+                lower.Any(h => h.Contains("_trq"));
+
             bool looksAccel =
                 lower.Contains("time_s") && lower.Contains("x") && lower.Contains("y") && lower.Contains("z");
 
             // 강제 타입 우선
-            if (forceKind == LogKind.Torque && TryParseTorqueCsv(lines, headers)) { _kind = LogKind.Torque; return true; }
+            if (forceKind == LogKind.Torque)
+            {
+                if (looksTorque && TryParseTorqueCsv(lines, headers)) { _kind = LogKind.Torque; return true; }
+                if (looksAjinMotion && TryParseAjinMotionCsv(lines, headers)) { _kind = LogKind.Torque; return true; }
+            }
             if (forceKind == LogKind.Accel && TryParseAccelCsv(lines, headers)) { _kind = LogKind.Accel; return true; }
 
             // 자동 탐지
             if (looksTorque && TryParseTorqueCsv(lines, headers)) { _kind = LogKind.Torque; return true; }
+            if (looksAjinMotion && TryParseAjinMotionCsv(lines, headers)) { _kind = LogKind.Torque; return true; }
             if (looksAccel && TryParseAccelCsv(lines, headers)) { _kind = LogKind.Accel; return true; }
 
             _kind = LogKind.Unknown;
@@ -445,27 +473,7 @@ namespace PHM_Project_DockPanel.Windows
         }
 
         private bool TryDetectAndParse(string filePath)
-        {
-            string[] lines;
-            try { lines = File.ReadAllLines(filePath); } catch { return false; }
-            if (lines.Length < 2) return false;
-
-            var headers = lines[0].Split(',').Select(h => h.Trim()).ToArray();
-            var lower = headers.Select(h => h.ToLowerInvariant()).ToArray();
-
-            bool looksTorque =
-                lower.Any(h => h.Contains("cycle") || h == "time" || h == "time_ms") &&
-                (lower.Any(h => h.Contains("cmdpos")) || lower.Any(h => h.Contains("commandpos"))) &&
-                (lower.Any(h => h.Contains("fbpos")) || lower.Any(h => h.Contains("feedbackpos")));
-
-            bool looksAccel = lower.Contains("time_s") && lower.Contains("x") && lower.Contains("y") && lower.Contains("z");
-
-            if (looksTorque && TryParseTorqueCsv(lines, headers)) { _kind = LogKind.Torque; return true; }
-            if (looksAccel && TryParseAccelCsv(lines, headers)) { _kind = LogKind.Accel; return true; }
-
-            _kind = LogKind.Unknown;
-            return false;
-        }
+            => TryDetectAndParse(filePath, null);
 
         // ======================= Torque =======================
         private bool TryParseTorqueCsv(string[] lines, string[] headers)
@@ -547,6 +555,59 @@ namespace PHM_Project_DockPanel.Windows
                 double sp = AppState.GetPeriodForColumn("torque");
                 for (int i = 0; i < _time.Count; i++)
                     _time[i] = (_time[i] - t0) + sp;
+            }
+
+            return _time.Count > 1;
+        }
+
+        /// <summary>
+        /// AjinCsvLogger / SimulationLogger 포맷 파서.
+        /// 헤더: Timestamp_ms, Ax0_Pos(mm), Ax0_Vel(mm/s), Ax0_Trq(%)
+        /// Cmd 컬럼이 없으므로 cmd = feedback 으로 채워 Residual=0.
+        /// </summary>
+        private bool TryParseAjinMotionCsv(string[] lines, string[] headers)
+        {
+            _time    = new List<double>();
+            _pos     = new List<double>();
+            _vel     = new List<double>();
+            _trq     = new List<double>();
+            _cmdPos  = new List<double>();
+            _cmdVel  = new List<double>();
+            _cmdTrq  = new List<double>();
+
+            var lower = headers.Select(h => h.ToLowerInvariant()).ToArray();
+
+            int timeIdx = Array.FindIndex(lower, h => h == "timestamp_ms");
+            int posIdx  = Array.FindIndex(lower, h => h.Contains("_pos"));
+            int velIdx  = Array.FindIndex(lower, h => h.Contains("_vel"));
+            int trqIdx  = Array.FindIndex(lower, h => h.Contains("_trq"));
+
+            if (timeIdx < 0 || posIdx < 0 || velIdx < 0 || trqIdx < 0) return false;
+
+            for (int i = 1; i < lines.Length; i++)
+            {
+                if (string.IsNullOrWhiteSpace(lines[i])) continue;
+                var cols = lines[i].Split(',');
+                int maxIdx = Math.Max(Math.Max(timeIdx, posIdx), Math.Max(velIdx, trqIdx));
+                if (cols.Length <= maxIdx) continue;
+
+                if (double.TryParse(cols[timeIdx], NumberStyles.Any, CultureInfo.InvariantCulture, out double t) &&
+                    double.TryParse(cols[posIdx],  NumberStyles.Any, CultureInfo.InvariantCulture, out double p) &&
+                    double.TryParse(cols[velIdx],  NumberStyles.Any, CultureInfo.InvariantCulture, out double v) &&
+                    double.TryParse(cols[trqIdx],  NumberStyles.Any, CultureInfo.InvariantCulture, out double tq))
+                {
+                    _time.Add(t / 1000.0);  // ms → s
+                    _pos.Add(p);  _vel.Add(v);  _trq.Add(tq);
+                    _cmdPos.Add(p); _cmdVel.Add(v); _cmdTrq.Add(tq); // cmd = fb → Residual = 0
+                }
+            }
+
+            // 시간축 보정: 첫 샘플 = 0
+            if (_time.Count > 0)
+            {
+                double t0 = _time[0];
+                for (int i = 0; i < _time.Count; i++)
+                    _time[i] -= t0;
             }
 
             return _time.Count > 1;
