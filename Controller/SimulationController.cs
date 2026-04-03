@@ -32,13 +32,10 @@ namespace PHM_Project_DockPanel.Controller
 
         // ── IMotionController 구현 ─────────────────────────────────────
 
-        public void SetAxisConfigs(AxisConfig[] configs)
-        {
-            if (configs == null || configs.Length == 0) return;
-            if (configs.Length == _axisCount) return;
-            CancelAllMotions();
-            InitArrays(configs.Length);
-        }
+        /// <summary>사용자가 선택한 축 수는 변경하지 않음. 설정값만 저장합니다.</summary>
+        public void SetAxisConfigs(AxisConfig[] configs) { }
+
+        public int GetAxisCount() => _axisCount;
 
         public void Connect()
         {
@@ -68,6 +65,14 @@ namespace PHM_Project_DockPanel.Controller
                     status.AxesStatus[i].AmpAlarm     = false;
                     status.AxesStatus[i].ServoOffline = false;
                 }
+
+                // CoreMotionStatus는 N개 이상의 AxisStatus를 기본 할당함.
+                // 우리 축 수를 넘는 항목은 ServoOffline=true로 마킹해야
+                // AxisInfoForm의 Count(a => !a.ServoOffline) 로직이 정확한 축 수를 반환함.
+                int totalSlots = 0;
+                foreach (var _ in status.AxesStatus) totalSlots++;
+                for (int i = _axisCount; i < totalSlots; i++)
+                    status.AxesStatus[i].ServoOffline = true;
             }
             return status;
         }

@@ -25,6 +25,9 @@ namespace PHM_Project_DockPanel.Controller
         /// <summary>Ajin 제어기로 캐스팅하여 반환. Ajin이 아니면 null.</summary>
         public AjinController AsAjin => _controller as AjinController;
 
+        /// <summary>시뮬레이션 제어기로 캐스팅하여 반환. 시뮬레이션이 아니면 null.</summary>
+        public SimulationController AsSimulation => _controller as SimulationController;
+
         public bool PosIsAlreadyMm
         {
             get
