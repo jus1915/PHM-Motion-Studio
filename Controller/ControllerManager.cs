@@ -32,8 +32,9 @@ namespace PHM_Project_DockPanel.Controller
         {
             get
             {
-                // Ajin: 이미 mm
+                // Ajin/Simulation: 이미 mm
                 if (IsAjin) return true;
+                if (_controller is SimulationController) return true;
 
                 // WMX3: pulse → 변환 필요
                 if (IsWmx3) return false;
