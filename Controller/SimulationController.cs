@@ -117,6 +117,13 @@ namespace PHM_Project_DockPanel.Controller
 
         // ── 내부 구현 ──────────────────────────────────────────────────
 
+        /// <summary>현재 축의 시뮬레이션 속도(mm/s)를 반환합니다.</summary>
+        public double GetVelocity(int axis)
+        {
+            if (axis < 0 || axis >= _axisCount) return 0.0;
+            lock (_stateLock) { return _velocities[axis]; }
+        }
+
         /// <summary>현재 축의 시뮬레이션 토크(%)를 반환합니다. AjinCsvLogger 주입에 사용.</summary>
         public double GetTorque(int axis)
         {
@@ -179,7 +186,6 @@ namespace PHM_Project_DockPanel.Controller
             const int IntervalMs = 20;
             const double IntervalSec = IntervalMs * 0.001;
             double elapsed = 0;
-            double prevTraveled = 0;
 
             while (elapsed < totalTime)
             {
@@ -189,9 +195,8 @@ namespace PHM_Project_DockPanel.Controller
 
                 double t = Math.Min(elapsed, totalTime);
                 double traveled = CalcPosition(t, distance, vel, acc, dec);
-                double curVel = sign * (traveled - prevTraveled) / IntervalSec; // mm/s
-                double torque = CalcTorque(t, distance, vel, acc, dec, curVel);
-                prevTraveled = traveled;
+                double curVel   = sign * CalcVelocity(t, distance, vel, acc, dec); // 해석적, 폴링 주기 무관
+                double torque   = CalcTorque(t, distance, vel, acc, dec);
 
                 lock (_stateLock)
                 {
@@ -251,6 +256,38 @@ namespace PHM_Project_DockPanel.Controller
             }
         }
 
+        /// <summary>트라페조이드/삼각 프로파일에서 시간 t 의 순시 속도(mm/s)를 해석적으로 반환합니다.</summary>
+        private static double CalcVelocity(double t, double distance,
+                                            double vel, double acc, double dec)
+        {
+            double da = 0.5 * vel * vel / acc;
+            double dd = 0.5 * vel * vel / dec;
+
+            if (da + dd >= distance)
+            {
+                // 삼각형 프로파일
+                double vpeak = Math.Sqrt(2.0 * distance / (1.0 / acc + 1.0 / dec));
+                double ta    = vpeak / acc;
+                if (t <= ta)
+                    return acc * t;
+                double t2 = t - ta;
+                return Math.Max(0.0, vpeak - dec * t2);
+            }
+            else
+            {
+                // 트라페조이드 프로파일
+                double ta = vel / acc;
+                double dc = distance - da - dd;
+                double tc = dc / vel;
+                if (t <= ta)
+                    return acc * t;
+                if (t <= ta + tc)
+                    return vel;
+                double t3 = t - ta - tc;
+                return Math.Max(0.0, vel - dec * t3);
+            }
+        }
+
         private static double CalcTotalTime(double distance, double vel, double acc, double dec)
         {
             if (distance <= 0 || vel <= 0 || acc <= 0 || dec <= 0) return 0;
@@ -267,7 +304,7 @@ namespace PHM_Project_DockPanel.Controller
         /// 가속 구간: 관성+마찰, 크루즈: 마찰만, 감속: 제동+마찰
         /// </summary>
         private double CalcTorque(double t, double distance,
-                                   double vel, double acc, double dec, double curVelMmS)
+                                   double vel, double acc, double dec)
         {
             double da = 0.5 * vel * vel / acc;
             double dd = 0.5 * vel * vel / dec;
