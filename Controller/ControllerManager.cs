@@ -71,7 +71,7 @@ namespace PHM_Project_DockPanel.Controller
 
         public CoreMotionStatus GetStatus()
         {
-            if (_controller == null || IsSimulationMode)
+            if (_controller == null)
                 return new CoreMotionStatus();
             return _controller.GetStatus();
         }
