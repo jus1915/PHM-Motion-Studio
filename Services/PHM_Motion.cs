@@ -206,19 +206,6 @@ namespace PHM_Project_DockPanel.Services
                     EstimateMotionTime(Math.Abs(targetPos[i] - startPos[i]), vmax[i], acc[i], dec[i]));
             int moveTimeMs = (int)Math.Round(maxMoveSec * 1000.0);
 
-            // === 기존 CSV/토크 로깅 준비 ===
-            string folderName = $"{DateTime.Now:yyyyMMdd}_Axis{active[0]}";
-            string baseRoot = @"C:\Data\PHM_Logs\Signals";
-            string rootDir = Path.Combine(baseRoot, folderName);
-            string torqueDir = Path.Combine(rootDir, "Torque");
-            string accelDir = Path.Combine(rootDir, "Accel");
-            Directory.CreateDirectory(torqueDir);
-            Directory.CreateDirectory(accelDir);
-
-            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-            string baseName = $"{timestamp}_Axis{active[0]}_T{moveTimeMs}ms";
-            string torqueCsvPath = Path.Combine(torqueDir, baseName + "_Torque.csv");
-
             bool startedAccelCsvRun = false;
             bool startedTorqueRun = false;
             bool startedAjinRun = false;
@@ -227,6 +214,18 @@ namespace PHM_Project_DockPanel.Services
             {
                 if (anyLog)
                 {
+                    // === 기존 CSV/토크 로깅 준비 (로깅 활성화 시에만) ===
+                    string folderName = $"{DateTime.Now:yyyyMMdd}_Axis{active[0]}";
+                    string baseRoot = @"C:\Data\PHM_Logs\Signals";
+                    string rootDir = Path.Combine(baseRoot, folderName);
+                    string torqueDir = Path.Combine(rootDir, "Torque");
+                    string accelDir = Path.Combine(rootDir, "Accel");
+                    Directory.CreateDirectory(torqueDir);
+                    Directory.CreateDirectory(accelDir);
+
+                    string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                    string baseName = $"{timestamp}_Axis{active[0]}_T{moveTimeMs}ms";
+                    string torqueCsvPath = Path.Combine(torqueDir, baseName + "_Torque.csv");
                     bool isAjin = _controller.IsAjin;
 
                     // ── Ajin: 폴링 로거 ────────────────────────────────────
