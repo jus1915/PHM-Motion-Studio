@@ -227,9 +227,10 @@ namespace PHM_Project_DockPanel.Services
                     string baseName = $"{timestamp}_Axis{active[0]}_T{moveTimeMs}ms";
                     string torqueCsvPath = Path.Combine(torqueDir, baseName + "_Torque.csv");
                     bool isAjin = _controller.IsAjin;
+                    bool usePollingLogger = isAjin || _controller.IsSimulationMode;
 
-                    // ── Ajin: 폴링 로거 ────────────────────────────────────
-                    if (logTorque && isAjin && _ajinLogger != null)
+                    // ── Ajin / Simulation: 폴링 로거 ────────────────────────
+                    if (logTorque && usePollingLogger && _ajinLogger != null)
                     {
                         try
                         {
@@ -239,7 +240,7 @@ namespace PHM_Project_DockPanel.Services
                     }
 
                     // ── WMX3: SDK 토크 로거 ───────────────────────────────
-                    if (logTorque && !isAjin)
+                    if (logTorque && !usePollingLogger)
                     {
                         if (_torqueLogger == null)
                             _torqueLogger = new WmxTorqueLogger(new Log(), 0, msg => AppEvents.RaiseLog(msg));

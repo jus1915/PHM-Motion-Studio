@@ -15,10 +15,13 @@ namespace PHM_Project_DockPanel.Controller
     {
         private int _axisCount;
         private double[] _positions;
+        private double[] _velocities;   // mm/s, 토크 계산용
+        private double[] _torques;      // %, 폴링 로거용
         private bool[] _servoOn;
         private OperationState[] _opStates;
         private CancellationTokenSource[] _motionCts;
         private readonly object _stateLock = new object();
+        private readonly Random _rng = new Random();
 
         public bool IsConnected { get; private set; }
         public bool IsSimulationMode => true;
@@ -114,13 +117,22 @@ namespace PHM_Project_DockPanel.Controller
 
         // ── 내부 구현 ──────────────────────────────────────────────────
 
+        /// <summary>현재 축의 시뮬레이션 토크(%)를 반환합니다. AjinCsvLogger 주입에 사용.</summary>
+        public double GetTorque(int axis)
+        {
+            if (axis < 0 || axis >= _axisCount) return 0.0;
+            lock (_stateLock) { return _torques[axis]; }
+        }
+
         private void InitArrays(int count)
         {
-            _axisCount = count;
-            _positions = new double[count];
-            _servoOn   = new bool[count];
-            _opStates  = new OperationState[count]; // 기본값: Idle (= 0)
-            _motionCts = new CancellationTokenSource[count];
+            _axisCount  = count;
+            _positions  = new double[count];
+            _velocities = new double[count];
+            _torques    = new double[count];
+            _servoOn    = new bool[count];
+            _opStates   = new OperationState[count]; // 기본값: Idle (= 0)
+            _motionCts  = new CancellationTokenSource[count];
         }
 
         private void StartMotion(int axis, double start, double target,
@@ -165,22 +177,36 @@ namespace PHM_Project_DockPanel.Controller
             }
 
             const int IntervalMs = 20;
+            const double IntervalSec = IntervalMs * 0.001;
             double elapsed = 0;
+            double prevTraveled = 0;
 
             while (elapsed < totalTime)
             {
                 ct.ThrowIfCancellationRequested();
                 await Task.Delay(IntervalMs, ct);
-                elapsed += IntervalMs * 0.001;
+                elapsed += IntervalSec;
 
-                double traveled = CalcPosition(Math.Min(elapsed, totalTime), distance, vel, acc, dec);
+                double t = Math.Min(elapsed, totalTime);
+                double traveled = CalcPosition(t, distance, vel, acc, dec);
+                double curVel = sign * (traveled - prevTraveled) / IntervalSec; // mm/s
+                double torque = CalcTorque(t, distance, vel, acc, dec, curVel);
+                prevTraveled = traveled;
+
                 lock (_stateLock)
                 {
-                    _positions[axis] = start + sign * traveled;
+                    _positions[axis]  = start + sign * traveled;
+                    _velocities[axis] = curVel;
+                    _torques[axis]    = torque;
                 }
             }
 
-            lock (_stateLock) { _positions[axis] = target; }
+            lock (_stateLock)
+            {
+                _positions[axis]  = target;
+                _velocities[axis] = 0;
+                _torques[axis]    = 0;
+            }
         }
 
         /// <summary>
@@ -234,6 +260,45 @@ namespace PHM_Project_DockPanel.Controller
                 return vel / acc + (distance - da - dd) / vel + vel / dec;
             double vpeak = Math.Sqrt(2.0 * distance / (1.0 / acc + 1.0 / dec));
             return vpeak / acc + vpeak / dec;
+        }
+
+        /// <summary>
+        /// 트라페조이드 프로파일 기반 가상 토크(%) 계산.
+        /// 가속 구간: 관성+마찰, 크루즈: 마찰만, 감속: 제동+마찰
+        /// </summary>
+        private double CalcTorque(double t, double distance,
+                                   double vel, double acc, double dec, double curVelMmS)
+        {
+            double da = 0.5 * vel * vel / acc;
+            double dd = 0.5 * vel * vel / dec;
+            double ta, tc;
+
+            if (da + dd >= distance)
+            {
+                double vpeak = Math.Sqrt(2.0 * distance / (1.0 / acc + 1.0 / dec));
+                ta = vpeak / acc;
+                tc = 0;
+            }
+            else
+            {
+                ta = vel / acc;
+                tc = (distance - da - dd) / vel;
+            }
+
+            const double InertiaFactor  = 0.40;   // 관성 성분 최대 40%
+            const double FrictionFactor = 0.08;   // 마찰 성분 8%
+            const double NoiseFactor    = 0.03;   // 노이즈 ±3%
+            double noise = (_rng.NextDouble() * 2 - 1) * NoiseFactor;
+
+            double torque;
+            if (t <= ta)
+                torque = InertiaFactor * (t / ta) + FrictionFactor + noise;       // 가속
+            else if (t <= ta + tc)
+                torque = FrictionFactor + noise;                                    // 크루즈
+            else
+                torque = -InertiaFactor * ((t - ta - tc) / (vel / dec)) + FrictionFactor + noise; // 감속
+
+            return Math.Max(-1.0, Math.Min(1.0, torque)) * 100.0;  // −100% ~ +100%
         }
 
         private void CancelAllMotions()

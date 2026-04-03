@@ -142,6 +142,18 @@ namespace PHM_Project_DockPanel
                 _motion.SetAjinLogger(ajinLogger);
                 AppEvents.RaiseLog("[Ajin] AjinCsvLogger 주입 완료");
             }
+
+            // 시뮬레이션: 가상 토크 데이터 폴링 로거 주입
+            var sim = _controller.AsSimulation;
+            if (sim != null)
+            {
+                var simLogger = new AjinCsvLogger(
+                    getPos: ax => _controller.GetStatus().AxesStatus[ax].ActualPos,
+                    getTorque: ax => sim.GetTorque(ax),
+                    log: msg => AppEvents.RaiseLog(msg));
+                _motion.SetAjinLogger(simLogger);
+                AppEvents.RaiseLog("[Sim] 가상 토크 로거 주입 완료");
+            }
         }
 
         private void InitDaq()
