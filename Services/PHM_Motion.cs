@@ -215,7 +215,10 @@ namespace PHM_Project_DockPanel.Services
                 if (anyLog)
                 {
                     // === 기존 CSV/토크 로깅 준비 (로깅 활성화 시에만) ===
-                    string folderName = $"{DateTime.Now:yyyyMMdd}_Axis{active[0]}";
+                    string axisTag = active.Count == 1
+                        ? $"Axis{active[0]}"
+                        : $"Axes{string.Join("-", active)}";
+                    string folderName = $"{DateTime.Now:yyyyMMdd}_{axisTag}";
                     string baseRoot = @"C:\Data\PHM_Logs\Signals";
                     string rootDir = Path.Combine(baseRoot, folderName);
                     string torqueDir = Path.Combine(rootDir, "Torque");
@@ -224,7 +227,7 @@ namespace PHM_Project_DockPanel.Services
                     Directory.CreateDirectory(accelDir);
 
                     string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-                    string baseName = $"{timestamp}_Axis{active[0]}_T{moveTimeMs}ms";
+                    string baseName = $"{timestamp}_{axisTag}_T{moveTimeMs}ms";
                     string torqueCsvPath = Path.Combine(torqueDir, baseName + "_Torque.csv");
                     bool isAjin = _controller.IsAjin;
                     bool usePollingLogger = isAjin || _controller.IsSimulationMode;

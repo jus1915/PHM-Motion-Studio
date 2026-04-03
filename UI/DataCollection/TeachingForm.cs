@@ -48,6 +48,12 @@ namespace PHM_Project_DockPanel.Windows
             Text = "Teaching";
             TabText = "Teaching";
             InitializeTeachingPanel();
+
+            // 폼이 보일 때마다 실제 축 수로 컬럼 갱신 (Connect/Disconnect 이후 반영)
+            this.VisibleChanged += (s, e) =>
+            {
+                if (this.Visible) EnsureDynamicTargetColumns();
+            };
         }
 
         private void InitializeTeachingPanel()
@@ -264,10 +270,17 @@ namespace PHM_Project_DockPanel.Windows
             Controls.Add(main);
         }
 
+        /// <summary>연결 후 실제 축 수. 연결 전이면 AxisConfigs 길이로 폴백.</summary>
+        private int GetCurrentAxisCount()
+        {
+            if (AxisConfig.AxisCount > 0) return AxisConfig.AxisCount;
+            return _motion?.AxisConfigs?.Length ?? 0;
+        }
+
         // ===== 동적 다축 타겟 컬럼 보장 =====
         private void EnsureDynamicTargetColumns()
         {
-            int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+            int axisCount = GetCurrentAxisCount();
             if (axisCount <= 0) { EnsureWaitColumn(); return; }
 
             // Wait 컬럼은 절대 제거하지 않음
@@ -419,7 +432,7 @@ namespace PHM_Project_DockPanel.Windows
                             {
                                 var axesList = new List<int>();
                                 var valsList = new List<double>();
-                                int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+                                int axisCount = GetCurrentAxisCount();
 
                                 for (int ax = 0; ax < axisCount; ax++)
                                 {
@@ -438,7 +451,7 @@ namespace PHM_Project_DockPanel.Windows
                             }
                             else
                             {
-                                if (step.Axis < 0 || step.Axis >= (_motion.AxisConfigs?.Length ?? 0))
+                                if (step.Axis < 0 || step.Axis >= GetCurrentAxisCount())
                                 {
                                     MessageBox.Show($"Axis {step.Axis} 인덱스가 잘못되었습니다.", "입력 오류",
                                                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -497,7 +510,7 @@ namespace PHM_Project_DockPanel.Windows
 
             plan = new TeachingPlan { Loop = _loopCheck.Checked, RepeatCount = (int)_repeatUpDown.Value };
 
-            int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+            int axisCount = GetCurrentAxisCount();
 
             foreach (DataGridViewRow row in _teachingGrid.Rows)
             {
@@ -671,7 +684,7 @@ namespace PHM_Project_DockPanel.Windows
 
             if (plan?.Steps == null || plan.Steps.Count == 0) return;
 
-            int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+            int axisCount = GetCurrentAxisCount();
 
             foreach (var s in plan.Steps)
             {
