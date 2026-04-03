@@ -40,7 +40,8 @@ namespace PHM_Project_DockPanel.Services
                     var status = _controller.GetStatus();
                     if (status != null)
                     {
-                        UpdateUI(status);
+                        try { UpdateUI(status); }
+                        catch (Exception ex) { AppEvents.RaiseLog($"[모니터 오류] {ex.Message}"); }
                     }
                     await Task.Delay(200);
                 }
@@ -63,9 +64,10 @@ namespace PHM_Project_DockPanel.Services
             for (int i = 0; i < _axisCount; i++)
             {
                 double rawPos = status.AxesStatus[i].ActualPos;
+                double pitch = (i < (_configs?.Length ?? 0)) ? (_configs[i]?.PitchMmPerRev ?? 30.0) : 30.0;
                 double posMm = posAlreadyMm
                     ? rawPos
-                    : UnitConverter.EncoderToMm(rawPos, _configs[i]?.PitchMmPerRev ?? 30.0);
+                    : UnitConverter.EncoderToMm(rawPos, pitch);
 
                 bool servoOn = status.AxesStatus[i].ServoOn;
                 bool alarm = status.AxesStatus[i].AmpAlarm;

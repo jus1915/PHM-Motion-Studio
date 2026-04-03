@@ -84,23 +84,21 @@ namespace PHM_Project_DockPanel.Services
 
         public double GetAxisCurrentPos(int axisIndex)
         {
-            if (_axisConfigs == null || axisIndex < 0 || axisIndex >= _axisConfigs.Length)
+            if (axisIndex < 0)
                 throw new IndexOutOfRangeException("축 인덱스가 유효하지 않습니다.");
 
             var status = _controller.GetStatus();
             double rawPos = status.AxesStatus[axisIndex].ActualPos;
 
-            // ✅ Ajin이면 그대로 사용 (이미 unit/mm)
-            if (_controller.AsAjin != null)
+            // ✅ Ajin/Simulation이면 그대로 사용 (이미 mm 단위)
+            if (_controller.PosIsAlreadyMm)
             {
                 return rawPos;
             }
 
             // ✅ WMX 등은 encoder → mm 변환
-            return UnitConverter.EncoderToMm(
-                rawPos,
-                _axisConfigs[axisIndex].PitchMmPerRev
-            );
+            var cfg = (_axisConfigs != null && axisIndex < _axisConfigs.Length) ? _axisConfigs[axisIndex] : new AxisConfig();
+            return UnitConverter.EncoderToMm(rawPos, cfg.PitchMmPerRev);
         }
 
         public bool IsWithinRange(double pos, double max)
@@ -162,10 +160,10 @@ namespace PHM_Project_DockPanel.Services
 
             foreach (var (ax, idx) in axes.Distinct().OrderBy(a => a).Select((a, i) => (a, i)))
             {
-                if (_axisConfigs == null || ax < 0 || ax >= _axisConfigs.Length) continue;
+                if (ax < 0) continue;
                 if (!(status?.AxesStatus[ax].ServoOn ?? false)) continue;
 
-                var cfg = _axisConfigs[ax];
+                var cfg = (_axisConfigs != null && ax < _axisConfigs.Length) ? _axisConfigs[ax] : new AxisConfig();
                 double sp = GetAxisCurrentPos(ax);
                 double tp = isAbs ? values[idx] : sp + values[idx];
                 if (!IsWithinRange(tp, cfg.PositionMax)) continue;
