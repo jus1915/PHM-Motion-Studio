@@ -84,23 +84,21 @@ namespace PHM_Project_DockPanel.Services
 
         public double GetAxisCurrentPos(int axisIndex)
         {
-            if (_axisConfigs == null || axisIndex < 0 || axisIndex >= _axisConfigs.Length)
+            if (axisIndex < 0)
                 throw new IndexOutOfRangeException("축 인덱스가 유효하지 않습니다.");
 
             var status = _controller.GetStatus();
             double rawPos = status.AxesStatus[axisIndex].ActualPos;
 
-            // ✅ Ajin이면 그대로 사용 (이미 unit/mm)
-            if (_controller.AsAjin != null)
+            // ✅ Ajin/Simulation이면 그대로 사용 (이미 mm 단위)
+            if (_controller.PosIsAlreadyMm)
             {
                 return rawPos;
             }
 
             // ✅ WMX 등은 encoder → mm 변환
-            return UnitConverter.EncoderToMm(
-                rawPos,
-                _axisConfigs[axisIndex].PitchMmPerRev
-            );
+            var cfg = (_axisConfigs != null && axisIndex < _axisConfigs.Length) ? _axisConfigs[axisIndex] : new AxisConfig();
+            return UnitConverter.EncoderToMm(rawPos, cfg.PitchMmPerRev);
         }
 
         public bool IsWithinRange(double pos, double max)
@@ -162,10 +160,10 @@ namespace PHM_Project_DockPanel.Services
 
             foreach (var (ax, idx) in axes.Distinct().OrderBy(a => a).Select((a, i) => (a, i)))
             {
-                if (_axisConfigs == null || ax < 0 || ax >= _axisConfigs.Length) continue;
+                if (ax < 0) continue;
                 if (!(status?.AxesStatus[ax].ServoOn ?? false)) continue;
 
-                var cfg = _axisConfigs[ax];
+                var cfg = (_axisConfigs != null && ax < _axisConfigs.Length) ? _axisConfigs[ax] : new AxisConfig();
                 double sp = GetAxisCurrentPos(ax);
                 double tp = isAbs ? values[idx] : sp + values[idx];
                 if (!IsWithinRange(tp, cfg.PositionMax)) continue;
@@ -208,19 +206,6 @@ namespace PHM_Project_DockPanel.Services
                     EstimateMotionTime(Math.Abs(targetPos[i] - startPos[i]), vmax[i], acc[i], dec[i]));
             int moveTimeMs = (int)Math.Round(maxMoveSec * 1000.0);
 
-            // === 기존 CSV/토크 로깅 준비 ===
-            string folderName = $"{DateTime.Now:yyyyMMdd}_Axis{active[0]}";
-            string baseRoot = @"C:\Data\PHM_Logs\Signals";
-            string rootDir = Path.Combine(baseRoot, folderName);
-            string torqueDir = Path.Combine(rootDir, "Torque");
-            string accelDir = Path.Combine(rootDir, "Accel");
-            Directory.CreateDirectory(torqueDir);
-            Directory.CreateDirectory(accelDir);
-
-            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-            string baseName = $"{timestamp}_Axis{active[0]}_T{moveTimeMs}ms";
-            string torqueCsvPath = Path.Combine(torqueDir, baseName + "_Torque.csv");
-
             bool startedAccelCsvRun = false;
             bool startedTorqueRun = false;
             bool startedAjinRun = false;
@@ -229,10 +214,23 @@ namespace PHM_Project_DockPanel.Services
             {
                 if (anyLog)
                 {
-                    bool isAjin = _controller.IsAjin;
+                    // === 기존 CSV/토크 로깅 준비 (로깅 활성화 시에만) ===
+                    string folderName = $"{DateTime.Now:yyyyMMdd}_Axis{active[0]}";
+                    string baseRoot = @"C:\Data\PHM_Logs\Signals";
+                    string rootDir = Path.Combine(baseRoot, folderName);
+                    string torqueDir = Path.Combine(rootDir, "Torque");
+                    string accelDir = Path.Combine(rootDir, "Accel");
+                    Directory.CreateDirectory(torqueDir);
+                    Directory.CreateDirectory(accelDir);
 
-                    // ── Ajin: 폴링 로거 ────────────────────────────────────
-                    if (logTorque && isAjin && _ajinLogger != null)
+                    string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                    string baseName = $"{timestamp}_Axis{active[0]}_T{moveTimeMs}ms";
+                    string torqueCsvPath = Path.Combine(torqueDir, baseName + "_Torque.csv");
+                    bool isAjin = _controller.IsAjin;
+                    bool usePollingLogger = isAjin || _controller.IsSimulationMode;
+
+                    // ── Ajin / Simulation: 폴링 로거 ────────────────────────
+                    if (logTorque && usePollingLogger && _ajinLogger != null)
                     {
                         try
                         {
@@ -242,7 +240,7 @@ namespace PHM_Project_DockPanel.Services
                     }
 
                     // ── WMX3: SDK 토크 로거 ───────────────────────────────
-                    if (logTorque && !isAjin)
+                    if (logTorque && !usePollingLogger)
                     {
                         if (_torqueLogger == null)
                             _torqueLogger = new WmxTorqueLogger(new Log(), 0, msg => AppEvents.RaiseLog(msg));
@@ -287,6 +285,8 @@ namespace PHM_Project_DockPanel.Services
                 if (startedTorqueRun)
                     stopTasks.Add(Task.Run(() => { try { _torqueLogger.Stop(); } catch { } }));
 
+                string ajinOutputPath = startedAjinRun ? _ajinLogger?.OutputPath : null;
+
                 if (startedAjinRun)
                     stopTasks.Add(Task.Run(() => { try { _ajinLogger.Stop(); } catch { } }));
 
@@ -294,6 +294,10 @@ namespace PHM_Project_DockPanel.Services
                     stopTasks.Add(Task.Run(() => { try { _accelLogger.Stop(); } catch { } }));
 
                 if (stopTasks.Count > 0) await Task.WhenAll(stopTasks);
+
+                // 로깅 완료 → Log Graph Viewer에 파일 전달
+                if (!string.IsNullOrEmpty(ajinOutputPath) && File.Exists(ajinOutputPath))
+                    AppEvents.RaiseShowLogGraph(AppEvents.LogDataKind.Torque, ajinOutputPath);
             }
 
             return true;

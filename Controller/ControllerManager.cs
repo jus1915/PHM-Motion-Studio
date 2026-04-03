@@ -25,12 +25,16 @@ namespace PHM_Project_DockPanel.Controller
         /// <summary>Ajin 제어기로 캐스팅하여 반환. Ajin이 아니면 null.</summary>
         public AjinController AsAjin => _controller as AjinController;
 
+        /// <summary>시뮬레이션 제어기로 캐스팅하여 반환. 시뮬레이션이 아니면 null.</summary>
+        public SimulationController AsSimulation => _controller as SimulationController;
+
         public bool PosIsAlreadyMm
         {
             get
             {
-                // Ajin: 이미 mm
+                // Ajin/Simulation: 이미 mm
                 if (IsAjin) return true;
+                if (_controller is SimulationController) return true;
 
                 // WMX3: pulse → 변환 필요
                 if (IsWmx3) return false;
@@ -71,7 +75,7 @@ namespace PHM_Project_DockPanel.Controller
 
         public CoreMotionStatus GetStatus()
         {
-            if (_controller == null || IsSimulationMode)
+            if (_controller == null)
                 return new CoreMotionStatus();
             return _controller.GetStatus();
         }

@@ -363,10 +363,15 @@ namespace PHM_Project_DockPanel.Windows
                 int detectedCount = status.AxesStatus?.Count(a => !a.ServoOffline) ?? 0;
                 if (detectedCount <= 0 || detectedCount > 64)
                 {
-                    // Ajin 또는 WMX3 상태가 비정상인 경우 GetAxisCount 시도
+                    // Ajin: GetAxisCount() 직접 사용
                     var ajin = _motion.Controller.AsAjin;
                     if (ajin != null)
                         detectedCount = ajin.GetAxisCount();
+
+                    // Simulation: 사용자가 선택한 축 수 직접 사용
+                    var sim = _motion.Controller.AsSimulation;
+                    if (sim != null)
+                        detectedCount = sim.GetAxisCount();
                 }
                 _axisCount = Math.Max(1, detectedCount);
                 AxisConfig.AxisCount = _axisCount;

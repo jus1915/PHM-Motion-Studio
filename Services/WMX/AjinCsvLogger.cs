@@ -21,6 +21,7 @@ namespace PHM_Project_DockPanel.Services.WMX
 
         // ── 외부 주입 ──────────────────────────────────────────────
         private readonly Func<int, double> _getPos;     // axis → pos(mm)
+        private readonly Func<int, double> _getVel;     // axis → vel(mm/s), null이면 위치 차분으로 계산
         private readonly Func<int, double> _getTorque;  // axis → torque(%)
         private readonly Action<string> _log;
 
@@ -32,15 +33,18 @@ namespace PHM_Project_DockPanel.Services.WMX
         private string _filePath;
 
         public bool IsLogging => _task != null && !_task.IsCompleted;
+        public string OutputPath => _filePath;
 
         public AjinCsvLogger(
             Func<int, double> getPos,
             Func<int, double> getTorque,
-            Action<string> log = null)
+            Action<string> log = null,
+            Func<int, double> getVel = null)
         {
-            _getPos = getPos ?? throw new ArgumentNullException(nameof(getPos));
+            _getPos    = getPos    ?? throw new ArgumentNullException(nameof(getPos));
             _getTorque = getTorque ?? throw new ArgumentNullException(nameof(getTorque));
-            _log = log ?? (_ => { });
+            _getVel    = getVel;   // null이면 위치 차분으로 계산
+            _log       = log ?? (_ => { });
         }
 
         public bool Start(int[] axes, string dir, string baseName)
@@ -107,10 +111,10 @@ namespace PHM_Project_DockPanel.Services.WMX
                             double pos = SafeGet(_getPos, ax);
                             double trq = SafeGet(_getTorque, ax);
 
-                            // 위치 차분으로 속도 계산 (mm/s)
-                            double vel = (first || dtSec <= 0)
-                                ? 0.0
-                                : (pos - prevPos[i]) / dtSec;
+                            // getVel 콜백이 있으면 직접 사용, 없으면 위치 차분으로 계산
+                            double vel = (_getVel != null)
+                                ? SafeGet(_getVel, ax)
+                                : ((first || dtSec <= 0) ? 0.0 : (pos - prevPos[i]) / dtSec);
 
                             line.Append($",{pos:F4},{vel:F4},{trq:F4}");
                             prevPos[i] = pos;
