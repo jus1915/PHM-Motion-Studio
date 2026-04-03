@@ -128,7 +128,8 @@ namespace PHM_Project_DockPanel.Windows
                 RowHeadersVisible = false,
                 AutoGenerateColumns = false,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                BackgroundColor = Color.White
+                BackgroundColor = Color.White,
+                ShowCellToolTips = true   // 컬럼 헤더 툴팁 활성화
             };
 
             if (_teachingGrid.Columns.Count == 0)
@@ -186,23 +187,56 @@ namespace PHM_Project_DockPanel.Windows
                     _teachingGrid.Rows.Add(r);
                 }
 
-                // 모드 변경 시 시각적 도움(선택): Single/Multi에 따라 셀 배경 톤 변경
+                // 모드 변경 시 시각적 도움: Single/Multi에 따라 셀 배경·텍스트 변경
                 _teachingGrid.CellFormatting += (s, e) =>
                 {
                     if (e.RowIndex < 0) return;
                     var mode = Convert.ToString(_teachingGrid.Rows[e.RowIndex].Cells[COL_MODE].Value) ?? MODE_SINGLE;
                     bool isMulti = mode == MODE_MULTI;
 
+                    // Single 전용 셀: Multi 모드이면 회색(비활성)
                     if (e.ColumnIndex == COL_AXIS || e.ColumnIndex == COL_SINGLE_TGT)
                     {
-                        _teachingGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Style.BackColor =
-                            isMulti ? Color.WhiteSmoke : Color.White;
+                        e.CellStyle.BackColor = isMulti ? Color.WhiteSmoke : Color.White;
+                        e.CellStyle.ForeColor = isMulti ? Color.Silver    : Color.Black;
                     }
+                    // Multi 전용 셀(Ax 컬럼): 빈 칸이면 "(skip)" 힌트 표시
                     else if (IsMultiTargetColumn(e.ColumnIndex))
                     {
-                        _teachingGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Style.BackColor =
-                            isMulti ? Color.White : Color.WhiteSmoke;
+                        if (!isMulti)
+                        {
+                            // Single 모드 행 → 그냥 회색 처리
+                            e.CellStyle.BackColor = Color.WhiteSmoke;
+                            e.CellStyle.ForeColor = Color.Silver;
+                            return;
+                        }
+
+                        bool hasValue = !string.IsNullOrWhiteSpace(e.Value?.ToString());
+                        if (hasValue)
+                        {
+                            // 값이 있는 축 → 활성 강조 (연한 하늘색)
+                            e.CellStyle.BackColor = Color.LightCyan;
+                            e.CellStyle.ForeColor = Color.Black;
+                        }
+                        else
+                        {
+                            // 값이 없는 축 → "(skip)" 힌트
+                            e.Value = "(skip)";
+                            e.CellStyle.BackColor = Color.WhiteSmoke;
+                            e.CellStyle.ForeColor = Color.Silver;
+                            e.FormattingApplied = true;
+                        }
                     }
+                };
+
+                // 편집 시작 시: "(skip)" 힌트가 보여도 실제 편집값은 빈 칸으로
+                _teachingGrid.CellBeginEdit += (s, e) =>
+                {
+                    if (e.RowIndex < 0 || !IsMultiTargetColumn(e.ColumnIndex)) return;
+                    var cell = _teachingGrid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                    // 저장된 실제 값이 없으면 빈 칸으로 세팅 (포매팅된 "(skip)" 제거)
+                    if (string.IsNullOrWhiteSpace(cell.Value?.ToString()))
+                        cell.Value = null;
                 };
             }
             // 모드 콤보 바로 반영되도록
@@ -308,7 +342,8 @@ namespace PHM_Project_DockPanel.Windows
                     {
                         Name = name,
                         HeaderText = $"A{ax}(mm)",
-                        Width = 90
+                        Width = 90,
+                        ToolTipText = $"Axis {ax} 목표 위치(mm)\n비워두면 이 축은 건너뜀(skip)"
                     };
                     _teachingGrid.Columns.Add(col);
                 }
