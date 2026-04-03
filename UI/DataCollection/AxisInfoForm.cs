@@ -1,4 +1,5 @@
-﻿using PHM_Project_DockPanel.Controller;
+﻿using System.Globalization;
+using PHM_Project_DockPanel.Controller;
 using PHM_Project_DockPanel.DebugTools;
 using PHM_Project_DockPanel.Services;
 using PHM_Project_DockPanel.Windows;
@@ -48,19 +49,21 @@ namespace PHM_Project_DockPanel.Windows
         public CheckBox LogCheckBox => _chkLogCombined;
         public CheckBox RealtimeSendCheckBox => _chkRealtime;
 
-        // DGV 컬럼 인덱스 (체크박스 컬럼 추가)
-        private const int COL_SEL = 0;
-        private const int COL_AXIS = 1;
-        private const int COL_POS = 2;
+        // DGV 컬럼 인덱스
+        private const int COL_SEL   = 0;
+        private const int COL_AXIS  = 1;
+        private const int COL_POS   = 2;
         private const int COL_SERVO = 3;
         private const int COL_ALARM = 4;
-        private const int COL_OP = 5;
+        private const int COL_OP    = 5;
+        private const int COL_TGT   = 6;   // 축별 개별 Target(mm)
 
-        private bool[] _checkedArr;
-        private float[] _posArr;
-        private bool[] _servoArr;
-        private bool[] _alarmOkArr;
+        private bool[]   _checkedArr;
+        private float[]  _posArr;
+        private bool[]   _servoArr;
+        private bool[]   _alarmOkArr;
         private string[] _opArr;
+        private double[] _targetArr;  // 축별 개별 target (Multi-Move용)
 
         // --- 우측 액션 ---
         private Button btnServoOnGlobal, btnServoOffGlobal, btnAbsMoveGlobal, btnRelMoveGlobal;
@@ -198,7 +201,7 @@ namespace PHM_Project_DockPanel.Windows
                 ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
                 ColumnHeadersHeight = 26,
                 BackgroundColor = SystemColors.Window,
-                EditMode = DataGridViewEditMode.EditProgrammatically
+                EditMode = DataGridViewEditMode.EditOnKeystrokeOrF2
             };
             MakeDgvDoubleBuffered(_grid);
 
@@ -222,6 +225,19 @@ namespace PHM_Project_DockPanel.Windows
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Servo", HeaderText = "Servo", Width = 70 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Alarm", HeaderText = "Alarm", Width = 70 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Op", HeaderText = "Operation", Width = 90 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "Target",
+                HeaderText = "Target(mm)",
+                Width = 90,
+                ReadOnly = false,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    Alignment = DataGridViewContentAlignment.MiddleRight,
+                    Format = "0.###",
+                    BackColor = Color.LightYellow
+                }
+            });
 
             _grid.RowTemplate.Height = 24;
             _grid.AlternatingRowsDefaultCellStyle.BackColor = Color.WhiteSmoke;
@@ -229,6 +245,12 @@ namespace PHM_Project_DockPanel.Windows
             _grid.CellValueNeeded += Grid_CellValueNeeded;
             _grid.CellValuePushed += Grid_CellValuePushed;
             _grid.CellFormatting += Grid_CellFormatting;
+            _grid.CellBeginEdit += (s, e) =>
+            {
+                // Target 컬럼과 체크박스 컬럼만 편집 허용
+                if (e.ColumnIndex != COL_TGT && e.ColumnIndex != COL_SEL)
+                    e.Cancel = true;
+            };
             _grid.CellClick += (s, e) =>
             {
                 if (e.RowIndex >= 0)
@@ -377,11 +399,12 @@ namespace PHM_Project_DockPanel.Windows
                 AxisConfig.AxisCount = _axisCount;
 
                 // 데이터 버퍼 준비
-                _checkedArr = new bool[_axisCount];
-                _posArr = new float[_axisCount];
-                _servoArr = new bool[_axisCount];
-                _alarmOkArr = new bool[_axisCount];
-                _opArr = Enumerable.Repeat("Idle", _axisCount).ToArray();
+                _checkedArr  = new bool[_axisCount];
+                _posArr      = new float[_axisCount];
+                _servoArr    = new bool[_axisCount];
+                _alarmOkArr  = new bool[_axisCount];
+                _opArr       = Enumerable.Repeat("Idle", _axisCount).ToArray();
+                _targetArr   = new double[_axisCount];  // 초기값 0
                 _grid.RowCount = _axisCount;
                 _grid.ClearSelection();
                 UpdateCheckedAxesLabel();
@@ -424,7 +447,7 @@ namespace PHM_Project_DockPanel.Windows
                 AxisConfig.AxisCount = 0;
 
                 _grid.RowCount = 0;
-                _checkedArr = null; _posArr = null; _servoArr = null; _alarmOkArr = null; _opArr = null;
+                _checkedArr = null; _posArr = null; _servoArr = null; _alarmOkArr = null; _opArr = null; _targetArr = null;
                 _selectedAxis = -1;
                 UpdateCheckedAxesLabel();
                 SetActionButtonsEnabled(false);
@@ -453,23 +476,32 @@ namespace PHM_Project_DockPanel.Windows
             int r = e.RowIndex;
             switch (e.ColumnIndex)
             {
-                case COL_SEL: e.Value = (_checkedArr != null && r < _checkedArr.Length) ? _checkedArr[r] : false; break;
-                case COL_AXIS: e.Value = r.ToString(); break;
-                case COL_POS: e.Value = (r < _posArr?.Length) ? _posArr[r] : 0f; break;
+                case COL_SEL:   e.Value = (_checkedArr != null && r < _checkedArr.Length) ? _checkedArr[r] : false; break;
+                case COL_AXIS:  e.Value = r.ToString(); break;
+                case COL_POS:   e.Value = (r < _posArr?.Length) ? _posArr[r] : 0f; break;
                 case COL_SERVO: e.Value = (r < _servoArr?.Length && _servoArr[r]) ? "● ON" : "● OFF"; break;
                 case COL_ALARM: e.Value = (r < _alarmOkArr?.Length && _alarmOkArr[r]) ? "● OK" : "● ALM"; break;
-                case COL_OP: e.Value = (r < _opArr?.Length) ? _opArr[r] : "Idle"; break;
+                case COL_OP:    e.Value = (r < _opArr?.Length) ? _opArr[r] : "Idle"; break;
+                case COL_TGT:   e.Value = (r < _targetArr?.Length) ? _targetArr[r].ToString("0.###") : "0"; break;
             }
         }
 
         private void Grid_CellValuePushed(object sender, DataGridViewCellValueEventArgs e)
         {
-            if (e.RowIndex < 0 || e.ColumnIndex != COL_SEL || _checkedArr == null) return;
-            if (e.RowIndex >= _checkedArr.Length) return;
-            bool v = false;
-            if (e.Value is bool b) v = b;
-            _checkedArr[e.RowIndex] = v;
-            UpdateCheckedAxesLabel();
+            if (e.RowIndex < 0) return;
+
+            if (e.ColumnIndex == COL_SEL && _checkedArr != null && e.RowIndex < _checkedArr.Length)
+            {
+                bool v = false;
+                if (e.Value is bool b) v = b;
+                _checkedArr[e.RowIndex] = v;
+                UpdateCheckedAxesLabel();
+            }
+            else if (e.ColumnIndex == COL_TGT && _targetArr != null && e.RowIndex < _targetArr.Length)
+            {
+                if (double.TryParse(e.Value?.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out double val))
+                    _targetArr[e.RowIndex] = val;
+            }
         }
 
         private void Grid_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
@@ -723,18 +755,35 @@ namespace PHM_Project_DockPanel.Windows
                 return;
             }
 
-            if (!double.TryParse(txtTargetGlobal.Text, out double value))
+            double[] targets;
+
+            if (axes.Length == 1)
             {
-                MessageBox.Show("Target 값이 유효하지 않습니다.", "입력 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                // 단일 축: 공용 NumericUpDown 사용
+                if (!double.TryParse(txtTargetGlobal.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out double singleVal))
+                {
+                    MessageBox.Show("Target 값이 유효하지 않습니다.", "입력 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                targets = new[] { singleVal };
+            }
+            else
+            {
+                // 다축: 그리드 각 행의 Target(mm) 컬럼 값 사용
+                targets = axes.Select(ax =>
+                    (_targetArr != null && ax < _targetArr.Length) ? _targetArr[ax] : 0.0
+                ).ToArray();
             }
 
-            try { SetActionButtonsEnabled(false); }
-            finally { /* keep UI disabled until awaited call returns */ }
-
-            // ✅ 다축 동시 이동 + 로깅 (WMX StartPos/StartMov 멀티 버전 내부 사용)
-            await _motion.RunMotionWithLogging(axes, isAbs, value);
-            SetActionButtonsEnabled(true);
+            SetActionButtonsEnabled(false);
+            try
+            {
+                await _motion.RunMotionWithLogging(axes, isAbs, targets);
+            }
+            finally
+            {
+                SetActionButtonsEnabled(true);
+            }
         }
 
         private void SetActionButtonsEnabled(bool enabled)
