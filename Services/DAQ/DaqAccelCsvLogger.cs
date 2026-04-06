@@ -162,9 +162,11 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private string[] _csvPathByMod;
         private FileStream[] _fsByMod;
         private StreamWriter[] _swByMod;
+        private string[] _lastCsvPathByMod; // survives SafeStop() — readable after Stop()
 
         public bool IsRunning { get { return _running; } }
         public string[] CsvPathByModule { get { return _csvPathByMod; } }
+        public string[] LastCsvPaths { get { return _lastCsvPathByMod; } }
 
         public bool Start(int[] axisIndices, string filePath, string filename, uint durationMs = 5000)
         {
@@ -211,6 +213,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 int modCount = _modules.Length;
                 _csvPathByMod = new string[modCount];
+                _lastCsvPathByMod = new string[modCount];
                 _fsByMod = new FileStream[modCount];
                 _swByMod = new StreamWriter[modCount];
 
@@ -221,6 +224,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     var fileName = baseName + "_Accel.csv";
 
                     _csvPathByMod[m] = Path.Combine(moduleDir, fileName);
+                    _lastCsvPathByMod[m] = _csvPathByMod[m];
                     _fsByMod[m] = new FileStream(
                         _csvPathByMod[m],
                         FileMode.Create,

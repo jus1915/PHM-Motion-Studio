@@ -293,6 +293,9 @@ namespace PHM_Project_DockPanel.Services
                 if (startedAjinRun)
                     stopTasks.Add(Task.Run(() => { try { _ajinLogger.Stop(); } catch { } }));
 
+                // Capture accel paths BEFORE Stop() which nulls CsvPathByModule
+                string[] accelCsvPaths = startedAccelCsvRun ? _accelLogger?.CsvPathByModule : null;
+
                 if (startedAccelCsvRun)
                     stopTasks.Add(Task.Run(() => { try { _accelLogger.Stop(); } catch { } }));
 
@@ -301,6 +304,16 @@ namespace PHM_Project_DockPanel.Services
                 // 로깅 완료 → Log Graph Viewer에 파일 전달
                 if (!string.IsNullOrEmpty(ajinOutputPath) && File.Exists(ajinOutputPath))
                     AppEvents.RaiseShowLogGraph(AppEvents.LogDataKind.Torque, ajinOutputPath);
+
+                // Accel CSV → Log Graph (accel paths survived via LastCsvPaths)
+                var validAccelPaths = (accelCsvPaths ?? _accelLogger?.LastCsvPaths)
+                    ?.Where(p => !string.IsNullOrEmpty(p) && File.Exists(p))
+                    .ToList();
+                if (validAccelPaths != null && validAccelPaths.Count > 0)
+                {
+                    AppState.LastAccelCsvs = validAccelPaths;
+                    AppEvents.RaiseShowLogGraph(AppEvents.LogDataKind.Accel, validAccelPaths[0]);
+                }
             }
 
             return true;
