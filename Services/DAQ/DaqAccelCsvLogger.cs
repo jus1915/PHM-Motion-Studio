@@ -27,15 +27,15 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private double _rate = 0;         // 로깅 샘플레이트
         private static double AccelRate => 1.0 / AppState.GetPeriodForColumn("x");
         private int _readBlock = 2048;       // 채널당 블록 크기
-        private double _minG = -5, _maxG = 5;       // 9230: PseudoDiff, voltage range (V)
+        private double _minG = -5, _maxG = 5;       // 측정 범위 (g)
         private double _iepeCurrentAmps = 0.004;     // IEPE excitation current (A), typical 4 mA
 
         public string[] Modules { get { return _modules; } set { _modules = value ?? new string[0]; } }
         public string AiRange { get { return _aiRange; } set { _aiRange = value ?? "ai0:2"; } }
         public double SampleRate { get { return _rate; } set { _rate = value > 0 ? value : 0; } }
         public int ReadBlock { get { return _readBlock; } set { _readBlock = Math.Max(1, value); } }
-        public double MinVoltage { get { return _minG; } set { _minG = value; } }
-        public double MaxVoltage { get { return _maxG; } set { _maxG = value; } }
+        public double MinG { get { return _minG; } set { _minG = value; } }
+        public double MaxG { get { return _maxG; } set { _maxG = value; } }
         public double IepeCurrentAmps { get { return _iepeCurrentAmps; } set { _iepeCurrentAmps = value > 0 ? value : 0.004; } }
 
         // ===== 민감도/오프셋 (mV/g, g) =====
@@ -190,9 +190,10 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 foreach (var mod in _modules)
                 {
-                    CreateAccel($"{mod}/ai0");
-                    CreateAccel($"{mod}/ai1");
-                    CreateAccel($"{mod}/ai2");
+                    var s = GetAxisSens(mod);
+                    CreateAccel($"{mod}/ai0", s.X);
+                    CreateAccel($"{mod}/ai1", s.Y);
+                    CreateAccel($"{mod}/ai2", s.Z);
                 }
 
                 double rate = (_rate > 0) ? _rate : AccelRate;
@@ -272,24 +273,20 @@ namespace PHM_Project_DockPanel.Services.DAQ
             }
         }
 
-        private void CreateAccel(string phys)
+        private void CreateAccel(string phys, double sens_mVpg)
         {
-            // NI 9230: 하드웨어 AC 결합 전압 입력 모듈.
-            // CreateVoltageChannel → 하드웨어 AC 결합 유지 (DC 바이어스 차단)
-            // 이후 ExcitationSource/Value → IEPE 전류 활성화 (센서 FET 바이어스 공급)
-            // CreateAccelerometerChannel + Internal은 DAQmx가 AC 결합을 DC 모드로 덮어써
-            // IEPE 바이어스(~24 V)가 그대로 측정돼 ~240 g 오류를 유발하므로 사용하지 않음.
-            var ch = _aiTask.AIChannels.CreateVoltageChannel(
+            _aiTask.AIChannels.CreateAccelerometerChannel(
                 phys,
                 "",
                 AITerminalConfiguration.Pseudodifferential,
-                _minG,   // 전압 최솟값(V)
-                _maxG,   // 전압 최댓값(V)
-                AIVoltageUnits.Volts
+                _minG,              // 측정 범위 최솟값 (g)
+                _maxG,              // 측정 범위 최댓값 (g)
+                sens_mVpg,          // 민감도 (mV/g) — DAQmx가 V→g 변환에 사용
+                AIAccelerometerSensitivityUnits.MillivoltsPerG,
+                AIExcitationSource.Internal,
+                _iepeCurrentAmps,   // IEPE 전류 (A), 기본 0.004 A
+                AIAccelerationUnits.G
             );
-            // IEPE 전류 활성화: 피에조 센서 내부 FET 바이어스에 필요
-            ch.ExcitationSource = AIExcitationSource.Internal;
-            ch.ExcitationValue = _iepeCurrentAmps; // 기본 0.004 A (4 mA)
         }
 
         public void Stop() { SafeStop(); }
@@ -365,12 +362,11 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     {
                         int baseIdx = m * 3;
 
-                        // CreateVoltageChannel이므로 block[] 값은 Volts (AC 결합, DC 차단)
-                        // g 변환: g = V × 1000 / sensitivity_mVpg
-                        var sens = GetAxisSens(_modules[m]);
-                        double gx = block[baseIdx + 0, i] * 1000.0 / sens.X;
-                        double gy = block[baseIdx + 1, i] * 1000.0 / sens.Y;
-                        double gz = block[baseIdx + 2, i] * 1000.0 / sens.Z;
+                        // CreateAccelerometerChannel(AIAccelerationUnits.G) 이므로
+                        // DAQmx가 이미 g 단위로 반환함 — 추가 변환 불필요
+                        double gx = block[baseIdx + 0, i];
+                        double gy = block[baseIdx + 1, i];
+                        double gz = block[baseIdx + 2, i];
 
                         // 오프셋 적용
                         var off = GetAxisOffset(_modules[m]);

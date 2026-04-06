@@ -172,13 +172,12 @@ namespace PHM_Project_DockPanel
         {
             _daqCfg = cfg;
 
-            double voltRange = cfg.VoltageRange;
             _daq.Modules    = new[] { cfg.Module };
             _daq.AiRange    = cfg.Channel;
             _daq.SampleRate = cfg.SampleRate;
             _daq.ReadBlock  = cfg.ReadBlock;
-            _daq.MinVoltage = -voltRange;
-            _daq.MaxVoltage =  voltRange;
+            _daq.MinG       = -cfg.GRange;
+            _daq.MaxG       =  cfg.GRange;
             _daq.SetModuleSensitivity(cfg.Module, cfg.SensX, cfg.SensY, cfg.SensZ);
             _daq.SetModuleOffset(cfg.Module, 0.0, 0.0, 0.0);
             _daq.IepeCurrentAmps = cfg.IepeCurrentAmps;
@@ -193,7 +192,7 @@ namespace PHM_Project_DockPanel
 
             AppEvents.RaiseLog($"[DAQ 설정 적용] {cfg.Module}/{cfg.Channel}  " +
                                $"Sens X={cfg.SensX} Y={cfg.SensY} Z={cfg.SensZ} mV/g  " +
-                               $"Rate={cfg.SampleRate} Hz  ±{cfg.GRange} g (±{voltRange:F3} V)");
+                               $"Rate={cfg.SampleRate} Hz  ±{cfg.GRange} g");
         }
 
         private void InitHttpSender()
