@@ -18,7 +18,6 @@ namespace PHM_Project_DockPanel.Windows
     public class LogGraphForm : DockContent
     {
         public enum LogKind { Unknown, Torque, Accel }
-        private Panel _toolbarSpacer;
 
         private ComboBox _cmbKind;
         private ComboBox _cmbAccelFile;                 // ★ 모듈별 Accel CSV 선택 콤보

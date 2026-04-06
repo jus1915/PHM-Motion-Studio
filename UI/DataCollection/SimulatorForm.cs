@@ -16,9 +16,6 @@ namespace PHM_Project_DockPanel.Windows
     {
         private float[] _positions;
         private float[] _maxPositions;
-        private double _animCurrentPos, _animTargetPos, _animStep;
-        private bool _isAnimating;
-        private int _animAxisIndex;
 
         public SimulatorForm()
         {

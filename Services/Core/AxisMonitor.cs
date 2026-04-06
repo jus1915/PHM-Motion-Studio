@@ -13,7 +13,6 @@ namespace PHM_Project_DockPanel.Services
     public class AxisMonitor
     {
         private readonly ControllerManager _controller;
-        private SimulatorForm _simulatorWindow;
         private readonly Label[,] _labels;
         private readonly int _axisCount;
         private readonly AxisConfig[] _configs;

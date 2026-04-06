@@ -37,7 +37,7 @@ namespace PHM_Project_DockPanel.Windows
         private CheckBox _chkRealtime;
 
         // ▷ 레거시 호환용(외부 코드가 LogCheckBox에 접근하던 경우 대응)
-        private CheckBox _chkLogCombined;      // Visible=false, 두 체크의 OR
+        private CheckBox _chkLogCombined = new CheckBox { Visible = false }; // 두 체크의 OR, UI에 미표시
         private bool _syncingLegacy = false;   // 이벤트 루프 방지
         private Label _lblRealtimeStatus;
         private Label _lblDaqStatus;

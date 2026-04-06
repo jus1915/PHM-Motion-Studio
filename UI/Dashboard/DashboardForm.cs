@@ -88,9 +88,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public InferenceSession Session;
         }
 
-        private Chart chartClassProb, chartClassCount;
-        private int _clsNum = -1;          // 클래스 개수(최초 추론 시 확정)
-        private int[] _clsCounts;          // 클래스별 누적 건수
 
         #region ===== High-pass Filter with cutoff/order =====
         private static class DspUtils
@@ -321,7 +318,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private Button btnLoadModelSingle, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
         private DataGridView gridModelPaths;
-        private Chart chartSample;
         private TableLayoutPanel sampleGrid;                       // rightBottom 안에서 그리드 역할
         private readonly Dictionary<int, Chart> sampleCharts =     // 축별 Chart 캐시
             new Dictionary<int, Chart>();
