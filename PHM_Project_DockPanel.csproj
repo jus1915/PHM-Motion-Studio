@@ -173,6 +173,7 @@
     <Compile Include="Services\DAQ\DaqAccelCsvLogger.cs" />
     <Compile Include="Services\DAQ\DaqAccelHttpSender.cs" />
     <Compile Include="Services\DAQ\DaqSensorConfig.cs" />
+    <Compile Include="Services\DAQ\EventTrigger.cs" />
     <Compile Include="Services\Logging\CompositeLogger.cs" />
     <Compile Include="Services\Logging\IMeasurementLogger.cs" />
     <Compile Include="Services\PHM_Motion.cs" />
@@ -210,6 +211,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="UI\DataCollection\LogGraphForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="UI\DataCollection\PassiveMonitorForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="UI\DataCollection\LogWriterForm.cs">

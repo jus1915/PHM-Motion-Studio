@@ -164,7 +164,7 @@ namespace PHM_Project_DockPanel
             _motion.SetAccelLogger(_daq);
         }
 
-        private static string DaqSensorConfigPath =>
+        internal static string DaqSensorConfigPath =>
             Path.Combine(ResolveCfgDir(), "daq_sensor_config.json");
 
         /// <summary>DaqSensorConfig 를 DaqAccelCsvLogger 와 DaqAccelHttpSender 에 적용합니다.</summary>
@@ -327,6 +327,8 @@ namespace PHM_Project_DockPanel
             monitorMenu.DropDownItems.Add(
                 CreateDockMenuItem("Teaching", DockState.DockBottom,
                     typeof(TeachingForm), () => new TeachingForm(_motion)));
+            monitorMenu.DropDownItems.Add(
+                CreateDockMenuItem<PassiveMonitorForm>("Passive Monitor", DockState.Document));
 
             var logMenu = new ToolStripMenuItem("로그 관리");
             logMenu.DropDownItems.Add(CreateDockMenuItem<LogWriterForm>("Log Writer", DockState.DockBottom));
@@ -577,6 +579,8 @@ namespace PHM_Project_DockPanel
 
             if (persistString == typeof(LogGraphForm).ToString())
                 return _logGraph ?? (_logGraph = new LogGraphForm());
+
+            if (persistString == typeof(PassiveMonitorForm).ToString()) return new PassiveMonitorForm();
 
             // 데이터 분석 폼 — 상태 없으므로 매번 새로 생성
             if (persistString == typeof(PHMPipelineWizard).ToString()) return new PHMPipelineWizard();
