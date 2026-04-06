@@ -215,7 +215,10 @@ namespace PHM_Project_DockPanel.Services
                 if (anyLog)
                 {
                     // === 기존 CSV/토크 로깅 준비 (로깅 활성화 시에만) ===
-                    string folderName = $"{DateTime.Now:yyyyMMdd}_Axis{active[0]}";
+                    string axisTag = active.Count == 1
+                        ? $"Axis{active[0]}"
+                        : $"Axes{string.Join("-", active)}";
+                    string folderName = $"{DateTime.Now:yyyyMMdd}_{axisTag}";
                     string baseRoot = @"C:\Data\PHM_Logs\Signals";
                     string rootDir = Path.Combine(baseRoot, folderName);
                     string torqueDir = Path.Combine(rootDir, "Torque");
@@ -224,7 +227,7 @@ namespace PHM_Project_DockPanel.Services
                     Directory.CreateDirectory(accelDir);
 
                     string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-                    string baseName = $"{timestamp}_Axis{active[0]}_T{moveTimeMs}ms";
+                    string baseName = $"{timestamp}_{axisTag}_T{moveTimeMs}ms";
                     string torqueCsvPath = Path.Combine(torqueDir, baseName + "_Torque.csv");
                     bool isAjin = _controller.IsAjin;
                     bool usePollingLogger = isAjin || _controller.IsSimulationMode;
@@ -290,6 +293,9 @@ namespace PHM_Project_DockPanel.Services
                 if (startedAjinRun)
                     stopTasks.Add(Task.Run(() => { try { _ajinLogger.Stop(); } catch { } }));
 
+                // Capture accel paths BEFORE Stop() which nulls CsvPathByModule
+                string[] accelCsvPaths = startedAccelCsvRun ? _accelLogger?.CsvPathByModule : null;
+
                 if (startedAccelCsvRun)
                     stopTasks.Add(Task.Run(() => { try { _accelLogger.Stop(); } catch { } }));
 
@@ -298,6 +304,16 @@ namespace PHM_Project_DockPanel.Services
                 // 로깅 완료 → Log Graph Viewer에 파일 전달
                 if (!string.IsNullOrEmpty(ajinOutputPath) && File.Exists(ajinOutputPath))
                     AppEvents.RaiseShowLogGraph(AppEvents.LogDataKind.Torque, ajinOutputPath);
+
+                // Accel CSV → Log Graph (accel paths survived via LastCsvPaths)
+                var validAccelPaths = (accelCsvPaths ?? _accelLogger?.LastCsvPaths)
+                    ?.Where(p => !string.IsNullOrEmpty(p) && File.Exists(p))
+                    .ToList();
+                if (validAccelPaths != null && validAccelPaths.Count > 0)
+                {
+                    AppState.LastAccelCsvs = validAccelPaths;
+                    AppEvents.RaiseShowLogGraph(AppEvents.LogDataKind.Accel, validAccelPaths[0]);
+                }
             }
 
             return true;

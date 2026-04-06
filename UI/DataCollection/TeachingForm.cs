@@ -48,6 +48,12 @@ namespace PHM_Project_DockPanel.Windows
             Text = "Teaching";
             TabText = "Teaching";
             InitializeTeachingPanel();
+
+            // 폼이 보일 때마다 실제 축 수로 컬럼 갱신 (Connect/Disconnect 이후 반영)
+            this.VisibleChanged += (s, e) =>
+            {
+                if (this.Visible) EnsureDynamicTargetColumns();
+            };
         }
 
         private void InitializeTeachingPanel()
@@ -122,7 +128,8 @@ namespace PHM_Project_DockPanel.Windows
                 RowHeadersVisible = false,
                 AutoGenerateColumns = false,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                BackgroundColor = Color.White
+                BackgroundColor = Color.White,
+                ShowCellToolTips = true   // 컬럼 헤더 툴팁 활성화
             };
 
             if (_teachingGrid.Columns.Count == 0)
@@ -180,23 +187,56 @@ namespace PHM_Project_DockPanel.Windows
                     _teachingGrid.Rows.Add(r);
                 }
 
-                // 모드 변경 시 시각적 도움(선택): Single/Multi에 따라 셀 배경 톤 변경
+                // 모드 변경 시 시각적 도움: Single/Multi에 따라 셀 배경·텍스트 변경
                 _teachingGrid.CellFormatting += (s, e) =>
                 {
                     if (e.RowIndex < 0) return;
                     var mode = Convert.ToString(_teachingGrid.Rows[e.RowIndex].Cells[COL_MODE].Value) ?? MODE_SINGLE;
                     bool isMulti = mode == MODE_MULTI;
 
+                    // Single 전용 셀: Multi 모드이면 회색(비활성)
                     if (e.ColumnIndex == COL_AXIS || e.ColumnIndex == COL_SINGLE_TGT)
                     {
-                        _teachingGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Style.BackColor =
-                            isMulti ? Color.WhiteSmoke : Color.White;
+                        e.CellStyle.BackColor = isMulti ? Color.WhiteSmoke : Color.White;
+                        e.CellStyle.ForeColor = isMulti ? Color.Silver    : Color.Black;
                     }
+                    // Multi 전용 셀(Ax 컬럼): 빈 칸이면 "(skip)" 힌트 표시
                     else if (IsMultiTargetColumn(e.ColumnIndex))
                     {
-                        _teachingGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Style.BackColor =
-                            isMulti ? Color.White : Color.WhiteSmoke;
+                        if (!isMulti)
+                        {
+                            // Single 모드 행 → 그냥 회색 처리
+                            e.CellStyle.BackColor = Color.WhiteSmoke;
+                            e.CellStyle.ForeColor = Color.Silver;
+                            return;
+                        }
+
+                        bool hasValue = !string.IsNullOrWhiteSpace(e.Value?.ToString());
+                        if (hasValue)
+                        {
+                            // 값이 있는 축 → 활성 강조 (연한 하늘색)
+                            e.CellStyle.BackColor = Color.LightCyan;
+                            e.CellStyle.ForeColor = Color.Black;
+                        }
+                        else
+                        {
+                            // 값이 없는 축 → "(skip)" 힌트
+                            e.Value = "(skip)";
+                            e.CellStyle.BackColor = Color.WhiteSmoke;
+                            e.CellStyle.ForeColor = Color.Silver;
+                            e.FormattingApplied = true;
+                        }
                     }
+                };
+
+                // 편집 시작 시: "(skip)" 힌트가 보여도 실제 편집값은 빈 칸으로
+                _teachingGrid.CellBeginEdit += (s, e) =>
+                {
+                    if (e.RowIndex < 0 || !IsMultiTargetColumn(e.ColumnIndex)) return;
+                    var cell = _teachingGrid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                    // 저장된 실제 값이 없으면 빈 칸으로 세팅 (포매팅된 "(skip)" 제거)
+                    if (string.IsNullOrWhiteSpace(cell.Value?.ToString()))
+                        cell.Value = null;
                 };
             }
             // 모드 콤보 바로 반영되도록
@@ -207,11 +247,14 @@ namespace PHM_Project_DockPanel.Windows
                     _teachingGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
             };
 
-            // 모드 값 바뀔 때마다 A4/A3/A2/A1 보이기/숨기기 갱신
+            // 모드 값 바뀔 때마다 다축 컬럼 재구성 + 보이기/숨기기 갱신
             _teachingGrid.CellValueChanged += (s, e) =>
             {
                 if (e.RowIndex >= 0 && e.ColumnIndex == COL_MODE)
+                {
+                    EnsureDynamicTargetColumns(); // 축 수가 바뀌었을 수 있으므로 재구성
                     ApplyMultiColsVisibilityByMode();
+                }
             };
 
             // 행 추가/삭제 시도 후에도 갱신
@@ -264,10 +307,17 @@ namespace PHM_Project_DockPanel.Windows
             Controls.Add(main);
         }
 
+        /// <summary>연결 후 실제 축 수. 연결 전이면 AxisConfigs 길이로 폴백.</summary>
+        private int GetCurrentAxisCount()
+        {
+            if (AxisConfig.AxisCount > 0) return AxisConfig.AxisCount;
+            return _motion?.AxisConfigs?.Length ?? 0;
+        }
+
         // ===== 동적 다축 타겟 컬럼 보장 =====
         private void EnsureDynamicTargetColumns()
         {
-            int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+            int axisCount = GetCurrentAxisCount();
             if (axisCount <= 0) { EnsureWaitColumn(); return; }
 
             // Wait 컬럼은 절대 제거하지 않음
@@ -292,7 +342,8 @@ namespace PHM_Project_DockPanel.Windows
                     {
                         Name = name,
                         HeaderText = $"A{ax}(mm)",
-                        Width = 90
+                        Width = 90,
+                        ToolTipText = $"Axis {ax} 목표 위치(mm)\n비워두면 이 축은 건너뜀(skip)"
                     };
                     _teachingGrid.Columns.Add(col);
                 }
@@ -308,14 +359,22 @@ namespace PHM_Project_DockPanel.Windows
                 .ToList();
             foreach (var n in toRemove) _teachingGrid.Columns.Remove(n);
 
-            // 다축 컬럼들을 Wait 앞에 배치 (순서만 조정)
-            waitColIdx = FindWaitColumnIndex(); // 제거 안 했지만 안전하게 재확인
-            foreach (DataGridViewColumn c in _teachingGrid.Columns)
+            // 다축 컬럼들을 Wait 앞에 A0→A1→…→A{n-1} 순으로 배치
+            // ※ 역순(마지막→첫번째)으로 DisplayIndex를 같은 위치에 넣으면
+            //   T{n-1}부터 T0 순으로 앞쪽 자리를 차지해 결과적으로 T0,T1,…,T{n-1} 순이 됩니다.
+            waitColIdx = FindWaitColumnIndex();
+            if (waitColIdx >= 0)
             {
-                if (c.Name != null && c.Name.StartsWith(MULTI_COL_PREFIX, StringComparison.OrdinalIgnoreCase))
-                {
-                    c.DisplayIndex = waitColIdx; // 이 줄이 Wait을 자동으로 뒤로 밀어줌
-                }
+                var multiColsSorted = _teachingGrid.Columns
+                    .Cast<DataGridViewColumn>()
+                    .Where(c => c.Name != null &&
+                                c.Name.StartsWith(MULTI_COL_PREFIX, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(c => GetAxisIndexFromMultiColName(c.Name))
+                    .ToList();
+
+                int baseDisplay = _teachingGrid.Columns[waitColIdx].DisplayIndex;
+                for (int i = multiColsSorted.Count - 1; i >= 0; i--)
+                    multiColsSorted[i].DisplayIndex = baseDisplay;
             }
         }
 
@@ -419,7 +478,7 @@ namespace PHM_Project_DockPanel.Windows
                             {
                                 var axesList = new List<int>();
                                 var valsList = new List<double>();
-                                int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+                                int axisCount = GetCurrentAxisCount();
 
                                 for (int ax = 0; ax < axisCount; ax++)
                                 {
@@ -438,7 +497,7 @@ namespace PHM_Project_DockPanel.Windows
                             }
                             else
                             {
-                                if (step.Axis < 0 || step.Axis >= (_motion.AxisConfigs?.Length ?? 0))
+                                if (step.Axis < 0 || step.Axis >= GetCurrentAxisCount())
                                 {
                                     MessageBox.Show($"Axis {step.Axis} 인덱스가 잘못되었습니다.", "입력 오류",
                                                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -497,7 +556,7 @@ namespace PHM_Project_DockPanel.Windows
 
             plan = new TeachingPlan { Loop = _loopCheck.Checked, RepeatCount = (int)_repeatUpDown.Value };
 
-            int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+            int axisCount = GetCurrentAxisCount();
 
             foreach (DataGridViewRow row in _teachingGrid.Rows)
             {
@@ -624,11 +683,12 @@ namespace PHM_Project_DockPanel.Windows
             return false;
         }
 
-        // ── Single 모드만 있을 땐 A4,A3,A2,A1 숨기기 ──
+        // ── Single 모드만 있을 땐 다축 컬럼 전체 숨기기 ──
         private void SetMultiColsVisible(bool visible)
         {
-            // 요청대로 A1~A4만 제어 (A0는 그대로 둠)
-            foreach (int ax in new[] { 1, 2, 3, 4, 0 })
+            int axisCount = GetCurrentAxisCount();
+            // 현재 생성되어 있는 다축 컬럼 전체를 대상으로 한다
+            for (int ax = 0; ax < axisCount; ax++)
             {
                 int idx = FindMultiTargetColumn(ax);
                 if (idx >= 0) _teachingGrid.Columns[idx].Visible = visible;
@@ -671,7 +731,7 @@ namespace PHM_Project_DockPanel.Windows
 
             if (plan?.Steps == null || plan.Steps.Count == 0) return;
 
-            int axisCount = _motion?.AxisConfigs?.Length ?? 0;
+            int axisCount = GetCurrentAxisCount();
 
             foreach (var s in plan.Steps)
             {

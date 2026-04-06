@@ -25,12 +25,11 @@ namespace PHM_Project_DockPanel
         // ── 상수 ────────────────────────────────────────────────────────────
         private const string LayoutFile = "layout.xml";
         private const string AxisConfigFile = "axis_config.json";
-        private const string DaqModule = "cDAQ2Mod1";
-        private const string DaqChannel = "ai0:2";
         private const string HttpServerUrl = "http://10.100.17.221:8000/api/ingest";
 
         // ── 핵심 서비스 ──────────────────────────────────────────────────────
         private ControllerManager _controller;
+        private DaqSensorConfig _daqCfg;
         private AxisConfig[] _axisConfigs;
         private WmxTorqueLogger _torqueLogger;
         private DaqAccelCsvLogger _daq;
@@ -65,6 +64,7 @@ namespace PHM_Project_DockPanel
             // 2. 각 서브시스템 초기화
             InitAxisConfigs();
             InitMotion();
+            _daqCfg = DaqSensorConfig.LoadOrDefault(DaqSensorConfigPath);
             InitDaq();
             InitHttpSender();
 
@@ -159,21 +159,40 @@ namespace PHM_Project_DockPanel
 
         private void InitDaq()
         {
-            var cfgDir = ResolveCfgDir();
-
-            _daq = new DaqAccelCsvLogger(AppEvents.RaiseLog)
-            {
-                Modules = new[] { DaqModule },
-                AiRange = DaqChannel,
-                SampleRate = 0,    // 0 = DaqAccelCsvLogger 내부 SamplingRates 사용
-                ReadBlock = 100,
-                MinVoltage = -5,
-                MaxVoltage = 5
-            };
-            _daq.LoadSensitivityCsv(Path.Combine(cfgDir, "sensitivity.csv"));
-            _daq.LoadOffsetCsv(Path.Combine(cfgDir, "offsets.csv"));
-
+            _daq = new DaqAccelCsvLogger(AppEvents.RaiseLog);
+            ApplyDaqConfig(_daqCfg);
             _motion.SetAccelLogger(_daq);
+        }
+
+        internal static string DaqSensorConfigPath =>
+            Path.Combine(ResolveCfgDir(), "daq_sensor_config.json");
+
+        /// <summary>DaqSensorConfig 를 DaqAccelCsvLogger 와 DaqAccelHttpSender 에 적용합니다.</summary>
+        private void ApplyDaqConfig(DaqSensorConfig cfg)
+        {
+            _daqCfg = cfg;
+
+            _daq.Modules    = new[] { cfg.Module };
+            _daq.AiRange    = cfg.Channel;
+            _daq.SampleRate = cfg.SampleRate;
+            _daq.ReadBlock  = cfg.ReadBlock;
+            _daq.MinG       = -cfg.GRange;
+            _daq.MaxG       =  cfg.GRange;
+            _daq.SetModuleSensitivity(cfg.Module, cfg.SensX, cfg.SensY, cfg.SensZ);
+            _daq.SetModuleOffset(cfg.Module, 0.0, 0.0, 0.0);
+            _daq.IepeCurrentAmps = cfg.IepeCurrentAmps;
+
+            // HttpSender 도 동기화 (모듈/채널/IEPE 변경 반영)
+            if (_httpSender != null)
+            {
+                _httpSender.Modules        = new[] { cfg.Module };
+                _httpSender.ChannelTriplet = cfg.Channel;
+                _httpSender.IepeMilliAmps  = cfg.IepeCurrentAmps * 1000.0; // A → mA
+            }
+
+            AppEvents.RaiseLog($"[DAQ 설정 적용] {cfg.Module}/{cfg.Channel}  " +
+                               $"Sens X={cfg.SensX} Y={cfg.SensY} Z={cfg.SensZ} mV/g  " +
+                               $"Rate={cfg.SampleRate} Hz  ±{cfg.GRange} g");
         }
 
         private void InitHttpSender()
@@ -182,17 +201,17 @@ namespace PHM_Project_DockPanel
 
             _httpSender = new DaqAccelHttpSender(AppEvents.RaiseLog)
             {
-                DeviceId = "realtime",
-                Modules = new[] { DaqModule },
-                ChannelTriplet = DaqChannel,
-                SampleRate = 1280,
-                FrameSamples = 64,
-                ServerUrl = HttpServerUrl,
-                IepeMilliAmps = 4.0,
-                MinG = -25,
-                MaxG = 25,
-                NumWorkers = 6,
-                QueueCapacity = 200
+                DeviceId       = "realtime",
+                Modules        = new[] { _daqCfg.Module },
+                ChannelTriplet = _daqCfg.Channel,
+                SampleRate     = 1280,
+                FrameSamples   = 64,
+                ServerUrl      = HttpServerUrl,
+                IepeMilliAmps  = _daqCfg.IepeCurrentAmps * 1000.0, // A → mA
+                MinG           = -25,
+                MaxG           = 25,
+                NumWorkers     = 6,
+                QueueCapacity  = 200
             };
             _httpSender.LoadSensitivityCsv(Path.Combine(cfgDir, "sensitivity.csv"));
             _httpSender.LoadOffsetCsv(Path.Combine(cfgDir, "offsets.csv"));
@@ -308,6 +327,8 @@ namespace PHM_Project_DockPanel
             monitorMenu.DropDownItems.Add(
                 CreateDockMenuItem("Teaching", DockState.DockBottom,
                     typeof(TeachingForm), () => new TeachingForm(_motion)));
+            monitorMenu.DropDownItems.Add(
+                CreateDockMenuItem<PassiveMonitorForm>("Passive Monitor", DockState.Document));
 
             var logMenu = new ToolStripMenuItem("로그 관리");
             logMenu.DropDownItems.Add(CreateDockMenuItem<LogWriterForm>("Log Writer", DockState.DockBottom));
@@ -315,7 +336,11 @@ namespace PHM_Project_DockPanel
 
             var configMenu = new ToolStripMenuItem("환경 설정");
             configMenu.DropDownItems.Add(new ToolStripMenuItem("축 설정 관리", null, (s, e) => { }));
-            configMenu.DropDownItems.Add(new ToolStripMenuItem("연결 설정", null, (s, e) => { }));
+            configMenu.DropDownItems.Add(new ToolStripMenuItem("연결 설정",    null, (s, e) => { }));
+            configMenu.DropDownItems.Add(
+                CreateDockMenuItem("DAQ 센서 설정", DockState.DockRight,
+                    typeof(DaqSettingsForm),
+                    () => new DaqSettingsForm(DaqSensorConfigPath, ApplyDaqConfig)));
 
             menuDataCollection.DropDownItems.Add(monitorMenu);
             menuDataCollection.DropDownItems.Add(logMenu);
@@ -554,6 +579,8 @@ namespace PHM_Project_DockPanel
 
             if (persistString == typeof(LogGraphForm).ToString())
                 return _logGraph ?? (_logGraph = new LogGraphForm());
+
+            if (persistString == typeof(PassiveMonitorForm).ToString()) return new PassiveMonitorForm();
 
             // 데이터 분석 폼 — 상태 없으므로 매번 새로 생성
             if (persistString == typeof(PHMPipelineWizard).ToString()) return new PHMPipelineWizard();

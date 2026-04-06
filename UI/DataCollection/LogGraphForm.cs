@@ -18,7 +18,6 @@ namespace PHM_Project_DockPanel.Windows
     public class LogGraphForm : DockContent
     {
         public enum LogKind { Unknown, Torque, Accel }
-        private Panel _toolbarSpacer;
 
         private ComboBox _cmbKind;
         private ComboBox _cmbAccelFile;                 // ★ 모듈별 Accel CSV 선택 콤보
@@ -43,6 +42,12 @@ namespace PHM_Project_DockPanel.Windows
         // Torque 데이터
         private List<double> _pos, _vel, _trq;
         private List<double> _cmdPos, _cmdVel, _cmdTrq;
+
+        // AjinMotion 다축 데이터 (축 번호 → Pos/Vel/Trq 리스트)
+        private Dictionary<int, (List<double> Pos, List<double> Vel, List<double> Trq)> _ajinAxesData;
+        private ComboBox _cmbAjinAxis;
+        private Label _lblAjinAxis;
+        private bool _suppressAjinAxisEvent;
 
         // Accel 데이터
         private List<double> _ax, _ay, _az;
@@ -217,6 +222,35 @@ namespace PHM_Project_DockPanel.Windows
                 }
             };
             _buttonPanel.Controls.Add(_cmbAccelFile);
+
+            // AjinMotion 다축 축 선택
+            _lblAjinAxis = new Label
+            {
+                Text = "Axis:",
+                AutoSize = true,
+                Margin = new Padding(12, 10, 3, 0),
+                Visible = false
+            };
+            _cmbAjinAxis = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 70,
+                Visible = false
+            };
+            _cmbAjinAxis.SelectedIndexChanged += (s, e) =>
+            {
+                if (_suppressAjinAxisEvent) return;
+                if (_kind == LogKind.Torque && _cmbAjinAxis.SelectedItem is int ax
+                    && _ajinAxesData != null && _ajinAxesData.ContainsKey(ax))
+                {
+                    var d = _ajinAxesData[ax];
+                    _pos = d.Pos; _vel = d.Vel; _trq = d.Trq;
+                    _cmdPos = d.Pos; _cmdVel = d.Vel; _cmdTrq = d.Trq;
+                    DrawFeedbackView();
+                }
+            };
+            _buttonPanel.Controls.Add(_lblAjinAxis);
+            _buttonPanel.Controls.Add(_cmbAjinAxis);
         }
 
         private void BuildEmptyLayout()
@@ -561,56 +595,111 @@ namespace PHM_Project_DockPanel.Windows
         }
 
         /// <summary>
-        /// AjinCsvLogger / SimulationLogger 포맷 파서.
-        /// 헤더: Timestamp_ms, Ax0_Pos(mm), Ax0_Vel(mm/s), Ax0_Trq(%)
-        /// Cmd 컬럼이 없으므로 cmd = feedback 으로 채워 Residual=0.
+        /// AjinCsvLogger / SimulationLogger 포맷 파서 (다축 지원).
+        /// 헤더: Timestamp_ms, Ax0_Pos(mm), Ax0_Vel(mm/s), Ax0_Trq(%), Ax1_Pos(mm), ...
+        /// 축별 데이터를 _ajinAxesData에 저장하고, 첫 번째 축으로 초기 표시.
         /// </summary>
         private bool TryParseAjinMotionCsv(string[] lines, string[] headers)
         {
-            _time    = new List<double>();
-            _pos     = new List<double>();
-            _vel     = new List<double>();
-            _trq     = new List<double>();
-            _cmdPos  = new List<double>();
-            _cmdVel  = new List<double>();
-            _cmdTrq  = new List<double>();
-
             var lower = headers.Select(h => h.ToLowerInvariant()).ToArray();
-
             int timeIdx = Array.FindIndex(lower, h => h == "timestamp_ms");
-            int posIdx  = Array.FindIndex(lower, h => h.Contains("_pos"));
-            int velIdx  = Array.FindIndex(lower, h => h.Contains("_vel"));
-            int trqIdx  = Array.FindIndex(lower, h => h.Contains("_trq"));
+            if (timeIdx < 0) return false;
 
-            if (timeIdx < 0 || posIdx < 0 || velIdx < 0 || trqIdx < 0) return false;
+            // 포함된 축 번호 탐색 (Ax0, Ax1, ...)
+            var axisIndices = new SortedSet<int>();
+            for (int i = 0; i < lower.Length; i++)
+            {
+                // "ax0_pos(mm)" 패턴: "ax" + 숫자 + "_pos"
+                var m = System.Text.RegularExpressions.Regex.Match(lower[i], @"^ax(\d+)_pos");
+                if (m.Success && int.TryParse(m.Groups[1].Value, out int ax))
+                    axisIndices.Add(ax);
+            }
+            if (axisIndices.Count == 0) return false;
+
+            // 각 축의 컬럼 인덱스 조회
+            var axColMap = new Dictionary<int, (int pos, int vel, int trq)>();
+            foreach (int ax in axisIndices)
+            {
+                int pi = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_pos"));
+                int vi = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_vel"));
+                int ti = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_trq"));
+                if (pi >= 0 && vi >= 0 && ti >= 0)
+                    axColMap[ax] = (pi, vi, ti);
+            }
+            if (axColMap.Count == 0) return false;
+
+            // 공통 시간 리스트
+            _time = new List<double>();
+            _ajinAxesData = new Dictionary<int, (List<double>, List<double>, List<double>)>();
+            foreach (int ax in axColMap.Keys)
+                _ajinAxesData[ax] = (new List<double>(), new List<double>(), new List<double>());
 
             for (int i = 1; i < lines.Length; i++)
             {
                 if (string.IsNullOrWhiteSpace(lines[i])) continue;
                 var cols = lines[i].Split(',');
-                int maxIdx = Math.Max(Math.Max(timeIdx, posIdx), Math.Max(velIdx, trqIdx));
-                if (cols.Length <= maxIdx) continue;
 
-                if (double.TryParse(cols[timeIdx], NumberStyles.Any, CultureInfo.InvariantCulture, out double t) &&
-                    double.TryParse(cols[posIdx],  NumberStyles.Any, CultureInfo.InvariantCulture, out double p) &&
-                    double.TryParse(cols[velIdx],  NumberStyles.Any, CultureInfo.InvariantCulture, out double v) &&
-                    double.TryParse(cols[trqIdx],  NumberStyles.Any, CultureInfo.InvariantCulture, out double tq))
+                if (!double.TryParse(cols[timeIdx], NumberStyles.Any, CultureInfo.InvariantCulture, out double t))
+                    continue;
+
+                bool allOk = true;
+                var rowData = new Dictionary<int, (double p, double v, double tq)>();
+                foreach (var kv in axColMap)
                 {
-                    _time.Add(t / 1000.0);  // ms → s
-                    _pos.Add(p);  _vel.Add(v);  _trq.Add(tq);
-                    _cmdPos.Add(p); _cmdVel.Add(v); _cmdTrq.Add(tq); // cmd = fb → Residual = 0
+                    int ax = kv.Key;
+                    var (pi, vi, ti) = kv.Value;
+                    if (cols.Length <= Math.Max(pi, Math.Max(vi, ti))) { allOk = false; break; }
+                    if (!double.TryParse(cols[pi], NumberStyles.Any, CultureInfo.InvariantCulture, out double p) ||
+                        !double.TryParse(cols[vi], NumberStyles.Any, CultureInfo.InvariantCulture, out double v) ||
+                        !double.TryParse(cols[ti], NumberStyles.Any, CultureInfo.InvariantCulture, out double tq))
+                    { allOk = false; break; }
+                    rowData[ax] = (p, v, tq);
+                }
+                if (!allOk) continue;
+
+                _time.Add(t / 1000.0);
+                foreach (var kv in rowData)
+                {
+                    var lists = _ajinAxesData[kv.Key];
+                    lists.Pos.Add(kv.Value.p);
+                    lists.Vel.Add(kv.Value.v);
+                    lists.Trq.Add(kv.Value.tq);
                 }
             }
 
-            // 시간축 보정: 첫 샘플 = 0
-            if (_time.Count > 0)
-            {
-                double t0 = _time[0];
-                for (int i = 0; i < _time.Count; i++)
-                    _time[i] -= t0;
-            }
+            if (_time.Count <= 1) return false;
 
-            return _time.Count > 1;
+            // 시간축 보정
+            double t0 = _time[0];
+            for (int i = 0; i < _time.Count; i++) _time[i] -= t0;
+
+            // 축 선택 콤보 업데이트 및 첫 번째 축으로 초기화
+            int firstAxis = axColMap.Keys.First();
+            UpdateAjinAxisCombo(axColMap.Keys.ToList(), firstAxis);
+
+            var first = _ajinAxesData[firstAxis];
+            _pos = first.Pos; _vel = first.Vel; _trq = first.Trq;
+            _cmdPos = first.Pos; _cmdVel = first.Vel; _cmdTrq = first.Trq;
+
+            return true;
+        }
+
+        private void UpdateAjinAxisCombo(List<int> axes, int selectedAxis)
+        {
+            _suppressAjinAxisEvent = true;
+            try
+            {
+                _cmbAjinAxis.Items.Clear();
+                bool multiAxis = axes.Count > 1;
+                _lblAjinAxis.Visible = multiAxis;
+                _cmbAjinAxis.Visible = multiAxis;
+                if (!multiAxis) return;
+
+                foreach (int ax in axes) _cmbAjinAxis.Items.Add(ax);
+                int selIdx = axes.IndexOf(selectedAxis);
+                _cmbAjinAxis.SelectedIndex = selIdx >= 0 ? selIdx : 0;
+            }
+            finally { _suppressAjinAxisEvent = false; }
         }
 
         private void DrawFeedbackView()
