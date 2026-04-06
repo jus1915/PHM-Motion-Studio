@@ -22,7 +22,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
         }
 
         // ===== 사용자 환경 =====
-        private string[] _modules = new[] { "cDAQ2Mod1" };
+        private string[] _modules = new[] { "cDAQ2Mod2" };
         private string _aiRange = "ai0:2";      // 각 모듈 3채널(X/Y/Z)
         private double _rate = 0;         // 로깅 샘플레이트
         private static double AccelRate => 1.0 / AppState.GetPeriodForColumn("x");
@@ -186,10 +186,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 foreach (var mod in _modules)
                 {
-                    var s = GetAxisSens(mod);
-                    CreateAccel($"{mod}/ai0", s.X);
-                    CreateAccel($"{mod}/ai1", s.Y);
-                    CreateAccel($"{mod}/ai2", s.Z);
+                    CreateAccel($"{mod}/ai0");
+                    CreateAccel($"{mod}/ai1");
+                    CreateAccel($"{mod}/ai2");
                 }
 
                 double rate = (_rate > 0) ? _rate : AccelRate;
@@ -267,19 +266,21 @@ namespace PHM_Project_DockPanel.Services.DAQ
             }
         }
 
-        private void CreateAccel(string phys, double sens_mVpg)
+        private void CreateAccel(string phys)
         {
-            var ch = _aiTask.AIChannels.CreateAccelerometerChannel(
+            // NI 9230은 IEPE 내장이 없는 하드웨어 AC 결합 전압 입력 모듈.
+            // CreateAccelerometerChannel + Internal 익사이테이션을 사용하면
+            // DAQmx 드라이버가 AC 결합을 DC 모드로 재설정해
+            // IEPE 바이어스(~24 V) 전체가 측정값에 포함된다 (~24 V × 1000 / 100 mV/g = 240 g).
+            // CreateVoltageChannel을 사용하면 하드웨어 AC 결합이 유지되어 DC 바이어스가 차단되고,
+            // g 변환은 ReadCallback에서 수동으로 수행한다: g = V × 1000 / sensitivity_mVpg
+            _aiTask.AIChannels.CreateVoltageChannel(
                 phys,
                 "",
                 AITerminalConfiguration.Pseudodifferential,
-                _minG,                      // 여기서는 g 범위로 사용됩니다(예: -10~+10 g)
-                _maxG,
-                sens_mVpg,                  // mV/g
-                AIAccelerometerSensitivityUnits.MillivoltsPerG,
-                AIExcitationSource.Internal,
-                0.004,                      // 4 mA
-                AIAccelerationUnits.G
+                _minG,   // 전압 최솟값(V) — MainForm 기본값 −5V → 측정 범위 ±50 g
+                _maxG,   // 전압 최댓값(V) — MainForm 기본값  +5V
+                AIVoltageUnits.Volts
             );
         }
 
@@ -356,12 +357,14 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     {
                         int baseIdx = m * 3;
 
+                        // CreateVoltageChannel이므로 block[] 값은 Volts (AC 결합, DC 차단)
+                        // g 변환: g = V × 1000 / sensitivity_mVpg
                         var sens = GetAxisSens(_modules[m]);
-                        double gx = block[baseIdx + 0, i];
-                        double gy = block[baseIdx + 1, i];
-                        double gz = block[baseIdx + 2, i];
+                        double gx = block[baseIdx + 0, i] * 1000.0 / sens.X;
+                        double gy = block[baseIdx + 1, i] * 1000.0 / sens.Y;
+                        double gz = block[baseIdx + 2, i] * 1000.0 / sens.Z;
 
-                        // 기존(미리 계산/로드된) 오프셋만 적용
+                        // 오프셋 적용
                         var off = GetAxisOffset(_modules[m]);
                         gx -= off.X; gy -= off.Y; gz -= off.Z;
 
