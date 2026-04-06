@@ -43,8 +43,8 @@ namespace PHM_Project_DockPanel.Windows
         private List<double> _pos, _vel, _trq;
         private List<double> _cmdPos, _cmdVel, _cmdTrq;
 
-        // AjinMotion 다축 데이터 (축 번호 → Pos/Vel/Trq 리스트)
-        private Dictionary<int, (List<double> Pos, List<double> Vel, List<double> Trq)> _ajinAxesData;
+        // AjinMotion 다축 데이터 (축 번호 → Pos/Vel/Trq/CmdPos 리스트)
+        private Dictionary<int, (List<double> Pos, List<double> Vel, List<double> Trq, List<double> CmdPos)> _ajinAxesData;
         private ComboBox _cmbAjinAxis;
         private Label _lblAjinAxis;
         private bool _suppressAjinAxisEvent;
@@ -245,7 +245,9 @@ namespace PHM_Project_DockPanel.Windows
                 {
                     var d = _ajinAxesData[ax];
                     _pos = d.Pos; _vel = d.Vel; _trq = d.Trq;
-                    _cmdPos = d.Pos; _cmdVel = d.Vel; _cmdTrq = d.Trq;
+                    _cmdPos = d.CmdPos;
+                    _cmdVel = DifferentiatePositions(d.CmdPos, _time);
+                    _cmdTrq = d.Trq;
                     DrawFeedbackView();
                 }
             };
@@ -617,22 +619,23 @@ namespace PHM_Project_DockPanel.Windows
             if (axisIndices.Count == 0) return false;
 
             // 각 축의 컬럼 인덱스 조회
-            var axColMap = new Dictionary<int, (int pos, int vel, int trq)>();
+            var axColMap = new Dictionary<int, (int pos, int vel, int trq, int cmdPos)>();
             foreach (int ax in axisIndices)
             {
-                int pi = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_pos"));
-                int vi = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_vel"));
-                int ti = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_trq"));
+                int pi  = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_pos("));
+                int vi  = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_vel("));
+                int ti  = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_trq("));
+                int cpi = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_cmdpos("));
                 if (pi >= 0 && vi >= 0 && ti >= 0)
-                    axColMap[ax] = (pi, vi, ti);
+                    axColMap[ax] = (pi, vi, ti, cpi); // cpi may be -1 (older files without CmdPos)
             }
             if (axColMap.Count == 0) return false;
 
             // 공통 시간 리스트
             _time = new List<double>();
-            _ajinAxesData = new Dictionary<int, (List<double>, List<double>, List<double>)>();
+            _ajinAxesData = new Dictionary<int, (List<double>, List<double>, List<double>, List<double>)>();
             foreach (int ax in axColMap.Keys)
-                _ajinAxesData[ax] = (new List<double>(), new List<double>(), new List<double>());
+                _ajinAxesData[ax] = (new List<double>(), new List<double>(), new List<double>(), new List<double>());
 
             for (int i = 1; i < lines.Length; i++)
             {
@@ -643,17 +646,20 @@ namespace PHM_Project_DockPanel.Windows
                     continue;
 
                 bool allOk = true;
-                var rowData = new Dictionary<int, (double p, double v, double tq)>();
+                var rowData = new Dictionary<int, (double p, double v, double tq, double cp)>();
                 foreach (var kv in axColMap)
                 {
                     int ax = kv.Key;
-                    var (pi, vi, ti) = kv.Value;
+                    var (pi, vi, ti, cpi) = kv.Value;
                     if (cols.Length <= Math.Max(pi, Math.Max(vi, ti))) { allOk = false; break; }
                     if (!double.TryParse(cols[pi], NumberStyles.Any, CultureInfo.InvariantCulture, out double p) ||
                         !double.TryParse(cols[vi], NumberStyles.Any, CultureInfo.InvariantCulture, out double v) ||
                         !double.TryParse(cols[ti], NumberStyles.Any, CultureInfo.InvariantCulture, out double tq))
                     { allOk = false; break; }
-                    rowData[ax] = (p, v, tq);
+                    double cp = (cpi >= 0 && cpi < cols.Length &&
+                                 double.TryParse(cols[cpi], NumberStyles.Any, CultureInfo.InvariantCulture, out double cpVal))
+                                ? cpVal : p; // CmdPos 컬럼 없으면 ActPos로 대체
+                    rowData[ax] = (p, v, tq, cp);
                 }
                 if (!allOk) continue;
 
@@ -664,6 +670,7 @@ namespace PHM_Project_DockPanel.Windows
                     lists.Pos.Add(kv.Value.p);
                     lists.Vel.Add(kv.Value.v);
                     lists.Trq.Add(kv.Value.tq);
+                    lists.CmdPos.Add(kv.Value.cp);
                 }
             }
 
@@ -679,7 +686,9 @@ namespace PHM_Project_DockPanel.Windows
 
             var first = _ajinAxesData[firstAxis];
             _pos = first.Pos; _vel = first.Vel; _trq = first.Trq;
-            _cmdPos = first.Pos; _cmdVel = first.Vel; _cmdTrq = first.Trq;
+            _cmdPos = first.CmdPos;
+            _cmdVel = DifferentiatePositions(first.CmdPos, _time); // CmdPos 차분 → CmdVel
+            _cmdTrq = first.Trq; // 토크 command 없음 → following error = 0
 
             return true;
         }
@@ -705,6 +714,7 @@ namespace PHM_Project_DockPanel.Windows
         private void DrawFeedbackView()
         {
             if (_kind != LogKind.Torque) return;
+            RestoreFeedbackTitles();
             DrawTimeAndFreq(_time, _pos, 0);
             DrawTimeAndFreq(_time, _vel, 1);
             DrawTimeAndFreq(_time, _trq, 2);
@@ -713,6 +723,20 @@ namespace PHM_Project_DockPanel.Windows
         private void DrawResidualView()
         {
             if (_kind != LogKind.Torque) return;
+
+            // 차트 타이틀을 Following Error 표기로 변경
+            if (_charts != null)
+            {
+                string[] errTitles = { "Pos Error (mm)", "Vel Error (mm/s)", "Trq Error (%)" };
+                for (int row = 0; row < 3; row++)
+                {
+                    if (_charts[row, 0]?.Titles.Count > 0)
+                        _charts[row, 0].Titles[0].Text = errTitles[row] + " (Time)";
+                    if (_charts[row, 1]?.Titles.Count > 0)
+                        _charts[row, 1].Titles[0].Text = errTitles[row] + " (Freq)";
+                }
+            }
+
             var posRes = ZipResidual(_cmdPos, _pos);
             var velRes = ZipResidual(_cmdVel, _vel);
             var trqRes = ZipResidual(_cmdTrq, _trq);
@@ -721,8 +745,38 @@ namespace PHM_Project_DockPanel.Windows
             DrawTimeAndFreq(_time, trqRes, 2);
         }
 
+        private void RestoreFeedbackTitles()
+        {
+            if (_charts == null) return;
+            string[] titles = { "Pos", "Vel", "Trq" };
+            for (int row = 0; row < 3; row++)
+            {
+                if (_charts[row, 0]?.Titles.Count > 0)
+                    _charts[row, 0].Titles[0].Text = titles[row] + " (Time)";
+                if (_charts[row, 1]?.Titles.Count > 0)
+                    _charts[row, 1].Titles[0].Text = titles[row] + " (Freq)";
+            }
+        }
+
         private static List<double> ZipResidual(List<double> cmd, List<double> fb)
-            => Enumerable.Zip(cmd, fb, (c, f) => c - f).ToList();
+            => cmd == null || fb == null
+               ? new List<double>()
+               : Enumerable.Zip(cmd, fb, (c, f) => c - f).ToList();
+
+        /// <summary>위치 배열을 시간 배열로 수치 미분하여 속도를 반환합니다.</summary>
+        private static List<double> DifferentiatePositions(List<double> pos, List<double> time)
+        {
+            if (pos == null || time == null || pos.Count < 2)
+                return pos ?? new List<double>();
+            var vel = new List<double>(pos.Count);
+            vel.Add(0.0); // 첫 샘플
+            for (int i = 1; i < pos.Count; i++)
+            {
+                double dt = time[i] - time[i - 1];
+                vel.Add(dt > 1e-9 ? (pos[i] - pos[i - 1]) / dt : 0.0);
+            }
+            return vel;
+        }
 
         // ======================= Accel =======================
         private bool TryParseAccelCsv(string[] lines, string[] headers)

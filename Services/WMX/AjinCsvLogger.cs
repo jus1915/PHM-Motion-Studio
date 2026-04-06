@@ -20,9 +20,10 @@ namespace PHM_Project_DockPanel.Services.WMX
         public int IntervalMs { get; set; } = 10;   // 기본 10ms (100 Hz)
 
         // ── 외부 주입 ──────────────────────────────────────────────
-        private readonly Func<int, double> _getPos;     // axis → pos(mm)
-        private readonly Func<int, double> _getVel;     // axis → vel(mm/s), null이면 위치 차분으로 계산
+        private readonly Func<int, double> _getPos;     // axis → actual pos(mm)
+        private readonly Func<int, double> _getVel;     // axis → actual vel(mm/s), null이면 위치 차분으로 계산
         private readonly Func<int, double> _getTorque;  // axis → torque(%)
+        private readonly Func<int, double> _getCmdPos;  // axis → command pos(mm), null이면 기록 안 함
         private readonly Action<string> _log;
 
         // ── 상태 ──────────────────────────────────────────────────
@@ -39,11 +40,13 @@ namespace PHM_Project_DockPanel.Services.WMX
             Func<int, double> getPos,
             Func<int, double> getTorque,
             Action<string> log = null,
-            Func<int, double> getVel = null)
+            Func<int, double> getVel = null,
+            Func<int, double> getCmdPos = null)
         {
             _getPos    = getPos    ?? throw new ArgumentNullException(nameof(getPos));
             _getTorque = getTorque ?? throw new ArgumentNullException(nameof(getTorque));
-            _getVel    = getVel;   // null이면 위치 차분으로 계산
+            _getVel    = getVel;
+            _getCmdPos = getCmdPos; // null이면 CmdPos 컬럼 생략
             _log       = log ?? (_ => { });
         }
 
@@ -80,9 +83,13 @@ namespace PHM_Project_DockPanel.Services.WMX
         private void PollLoop(CancellationToken token)
         {
             // 헤더
+            bool hasCmdPos = _getCmdPos != null;
             var header = new StringBuilder("Timestamp_ms");
             foreach (int ax in _axes)
+            {
                 header.Append($",Ax{ax}_Pos(mm),Ax{ax}_Vel(mm/s),Ax{ax}_Trq(%)");
+                if (hasCmdPos) header.Append($",Ax{ax}_CmdPos(mm)");
+            }
 
             // 이전 위치 (차분 속도 계산용)
             double[] prevPos = new double[_axes.Length];
@@ -117,6 +124,11 @@ namespace PHM_Project_DockPanel.Services.WMX
                                 : ((first || dtSec <= 0) ? 0.0 : (pos - prevPos[i]) / dtSec);
 
                             line.Append($",{pos:F4},{vel:F4},{trq:F4}");
+                            if (hasCmdPos)
+                            {
+                                double cmdPos = SafeGet(_getCmdPos, ax);
+                                line.Append($",{cmdPos:F4}");
+                            }
                             prevPos[i] = pos;
                         }
 

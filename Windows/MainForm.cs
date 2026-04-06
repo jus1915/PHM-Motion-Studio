@@ -136,9 +136,10 @@ namespace PHM_Project_DockPanel
             {
                 var ajin = _controller.AsAjin;
                 var ajinLogger = new AjinCsvLogger(
-                    getPos: ax => ajin.GetActPos(ax),
+                    getPos:    ax => ajin.GetActPos(ax),
                     getTorque: ax => ajin.GetTorque(ax),
-                    log: msg => AppEvents.RaiseLog(msg));
+                    log:       msg => AppEvents.RaiseLog(msg),
+                    getCmdPos: ax => ajin.GetCmdPos(ax));
                 _motion.SetAjinLogger(ajinLogger);
                 AppEvents.RaiseLog("[Ajin] AjinCsvLogger 주입 완료");
             }
