@@ -88,11 +88,12 @@ namespace PHM_Project_DockPanel.Services.WMX
             foreach (int ax in _axes)
             {
                 header.Append($",Ax{ax}_Pos(mm),Ax{ax}_Vel(mm/s),Ax{ax}_Trq(%)");
-                if (hasCmdPos) header.Append($",Ax{ax}_CmdPos(mm)");
+                if (hasCmdPos) header.Append($",Ax{ax}_CmdPos(mm),Ax{ax}_CmdVel(mm/s)");
             }
 
             // 이전 위치 (차분 속도 계산용)
-            double[] prevPos = new double[_axes.Length];
+            double[] prevPos    = new double[_axes.Length];
+            double[] prevCmdPos = new double[_axes.Length];
             long prevTime = 0;
             bool first = true;
 
@@ -127,7 +128,9 @@ namespace PHM_Project_DockPanel.Services.WMX
                             if (hasCmdPos)
                             {
                                 double cmdPos = SafeGet(_getCmdPos, ax);
-                                line.Append($",{cmdPos:F4}");
+                                double cmdVel = (first || dtSec <= 0) ? 0.0 : (cmdPos - prevCmdPos[i]) / dtSec;
+                                line.Append($",{cmdPos:F4},{cmdVel:F4}");
+                                prevCmdPos[i] = cmdPos;
                             }
                             prevPos[i] = pos;
                         }
