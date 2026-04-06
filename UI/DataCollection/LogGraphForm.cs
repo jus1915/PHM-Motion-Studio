@@ -42,6 +42,7 @@ namespace PHM_Project_DockPanel.Windows
         // Torque 데이터
         private List<double> _pos, _vel, _trq;
         private List<double> _cmdPos, _cmdVel, _cmdTrq;
+        private bool _hasCmdData; // CmdPos/CmdVel 컬럼이 실제로 CSV에 있었는지
 
         // AjinMotion 다축 데이터 (축 번호 → Pos/Vel/Trq/CmdPos/CmdVel 리스트)
         private Dictionary<int, (List<double> Pos, List<double> Vel, List<double> Trq, List<double> CmdPos, List<double> CmdVel)> _ajinAxesData;
@@ -319,7 +320,7 @@ namespace PHM_Project_DockPanel.Windows
             }
 
             _btnFeedback.Enabled = true;
-            _btnResidual.Enabled = true;
+            _btnResidual.Enabled = _hasCmdData;
         }
 
         private void BuildAccelLayout()
@@ -593,6 +594,7 @@ namespace PHM_Project_DockPanel.Windows
                     _time[i] = (_time[i] - t0) + sp;
             }
 
+            _hasCmdData = true; // WMX3 CSV는 항상 CmdPos/CmdVel/CmdTrq 컬럼 포함
             return _time.Count > 1;
         }
 
@@ -688,6 +690,9 @@ namespace PHM_Project_DockPanel.Windows
             // 축 선택 콤보 업데이트 및 첫 번째 축으로 초기화
             int firstAxis = axColMap.Keys.First();
             UpdateAjinAxisCombo(axColMap.Keys.ToList(), firstAxis);
+
+            // CmdPos 컬럼이 실제로 존재하는지 확인 (cpi >= 0 인 축이 하나라도 있으면)
+            _hasCmdData = axColMap.Values.Any(v => v.cmdPos >= 0);
 
             var first = _ajinAxesData[firstAxis];
             _pos = first.Pos; _vel = first.Vel; _trq = first.Trq;
