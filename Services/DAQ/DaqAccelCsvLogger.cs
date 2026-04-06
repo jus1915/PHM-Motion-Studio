@@ -27,7 +27,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private double _rate = 0;         // 로깅 샘플레이트
         private static double AccelRate => 1.0 / AppState.GetPeriodForColumn("x");
         private int _readBlock = 2048;       // 채널당 블록 크기
-        private double _minG = -5, _maxG = 5; // 9230: PseudoDiff
+        private double _minG = -5, _maxG = 5;       // 9230: PseudoDiff, voltage range (V)
+        private double _iepeCurrentAmps = 0.004;     // IEPE excitation current (A), typical 4 mA
 
         public string[] Modules { get { return _modules; } set { _modules = value ?? new string[0]; } }
         public string AiRange { get { return _aiRange; } set { _aiRange = value ?? "ai0:2"; } }
@@ -35,6 +36,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public int ReadBlock { get { return _readBlock; } set { _readBlock = Math.Max(1, value); } }
         public double MinVoltage { get { return _minG; } set { _minG = value; } }
         public double MaxVoltage { get { return _maxG; } set { _maxG = value; } }
+        public double IepeCurrentAmps { get { return _iepeCurrentAmps; } set { _iepeCurrentAmps = value > 0 ? value : 0.004; } }
 
         // ===== 민감도/오프셋 (mV/g, g) =====
         private class AxisSens { public double X; public double Y; public double Z; }
@@ -272,20 +274,22 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
         private void CreateAccel(string phys)
         {
-            // NI 9230은 IEPE 내장이 없는 하드웨어 AC 결합 전압 입력 모듈.
-            // CreateAccelerometerChannel + Internal 익사이테이션을 사용하면
-            // DAQmx 드라이버가 AC 결합을 DC 모드로 재설정해
-            // IEPE 바이어스(~24 V) 전체가 측정값에 포함된다 (~24 V × 1000 / 100 mV/g = 240 g).
-            // CreateVoltageChannel을 사용하면 하드웨어 AC 결합이 유지되어 DC 바이어스가 차단되고,
-            // g 변환은 ReadCallback에서 수동으로 수행한다: g = V × 1000 / sensitivity_mVpg
-            _aiTask.AIChannels.CreateVoltageChannel(
+            // NI 9230: 하드웨어 AC 결합 전압 입력 모듈.
+            // CreateVoltageChannel → 하드웨어 AC 결합 유지 (DC 바이어스 차단)
+            // 이후 ExcitationSource/Value → IEPE 전류 활성화 (센서 FET 바이어스 공급)
+            // CreateAccelerometerChannel + Internal은 DAQmx가 AC 결합을 DC 모드로 덮어써
+            // IEPE 바이어스(~24 V)가 그대로 측정돼 ~240 g 오류를 유발하므로 사용하지 않음.
+            var ch = _aiTask.AIChannels.CreateVoltageChannel(
                 phys,
                 "",
                 AITerminalConfiguration.Pseudodifferential,
-                _minG,   // 전압 최솟값(V) — MainForm 기본값 −5V → 측정 범위 ±50 g
-                _maxG,   // 전압 최댓값(V) — MainForm 기본값  +5V
+                _minG,   // 전압 최솟값(V)
+                _maxG,   // 전압 최댓값(V)
                 AIVoltageUnits.Volts
             );
+            // IEPE 전류 활성화: 피에조 센서 내부 FET 바이어스에 필요
+            ch.ExcitationSource = AIExcitationSource.Internal;
+            ch.ExcitationValue = _iepeCurrentAmps; // 기본 0.004 A (4 mA)
         }
 
         public void Stop() { SafeStop(); }

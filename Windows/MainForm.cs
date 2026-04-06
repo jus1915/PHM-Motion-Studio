@@ -181,6 +181,7 @@ namespace PHM_Project_DockPanel
             _daq.MaxVoltage =  voltRange;
             _daq.SetModuleSensitivity(cfg.Module, cfg.SensX, cfg.SensY, cfg.SensZ);
             _daq.SetModuleOffset(cfg.Module, 0.0, 0.0, 0.0);
+            _daq.IepeCurrentAmps = cfg.IepeCurrentAmps;
 
             // HttpSender 도 동기화 (모듈/채널/IEPE 변경 반영)
             if (_httpSender != null)
