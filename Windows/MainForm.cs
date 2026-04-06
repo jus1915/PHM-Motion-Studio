@@ -182,11 +182,12 @@ namespace PHM_Project_DockPanel
             _daq.SetModuleSensitivity(cfg.Module, cfg.SensX, cfg.SensY, cfg.SensZ);
             _daq.SetModuleOffset(cfg.Module, cfg.OffsetX, cfg.OffsetY, cfg.OffsetZ);
 
-            // HttpSender 도 동기화 (모듈/채널 변경 반영)
+            // HttpSender 도 동기화 (모듈/채널/IEPE 변경 반영)
             if (_httpSender != null)
             {
                 _httpSender.Modules        = new[] { cfg.Module };
                 _httpSender.ChannelTriplet = cfg.Channel;
+                _httpSender.IepeMilliAmps  = cfg.IepeCurrentAmps * 1000.0; // A → mA
             }
 
             AppEvents.RaiseLog($"[DAQ 설정 적용] {cfg.Module}/{cfg.Channel}  " +
@@ -206,7 +207,7 @@ namespace PHM_Project_DockPanel
                 SampleRate     = 1280,
                 FrameSamples   = 64,
                 ServerUrl      = HttpServerUrl,
-                IepeMilliAmps  = 4.0,
+                IepeMilliAmps  = _daqCfg.IepeCurrentAmps * 1000.0, // A → mA
                 MinG           = -25,
                 MaxG           = 25,
                 NumWorkers     = 6,

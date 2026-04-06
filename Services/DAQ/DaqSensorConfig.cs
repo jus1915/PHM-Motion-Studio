@@ -27,16 +27,6 @@ namespace PHM_Project_DockPanel.Services.DAQ
         [JsonPropertyName("sens_z_mvpg")]
         public double SensZ { get; set; } = 985.0;
 
-        // ── 오프셋 (g) ────────────────────────────────────────────────────
-        [JsonPropertyName("offset_x_g")]
-        public double OffsetX { get; set; } = 0.0;
-
-        [JsonPropertyName("offset_y_g")]
-        public double OffsetY { get; set; } = 0.0;
-
-        [JsonPropertyName("offset_z_g")]
-        public double OffsetZ { get; set; } = 0.0;
-
         // ── 수집 설정 ─────────────────────────────────────────────────────
         [JsonPropertyName("sample_rate_hz")]
         public double SampleRate { get; set; } = 1000.0;
@@ -49,12 +39,12 @@ namespace PHM_Project_DockPanel.Services.DAQ
         [JsonPropertyName("g_range")]
         public double GRange { get; set; } = 5.0;
 
-        // ── 입출력 헬퍼 ───────────────────────────────────────────────────
+        /// <summary>IEPE 전류 (A). DaqAccelHttpSender 에 전달됩니다.</summary>
+        [JsonPropertyName("iepe_current_a")]
+        public double IepeCurrentAmps { get; set; } = 0.004;
 
-        /// <summary>
-        /// 측정 범위(g)와 민감도로부터 필요한 최대 전압(V)을 계산합니다.
-        /// CreateVoltageChannel 의 min/max 에 사용합니다.
-        /// </summary>
+        // ── 계산 헬퍼 ────────────────────────────────────────────────────
+        /// <summary>측정 범위(g) × 최대 민감도 / 1000 → CreateVoltageChannel min/max (V)</summary>
         public double VoltageRange =>
             GRange * Math.Max(SensX, Math.Max(SensY, SensZ)) / 1000.0;
 
@@ -68,12 +58,12 @@ namespace PHM_Project_DockPanel.Services.DAQ
             {
                 if (File.Exists(path))
                 {
-                    var json = File.ReadAllText(path);
-                    var cfg = JsonSerializer.Deserialize<DaqSensorConfig>(json, _jsonOpts);
+                    var cfg = JsonSerializer.Deserialize<DaqSensorConfig>(
+                        File.ReadAllText(path), _jsonOpts);
                     if (cfg != null) return cfg;
                 }
             }
-            catch { /* 파싱 실패 시 기본값 사용 */ }
+            catch { }
             return new DaqSensorConfig();
         }
 
