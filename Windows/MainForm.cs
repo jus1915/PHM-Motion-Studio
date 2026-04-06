@@ -25,7 +25,7 @@ namespace PHM_Project_DockPanel
         // ── 상수 ────────────────────────────────────────────────────────────
         private const string LayoutFile = "layout.xml";
         private const string AxisConfigFile = "axis_config.json";
-        private const string DaqModule = "cDAQ2Mod1";
+        private const string DaqModule = "cDAQ2Mod2";
         private const string DaqChannel = "ai0:2";
         private const string HttpServerUrl = "http://10.100.17.221:8000/api/ingest";
 
