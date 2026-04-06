@@ -258,6 +258,10 @@ namespace PHM_Project_DockPanel.Services
                     // ── DAQ 가속도 CSV 로거 (공통) ─────────────────────────
                     if (logAccel && _accelLogger != null)
                     {
+                        // Passive Monitor가 같은 NI 모듈을 사용 중일 수 있으므로 먼저 해제 요청
+                        AppEvents.RaisePassiveMonitorSuspend();
+                        await Task.Delay(300); // DAQmx 리소스 해제 대기
+
                         try { startedAccelCsvRun = _accelLogger.Start(active.ToArray(), accelDir, baseName, 0); }
                         catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (DAQ CSV) {ex.Message}"); }
                     }
@@ -300,6 +304,10 @@ namespace PHM_Project_DockPanel.Services
                     stopTasks.Add(Task.Run(() => { try { _accelLogger.Stop(); } catch { } }));
 
                 if (stopTasks.Count > 0) await Task.WhenAll(stopTasks);
+
+                // Passive Monitor 재시작 (모션 전에 suspend 했던 경우)
+                if (startedAccelCsvRun)
+                    AppEvents.RaisePassiveMonitorResume();
 
                 // 로깅 완료 → Log Graph Viewer에 파일 전달
                 if (!string.IsNullOrEmpty(ajinOutputPath) && File.Exists(ajinOutputPath))

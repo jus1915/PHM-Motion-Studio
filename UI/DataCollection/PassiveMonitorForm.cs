@@ -34,6 +34,7 @@ namespace PHM_Project_DockPanel.Windows
         private volatile float _uiNoiseFloor;
         private volatile float _uiOnsetThr;
         private volatile int   _uiStateCode; // 0=Idle, 1=Active, 2=PostBuffer
+        private bool _suspendedForRun; // PHM 모션 실행 중 자동 일시 정지 여부
 
         // ── UI ───────────────────────────────────────────────────────────────
         private Button         _btnStart;
@@ -56,6 +57,16 @@ namespace PHM_Project_DockPanel.Windows
             _uiTimer = new System.Windows.Forms.Timer { Interval = 150 };
             _uiTimer.Tick += (s, e) => RefreshMetrics();
             _uiTimer.Start();
+
+            // PHM 모션과 NI 모듈 리소스 공유 조정
+            AppEvents.PassiveMonitorSuspendRequested += OnSuspendRequested;
+            AppEvents.PassiveMonitorResumeRequested  += OnResumeRequested;
+            FormClosed += (s, e) =>
+            {
+                AppEvents.PassiveMonitorSuspendRequested -= OnSuspendRequested;
+                AppEvents.PassiveMonitorResumeRequested  -= OnResumeRequested;
+                SafeStopDaq();
+            };
         }
 
         // =====================================================================
@@ -256,6 +267,33 @@ namespace PHM_Project_DockPanel.Windows
             _aiTask = null;
         }
 
+        // PHM 모션 실행 전 호출 → DAQ 태스크 해제 (배경 스레드에서 호출될 수 있음)
+        private void OnSuspendRequested()
+        {
+            if (!_monitoring) return;
+            _suspendedForRun = true;
+            SafeStopDaq();
+            BeginInvoke(new Action(() =>
+            {
+                _btnStart.Enabled = true;
+                _btnStop.Enabled  = false;
+                _uiStateCode      = 0;
+                AppEvents.RaiseLog("[Passive Monitor] 모션 시작 — DAQ 일시 해제");
+            }));
+        }
+
+        // PHM 모션 종료 후 호출 → 모니터링 자동 재시작
+        private void OnResumeRequested()
+        {
+            if (!_suspendedForRun) return;
+            _suspendedForRun = false;
+            BeginInvoke(new Action(() =>
+            {
+                StartMonitoring();
+                AppEvents.RaiseLog("[Passive Monitor] 모션 완료 — 모니터링 재시작");
+            }));
+        }
+
         private void CreateChannel(string phys, double sens_mVpg)
         {
             _aiTask.AIChannels.CreateAccelerometerChannel(
@@ -385,7 +423,7 @@ namespace PHM_Project_DockPanel.Windows
                         double x = ch > 0 ? frame[0, i] : 0;
                         double y = ch > 1 ? frame[1, i] : 0;
                         double z = ch > 2 ? frame[2, i] : 0;
-                        sw.WriteLine($"{t:F6},{x:G6},{y:G6},{z:G6}");
+                        sw.WriteLine(FormattableString.Invariant($"{t:F6},{x:G6},{y:G6},{z:G6}"));
                         idx++;
                     }
                 }

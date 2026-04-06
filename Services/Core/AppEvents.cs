@@ -64,5 +64,12 @@ namespace PHM_Project_DockPanel.Services
             => RequestClearSimulator?.Invoke();
 
         public static void RaiseLog(string message) => LogRequested?.Invoke(message);
+
+        // Passive Monitor ↔ PHM_Motion 리소스 조정
+        public static event Action PassiveMonitorSuspendRequested;
+        public static event Action PassiveMonitorResumeRequested;
+
+        public static void RaisePassiveMonitorSuspend() => PassiveMonitorSuspendRequested?.Invoke();
+        public static void RaisePassiveMonitorResume()  => PassiveMonitorResumeRequested?.Invoke();
     }
 }
