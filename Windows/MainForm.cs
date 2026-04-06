@@ -149,10 +149,11 @@ namespace PHM_Project_DockPanel
             if (sim != null)
             {
                 var simLogger = new AjinCsvLogger(
-                    getPos:    ax => _controller.GetStatus().AxesStatus[ax].ActualPos,
-                    getTorque: ax => sim.GetTorque(ax),
-                    log:       msg => AppEvents.RaiseLog(msg),
-                    getVel:    ax => sim.GetVelocity(ax));
+                    getPos:     ax => _controller.GetStatus().AxesStatus[ax].ActualPos,
+                    getTorque:  ax => sim.GetTorque(ax),
+                    log:        msg => AppEvents.RaiseLog(msg),
+                    getVel:     ax => sim.GetVelocity(ax),
+                    fileSuffix: "Simulator");
                 _motion.SetAjinLogger(simLogger);
                 AppEvents.RaiseLog("[Sim] 가상 토크 로거 주입 완료");
             }

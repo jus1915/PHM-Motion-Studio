@@ -25,6 +25,7 @@ namespace PHM_Project_DockPanel.Services.WMX
         private readonly Func<int, double> _getTorque;  // axis → torque(%)
         private readonly Func<int, double> _getCmdPos;  // axis → command pos(mm), null이면 기록 안 함
         private readonly Action<string> _log;
+        private readonly string _fileSuffix;            // CSV 파일명 접미사 (예: "AjinMotion", "Simulator")
 
         // ── 상태 ──────────────────────────────────────────────────
         private CancellationTokenSource _cts;
@@ -41,13 +42,15 @@ namespace PHM_Project_DockPanel.Services.WMX
             Func<int, double> getTorque,
             Action<string> log = null,
             Func<int, double> getVel = null,
-            Func<int, double> getCmdPos = null)
+            Func<int, double> getCmdPos = null,
+            string fileSuffix = "AjinMotion")
         {
             _getPos    = getPos    ?? throw new ArgumentNullException(nameof(getPos));
             _getTorque = getTorque ?? throw new ArgumentNullException(nameof(getTorque));
             _getVel    = getVel;
-            _getCmdPos = getCmdPos; // null이면 CmdPos 컬럼 생략
+            _getCmdPos = getCmdPos;
             _log       = log ?? (_ => { });
+            _fileSuffix = string.IsNullOrWhiteSpace(fileSuffix) ? "AjinMotion" : fileSuffix;
         }
 
         public bool Start(int[] axes, string dir, string baseName)
@@ -58,7 +61,7 @@ namespace PHM_Project_DockPanel.Services.WMX
             {
                 Directory.CreateDirectory(dir);
                 _axes = axes;
-                _filePath = Path.Combine(dir, baseName + "_AjinMotion.csv");
+                _filePath = Path.Combine(dir, baseName + "_" + _fileSuffix + ".csv");
                 _cts = new CancellationTokenSource();
                 _task = Task.Run(() => PollLoop(_cts.Token), _cts.Token);
                 _log($"[AjinLog] 시작 → {_filePath}");
