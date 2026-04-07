@@ -15,6 +15,7 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using PHM_Project_DockPanel.Services.Core;
 using PHM_Project_DockPanel.Services;
+using PHM_Project_DockPanel.Services.DAQ;
 
 namespace PHM_Project_DockPanel.UI.DataAnalysis
 {
@@ -156,6 +157,27 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private static double SampleRateFor(string yColumn) => AppState.GetForColumn(yColumn);
 
         private static double SamplePeriodFor(string yColumn) => AppState.GetPeriodForColumn(yColumn);
+
+        // ── InfluxDB 데이터 소스 ──────────────────────────────────────────────
+        private InfluxDbDataSource _influxSource;
+        private List<SignalSegment> _influxSegments = new List<SignalSegment>();
+
+        private Panel _pnlSourceSelector;
+        private Panel _pnlCsvContent;
+        private Panel _pnlInfluxContent;
+        private RadioButton _rdoCsv;
+        private RadioButton _rdoInflux;
+        private ComboBox _cmbInfluxDevice;
+        private ComboBox _cmbInfluxLabel;
+        private ComboBox _cmbInfluxChannel;
+        private DateTimePicker _dtpFrom;
+        private DateTimePicker _dtpTo;
+        private NumericUpDown _nudSegSeconds;
+        private Button _btnInfluxQuery;
+        private ListBox _lstSegments;
+        private Label _lblInfluxStatus;
+
+        private bool InfluxMode => _rdoInflux?.Checked == true;
 
         // ===========================
         // Ctor
@@ -372,10 +394,43 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 }
             };
 
-            leftPanel.Controls.Add(fileList);
-            leftPanel.Controls.Add(txtFilter);
-            leftPanel.Controls.Add(cmbYColumn);
-            leftPanel.Controls.Add(buttonPanel);
+            // ── CSV 콘텐츠 래퍼 ───────────────────────────────────────────────
+            _pnlCsvContent = new Panel { Dock = DockStyle.Fill };
+            _pnlCsvContent.Controls.Add(fileList);
+            _pnlCsvContent.Controls.Add(txtFilter);
+            _pnlCsvContent.Controls.Add(cmbYColumn);
+            _pnlCsvContent.Controls.Add(buttonPanel);
+
+            // ── InfluxDB 콘텐츠 패널 ─────────────────────────────────────────
+            _pnlInfluxContent = BuildInfluxPanel();
+            _pnlInfluxContent.Visible = false;
+
+            // ── 데이터 소스 선택 바 ──────────────────────────────────────────
+            _pnlSourceSelector = new Panel { Dock = DockStyle.Top, Height = 28, BackColor = SystemColors.ControlLight };
+            var srcFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+            srcFlow.Controls.Add(new Label
+            {
+                Text = "소스:",
+                AutoSize = true,
+                Margin = new Padding(6, 6, 4, 0),
+                Font = new Font(this.Font, FontStyle.Bold)
+            });
+            _rdoCsv    = new RadioButton { Text = "CSV 파일", AutoSize = true, Checked = true, Margin = new Padding(0, 5, 10, 0) };
+            _rdoInflux = new RadioButton { Text = "InfluxDB",  AutoSize = true, Margin = new Padding(0, 5, 0, 0) };
+            _rdoInflux.CheckedChanged += RdoInflux_CheckedChanged;
+            srcFlow.Controls.Add(_rdoCsv);
+            srcFlow.Controls.Add(_rdoInflux);
+            _pnlSourceSelector.Controls.Add(srcFlow);
+
+            // DockStyle.Top 은 마지막 추가 순서가 최상단 → 역순 추가
+            leftPanel.Controls.Add(_pnlCsvContent);     // Fill  (나중에 Hide/Show)
+            leftPanel.Controls.Add(_pnlInfluxContent);  // Fill  (나중에 Hide/Show)
+            leftPanel.Controls.Add(_pnlSourceSelector); // Top   (항상 맨 위)
             split.Panel1.Controls.Add(leftPanel);
 
             // ----- Right -----
@@ -1449,6 +1504,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void ComputeAndRenderFeatures()
         {
+            // InfluxDB 모드이면 별도 경로
+            if (InfluxMode)
+            {
+                ComputeFeaturesFromInfluxSegments();
+                return;
+            }
+
             if (cmbYColumn.SelectedItem == null)
             {
                 MessageBox.Show("Y 컬럼을 먼저 선택하세요.");
@@ -2140,6 +2202,360 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             int g = (int)Math.Round(a.G + (b.G - a.G) * t);
             int bch = (int)Math.Round(a.B + (b.B - a.B) * t);
             return Color.FromArgb(255, r, g, bch);
+        }
+
+        // =====================================================================
+        // InfluxDB 데이터 소스
+        // =====================================================================
+        private Panel BuildInfluxPanel()
+        {
+            var pnl = new Panel { Dock = DockStyle.Fill };
+
+            // row0: Device / Label / Channel
+            var row0 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top, Height = 30,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false
+            };
+            row0.Controls.Add(new Label { Text = "Device:", AutoSize = true, Margin = new Padding(4, 6, 2, 0) });
+            _cmbInfluxDevice = new ComboBox { Width = 120, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 6, 0) };
+            row0.Controls.Add(_cmbInfluxDevice);
+            row0.Controls.Add(new Label { Text = "레이블:", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
+            _cmbInfluxLabel = new ComboBox { Width = 100, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 6, 0) };
+            _cmbInfluxLabel.Items.Add("(전체)");
+            _cmbInfluxLabel.SelectedIndex = 0;
+            row0.Controls.Add(_cmbInfluxLabel);
+            row0.Controls.Add(new Label { Text = "채널:", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
+            _cmbInfluxChannel = new ComboBox { Width = 55, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 0, 0) };
+            _cmbInfluxChannel.Items.AddRange(new object[] { "x", "y", "z" });
+            _cmbInfluxChannel.SelectedIndex = 0;
+            row0.Controls.Add(_cmbInfluxChannel);
+
+            // row1: 시간 범위 / 세그먼트 / 조회 버튼
+            var row1 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top, Height = 30,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false
+            };
+            row1.Controls.Add(new Label { Text = "시작:", AutoSize = true, Margin = new Padding(4, 6, 2, 0) });
+            _dtpFrom = new DateTimePicker
+            {
+                Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
+                Width = 140, Margin = new Padding(0, 3, 4, 0), Value = DateTime.Now.AddHours(-1)
+            };
+            row1.Controls.Add(_dtpFrom);
+            row1.Controls.Add(new Label { Text = "종료:", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
+            _dtpTo = new DateTimePicker
+            {
+                Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
+                Width = 140, Margin = new Padding(0, 3, 4, 0), Value = DateTime.Now
+            };
+            row1.Controls.Add(_dtpTo);
+            row1.Controls.Add(new Label { Text = "세그(초):", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
+            _nudSegSeconds = new NumericUpDown
+            {
+                Width = 60, Minimum = 0.1m, Maximum = 60m, DecimalPlaces = 1,
+                Value = 1.0m, Increment = 0.5m, Margin = new Padding(0, 3, 4, 0)
+            };
+            row1.Controls.Add(_nudSegSeconds);
+            _btnInfluxQuery = new Button { Text = "조회", Width = 55, Height = 24, Margin = new Padding(0, 3, 0, 0) };
+            _btnInfluxQuery.Click += BtnInfluxQuery_Click;
+            row1.Controls.Add(_btnInfluxQuery);
+
+            // 상태 레이블
+            _lblInfluxStatus = new Label
+            {
+                Dock = DockStyle.Top, Height = 20,
+                ForeColor = Color.Gray, Padding = new Padding(4, 2, 0, 0),
+                Font = new Font(this.Font.FontFamily, 8f)
+            };
+
+            // 세그먼트 목록
+            _lstSegments = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
+            _lstSegments.SelectedIndexChanged += LstSegments_SelectedIndexChanged;
+
+            // 역순 추가 (마지막 추가 = 시각적 최상단)
+            pnl.Controls.Add(_lstSegments);
+            pnl.Controls.Add(_lblInfluxStatus);
+            pnl.Controls.Add(row1);
+            pnl.Controls.Add(row0);
+            return pnl;
+        }
+
+        private void RdoInflux_CheckedChanged(object sender, EventArgs e)
+        {
+            bool influx = _rdoInflux.Checked;
+            _pnlCsvContent.Visible    = !influx;
+            _pnlInfluxContent.Visible =  influx;
+
+            if (influx)
+            {
+                // 차트 초기화
+                lock (chartSync) chart.Series.Clear();
+                AutoAdjustYAxis();
+                ClearFrequencyChart();
+
+                // 메타데이터 비동기 로드
+                LoadInfluxMetadataAsync();
+            }
+        }
+
+        private async void LoadInfluxMetadataAsync()
+        {
+            _lblInfluxStatus.ForeColor = Color.Gray;
+            _lblInfluxStatus.Text = "메타데이터 로드 중...";
+            try
+            {
+                EnsureInfluxSource();
+                var devTask    = _influxSource.GetDevicesAsync();
+                var labelTask  = _influxSource.GetLabelsAsync();
+                await Task.WhenAll(devTask, labelTask).ConfigureAwait(false);
+
+                var devices = devTask.Result;
+                var labels  = labelTask.Result;
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    _cmbInfluxDevice.Items.Clear();
+                    foreach (var d in devices) _cmbInfluxDevice.Items.Add(d);
+                    if (_cmbInfluxDevice.Items.Count > 0) _cmbInfluxDevice.SelectedIndex = 0;
+
+                    _cmbInfluxLabel.Items.Clear();
+                    _cmbInfluxLabel.Items.Add("(전체)");
+                    foreach (var l in labels) _cmbInfluxLabel.Items.Add(l);
+                    _cmbInfluxLabel.SelectedIndex = 0;
+
+                    _lblInfluxStatus.Text = $"Device {devices.Count}개, 레이블 {labels.Count}개 조회됨";
+                }));
+
+                // 시간 범위 자동 설정
+                if (devices.Count > 0)
+                {
+                    var (first, last) = await _influxSource.GetTimeRangeAsync().ConfigureAwait(false);
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        _dtpFrom.Value = first.ToLocalTime();
+                        _dtpTo.Value   = last.ToLocalTime();
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"오류: {ex.Message}";
+                }));
+            }
+        }
+
+        private async void BtnInfluxQuery_Click(object sender, EventArgs e)
+        {
+            _btnInfluxQuery.Enabled = false;
+            _lblInfluxStatus.ForeColor = Color.Gray;
+            _lblInfluxStatus.Text = "조회 중...";
+            _lstSegments.Items.Clear();
+            _influxSegments.Clear();
+
+            // 차트 초기화
+            lock (chartSync) chart.Series.Clear();
+            AutoAdjustYAxis();
+            ClearFrequencyChart();
+
+            try
+            {
+                EnsureInfluxSource();
+                string device = _cmbInfluxDevice.SelectedItem?.ToString();
+                string label  = (_cmbInfluxLabel.SelectedIndex > 0)
+                                ? _cmbInfluxLabel.SelectedItem?.ToString()
+                                : null;
+                DateTime from   = _dtpFrom.Value.ToUniversalTime();
+                DateTime to     = _dtpTo.Value.ToUniversalTime();
+                double segSecs  = (double)_nudSegSeconds.Value;
+
+                var progress = new Progress<string>(msg =>
+                {
+                    if (!IsDisposed) BeginInvoke(new Action(() => _lblInfluxStatus.Text = msg));
+                });
+
+                var segs = await _influxSource.QuerySegmentsAsync(
+                    device, label, from, to, segSecs, progress).ConfigureAwait(false);
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    _influxSegments = segs;
+                    foreach (var seg in segs)
+                        _lstSegments.Items.Add($"[{seg.Label}] {seg.Name}  ({seg.SampleCount} pts)");
+
+                    _lblInfluxStatus.ForeColor = segs.Count > 0 ? Color.DarkGreen : Color.Gray;
+                    _lblInfluxStatus.Text = $"총 {segs.Count}개 세그먼트";
+                }));
+            }
+            catch (Exception ex)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                this.BeginInvoke(new Action(() => _btnInfluxQuery.Enabled = true));
+            }
+        }
+
+        private void LstSegments_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            int idx = _lstSegments.SelectedIndex;
+            if (idx < 0 || idx >= _influxSegments.Count) return;
+            var seg = _influxSegments[idx];
+            string ch = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
+            AddInfluxSeriesToChart(seg, ch);
+        }
+
+        private void AddInfluxSeriesToChart(SignalSegment seg, string channel)
+        {
+            if (seg == null) return;
+            double[] arr = seg.GetChannel(channel);
+            if (arr == null || arr.Length == 0) return;
+
+            string seriesName = seg.Name;
+            lock (_loadingSeries)
+            {
+                if (_loadingSeries.Contains(seriesName)) return;
+                _loadingSeries.Add(seriesName);
+            }
+
+            var time = seg.Time ?? Enumerable.Range(0, arr.Length)
+                                             .Select(i => (double)i / AppState.Accel)
+                                             .ToArray();
+
+            Task.Run(new Action(() =>
+            {
+                try
+                {
+                    double[] dx, dy;
+                    DownsampleMinMax(time, arr, MaxDisplayPointsPerSeries, out dx, out dy);
+
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        chart.BeginInit();
+                        try
+                        {
+                            var series = chart.Series.FindByName(seriesName);
+                            if (series == null)
+                            {
+                                series = new Series(seriesName)
+                                {
+                                    ChartType = SeriesChartType.FastLine,
+                                    BorderWidth = 1,
+                                    IsVisibleInLegend = false
+                                };
+                                series.SmartLabelStyle.Enabled = false;
+                                chart.Series.Add(series);
+                            }
+                            series.Points.DataBindXY(dx, dy);
+                            chart.ChartAreas["MainArea"].AxisY.Title = channel + " (g)";
+                            AutoAdjustYAxis();
+                            ScheduleFreqUpdate();
+                        }
+                        finally { chart.EndInit(); }
+                    }));
+                }
+                finally
+                {
+                    lock (_loadingSeries) _loadingSeries.Remove(seriesName);
+                }
+            }));
+        }
+
+        private void ComputeFeaturesFromInfluxSegments()
+        {
+            if (_influxSegments.Count == 0)
+            {
+                MessageBox.Show("먼저 InfluxDB 조회 버튼을 눌러 세그먼트를 가져오세요.");
+                return;
+            }
+
+            string channel = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
+            double sr = AppState.Accel; // InfluxDB 데이터는 가속도 샘플레이트 사용
+
+            var segments = _influxSegments.ToList(); // snapshot
+            _featureTable.Clear();
+
+            Task.Run(new Action(() =>
+            {
+                foreach (var seg in segments)
+                {
+                    double[] arr = seg.GetChannel(channel);
+                    if (arr == null || arr.Length < 4) continue;
+
+                    // 샘플레이트 추정
+                    double estSr = sr;
+                    if (seg.Time != null && seg.Time.Length >= 2)
+                    {
+                        double dur = seg.Time[seg.Time.Length - 1] - seg.Time[0];
+                        if (dur > 0) estSr = (seg.Time.Length - 1) / dur;
+                    }
+
+                    var ys = arr.ToList();
+                    var row = new SignalFeatures.FeatureRow
+                    {
+                        FileName = seg.Name,
+                        Label    = seg.Label ?? ""
+                    };
+                    SignalFeatures.FillTimeDomainFeatures(ys, row);
+
+                    int avail = Math.Min(ys.Count, MaxFftSamples);
+                    double[] yarr = ys.Take(avail).ToArray();
+                    double[] freq;
+                    var spec = SignalFeatures.ComputeMagnitudeSpectrum(yarr, estSr, out freq);
+                    SignalFeatures.FillPeakFeatures(freq, spec, row);
+
+                    _featureTable.Add(row);
+                }
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    gridFeatures.DataSource = null;
+                    gridFeatures.DataSource = _featureTable;
+                    ApplyNumericFormat(gridFeatures);
+                    RenderFeatureDistribution();
+                    lblFeatureInfo.Text = $"샘플: {_featureTable.Count}개 (InfluxDB)";
+                    EnsureAIForm();
+                    _aiForm.SetYColumnName(channel + " [InfluxDB]");
+                    _aiForm.SetFeatureData(_featureTable.Cast<object>(), FeatureList);
+                }));
+            }));
+        }
+
+        private void EnsureInfluxSource()
+        {
+            if (_influxSource != null) return;
+            string cfgPath = FindInfluxConfig();
+            var cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            _influxSource = new InfluxDbDataSource(cfg);
+        }
+
+        private static string FindInfluxConfig()
+        {
+            var candidates = new[]
+            {
+                System.IO.Path.Combine(ResolveLogRoot(), "Tests", "influx_config.json"),
+                @"D:\Dev\hvs\WorkingSource\DAQ_Test\infra\influx_config.json",
+                System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
+            };
+            foreach (var p in candidates)
+                if (System.IO.File.Exists(p)) return p;
+            return candidates[0];
+        }
+
+        private static string ResolveLogRoot()
+        {
+            foreach (var r in new[] { @"E:\Data\PHM_Logs", @"C:\Data\PHM_Logs", @"C:\PHM_Logs" })
+                if (System.IO.Directory.Exists(r)) return r;
+            return @"C:\Data\PHM_Logs";
         }
     }
 }

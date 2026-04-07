@@ -450,7 +450,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 object row = _featureRowsRaw[r];
                 var dr = dt.NewRow();
                 dr["FileName"] = GetProp<string>(row, "FileName") ?? "";
-                dr["Label"] = (_session == SessionType.AnomalyDetection) ? "Normal" : ""; // 세션별 기본값
+                // InfluxDB 세그먼트는 Label 프로퍼티가 설정됨 → 그대로 사용, 없으면 세션별 기본값
+                string rowLabel = GetProp<string>(row, "Label") ?? "";
+                if (string.IsNullOrEmpty(rowLabel))
+                    rowLabel = (_session == SessionType.AnomalyDetection) ? "Normal" : "";
+                dr["Label"] = rowLabel;
                 for (int i = 0; i < _featureList.Length; i++)
                 {
                     string key = _featureList[i].Key;

@@ -19,6 +19,8 @@ namespace PHM_Project_DockPanel.Services.Core
         public class FeatureRow
         {
             public string FileName { get; set; }
+            /// <summary>InfluxDB 세그먼트에서 가져온 레이블 (CSV 모드에서는 빈 문자열)</summary>
+            public string Label { get; set; } = "";
             public double AbsMax { get; set; }
             public double AbsMean { get; set; }
             public double P2P { get; set; }

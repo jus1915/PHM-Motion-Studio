@@ -171,6 +171,7 @@
     <Compile Include="Services\Core\AxisMonitor.cs" />
     <Compile Include="Services\Core\SignalFeatures.cs" />
     <Compile Include="Services\DAQ\AccelInfluxPublisher.cs" />
+    <Compile Include="Services\DAQ\InfluxDbDataSource.cs" />
     <Compile Include="Services\DAQ\DaqAccelCsvLogger.cs" />
     <Compile Include="Services\DAQ\DaqAccelHttpSender.cs" />
     <Compile Include="Services\DAQ\DaqSensorConfig.cs" />
