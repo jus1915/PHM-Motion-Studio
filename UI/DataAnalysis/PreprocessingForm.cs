@@ -178,7 +178,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private Button _btnInfluxDeleteSelected;
         private Button _btnInfluxDeleteLabel;
         private Button _btnInfluxDeleteAll;
-        private ListBox _lstSegments;
+        private Button _btnInfluxCheckAll;
+        private Button _btnInfluxUncheckAll;
+        private CheckedListBox _lstSegments;
         private Label _lblInfluxStatus;
 
         private bool InfluxMode => _rdoInflux?.Checked == true;
@@ -2315,13 +2317,43 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             };
             _btnInfluxDeleteAll.Click += BtnInfluxDeleteAll_Click;
 
+            // 전체 선택/해제 버튼
+            _btnInfluxCheckAll = new Button
+            {
+                Text = "전체 선택", Width = 68, Height = 24,
+                Margin = new Padding(2, 3, 2, 0)
+            };
+            _btnInfluxCheckAll.Click += (s, e) =>
+            {
+                for (int i = 0; i < _lstSegments.Items.Count; i++)
+                    _lstSegments.SetItemChecked(i, true);
+            };
+            _btnInfluxUncheckAll = new Button
+            {
+                Text = "전체 해제", Width = 68, Height = 24,
+                Margin = new Padding(0, 3, 6, 0)
+            };
+            _btnInfluxUncheckAll.Click += (s, e) =>
+            {
+                for (int i = 0; i < _lstSegments.Items.Count; i++)
+                    _lstSegments.SetItemChecked(i, false);
+            };
+
+            rowCrud.Controls.Add(_btnInfluxCheckAll);
+            rowCrud.Controls.Add(_btnInfluxUncheckAll);
             rowCrud.Controls.Add(_btnInfluxUploadCsv);
             rowCrud.Controls.Add(_btnInfluxDeleteSelected);
             rowCrud.Controls.Add(_btnInfluxDeleteLabel);
             rowCrud.Controls.Add(_btnInfluxDeleteAll);
 
-            // 세그먼트 목록
-            _lstSegments = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended };
+            // 세그먼트 목록 (CheckedListBox)
+            _lstSegments = new CheckedListBox
+            {
+                Dock = DockStyle.Fill,
+                IntegralHeight = false,
+                CheckOnClick = true,
+                BorderStyle = BorderStyle.FixedSingle
+            };
             _lstSegments.SelectedIndexChanged += LstSegments_SelectedIndexChanged;
 
             // 역순 추가 (마지막 추가 = 시각적 최상단)
@@ -2418,14 +2450,14 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private async void BtnInfluxDeleteSelected_Click(object sender, EventArgs e)
         {
-            if (_lstSegments.SelectedIndices.Count == 0)
+            if (_lstSegments.CheckedIndices.Count == 0)
             {
-                MessageBox.Show("삭제할 세그먼트를 선택하세요.", "알림",
+                MessageBox.Show("삭제할 세그먼트를 체크하세요.", "알림",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
-            var selected = _lstSegments.SelectedIndices.Cast<int>()
+            var selected = _lstSegments.CheckedIndices.Cast<int>()
                                        .Where(i => i < _influxSegments.Count)
                                        .Select(i => _influxSegments[i])
                                        .ToList();
@@ -2457,7 +2489,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     _lblInfluxStatus.ForeColor = Color.DarkGreen;
                     _lblInfluxStatus.Text = $"삭제 완료 ({selected.Count}개 세그먼트)";
                     // 리스트에서 제거
-                    var indices = _lstSegments.SelectedIndices.Cast<int>().OrderByDescending(i => i).ToList();
+                    var indices = _lstSegments.CheckedIndices.Cast<int>().OrderByDescending(i => i).ToList();
                     foreach (int i in indices)
                     {
                         _lstSegments.Items.RemoveAt(i);
@@ -2611,6 +2643,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void SetCrudButtonsEnabled(bool enabled)
         {
             _btnInfluxQuery.Enabled          = enabled;
+            _btnInfluxCheckAll.Enabled       = enabled;
+            _btnInfluxUncheckAll.Enabled     = enabled;
             _btnInfluxUploadCsv.Enabled      = enabled;
             _btnInfluxDeleteSelected.Enabled = enabled;
             _btnInfluxDeleteLabel.Enabled    = enabled;
@@ -2720,7 +2754,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 {
                     _influxSegments = segs;
                     foreach (var seg in segs)
-                        _lstSegments.Items.Add($"[{seg.Label}] {seg.Name}  ({seg.SampleCount} pts)");
+                    {
+                        string lbl = string.IsNullOrEmpty(seg.Label) ? "" : $"[{seg.Label}] ";
+                        _lstSegments.Items.Add($"{lbl}{seg.Name}  ({seg.SampleCount} pts)");
+                    }
 
                     _lblInfluxStatus.ForeColor = segs.Count > 0 ? Color.DarkGreen : Color.Gray;
                     _lblInfluxStatus.Text = $"총 {segs.Count}개 세그먼트";
