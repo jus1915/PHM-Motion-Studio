@@ -847,7 +847,7 @@ namespace PHM_Project_DockPanel.Windows
             btnServoOffGlobal.Enabled = enabled && (_selectedAxis >= 0);
             btnAbsMoveGlobal.Enabled = enabled;
             btnRelMoveGlobal.Enabled = enabled;
-            btnAlarmClear.Enabled    = enabled;
+            if (btnAlarmClear != null) btnAlarmClear.Enabled = enabled;
         }
 
         private TextBox CreateTextBox(Panel panel, string label, int left, int top)
