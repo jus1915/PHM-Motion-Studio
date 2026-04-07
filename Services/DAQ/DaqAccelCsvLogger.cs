@@ -340,6 +340,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
             }
         }
 
+        // ===== 외부 소비자 콜백 (module, block[channels,samples], timestampUtc) =====
+        public Action<string, double[,], DateTime> BlockReceived;
+
         // ===== Read 콜백(로깅) =====
         private void ReadCallback(IAsyncResult ar)
         {
@@ -378,6 +381,25 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 }
 
                 _samples += n;
+
+                // 외부 소비자(InfluxDB 등)에게 블록 알림 — 모듈별로 발행
+                var br = BlockReceived;
+                if (br != null)
+                {
+                    DateTime ts = DateTime.UtcNow;
+                    for (int m = 0; m < modulesInBuffer; m++)
+                    {
+                        int baseIdx = m * 3;
+                        var modBlock = new double[3, n];
+                        for (int i = 0; i < n; i++)
+                        {
+                            modBlock[0, i] = block[baseIdx + 0, i];
+                            modBlock[1, i] = block[baseIdx + 1, i];
+                            modBlock[2, i] = block[baseIdx + 2, i];
+                        }
+                        br.Invoke(_modules[m], modBlock, ts);
+                    }
+                }
 
                 if (_running && _reader != null && _cb != null)
                     _reader.BeginReadMultiSample(_readBlock, _cb, null);

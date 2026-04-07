@@ -23,7 +23,7 @@ namespace PHM_Project_DockPanel.Services
 
         private WmxTorqueLogger _torqueLogger;
         private DaqAccelCsvLogger _accelLogger;
-        private DaqAccelHttpSender _accelHttpSender;
+        private AccelInfluxPublisher _accelInfluxPublisher;
         private AjinCsvLogger _ajinLogger;   // Ajin 전용 폴링 로거
 
         // ▶ 분리된 로깅 토글 (주입식)
@@ -66,9 +66,9 @@ namespace PHM_Project_DockPanel.Services
             _accelLogger = accelLogger;
         }
 
-        public void SetAccelHttpSender(DaqAccelHttpSender accelHttpSender)
+        public void SetAccelInfluxPublisher(AccelInfluxPublisher publisher)
         {
-            _accelHttpSender = accelHttpSender;
+            _accelInfluxPublisher = publisher;
         }
 
         /// <summary>Ajin 전용 폴링 로거를 주입합니다. MainForm에서 Ajin 선택 시 호출.</summary>
@@ -190,7 +190,7 @@ namespace PHM_Project_DockPanel.Services
                 string sessionId = $"{robotId}_{DateTime.Now:yyyyMMdd_HHmmssfff}";
 
                 if (logAccel) // logAccel이 true일 때만 실행
-                    _accelHttpSender?.BeginSession(sessionId, robotId, active.ToArray());
+                    _accelInfluxPublisher?.BeginSession(sessionId, robotId, active.ToArray());
 
                 MotionStarted?.Invoke(active.ToArray());
             }
@@ -278,7 +278,7 @@ namespace PHM_Project_DockPanel.Services
                 try
                 {
                     if (logAccel) // logAccel이 true일 때만 실행
-                        _accelHttpSender?.EndSession();
+                        _accelInfluxPublisher?.EndSession();
 
                     MotionEnded?.Invoke();
                 }

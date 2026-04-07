@@ -33,7 +33,7 @@ namespace PHM_Project_DockPanel
         private AxisConfig[] _axisConfigs;
         private WmxTorqueLogger _torqueLogger;
         private DaqAccelCsvLogger _daq;
-        private DaqAccelHttpSender _httpSender;
+        private AccelInfluxPublisher _influxPublisher;
         private PHM_Motion _motion;
 
         // ── DockPanel ────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ namespace PHM_Project_DockPanel
             InitMotion();
             _daqCfg = DaqSensorConfig.LoadOrDefault(DaqSensorConfigPath);
             InitDaq();
-            InitHttpSender();
+            InitInfluxPublisher();
 
             // 3. WinForms 초기화
             InitializeComponent();
@@ -169,7 +169,7 @@ namespace PHM_Project_DockPanel
         internal static string DaqSensorConfigPath =>
             Path.Combine(ResolveCfgDir(), "daq_sensor_config.json");
 
-        /// <summary>DaqSensorConfig 를 DaqAccelCsvLogger 와 DaqAccelHttpSender 에 적용합니다.</summary>
+        /// <summary>DaqSensorConfig 를 DaqAccelCsvLogger 에 적용합니다.</summary>
         private void ApplyDaqConfig(DaqSensorConfig cfg)
         {
             _daqCfg = cfg;
@@ -184,48 +184,28 @@ namespace PHM_Project_DockPanel
             _daq.SetModuleOffset(cfg.Module, 0.0, 0.0, 0.0);
             _daq.IepeCurrentAmps = cfg.IepeCurrentAmps;
 
-            // HttpSender 도 동기화 (모듈/채널/IEPE 변경 반영)
-            if (_httpSender != null)
-            {
-                _httpSender.Modules        = new[] { cfg.Module };
-                _httpSender.ChannelTriplet = cfg.Channel;
-                _httpSender.IepeMilliAmps  = cfg.IepeCurrentAmps * 1000.0; // A → mA
-            }
-
             AppEvents.RaiseLog($"[DAQ 설정 적용] {cfg.Module}/{cfg.Channel}  " +
                                $"Sens X={cfg.SensX} Y={cfg.SensY} Z={cfg.SensZ} mV/g  " +
                                $"Rate={cfg.SampleRate} Hz  ±{cfg.GRange} g");
         }
 
-        private void InitHttpSender()
+        private void InitInfluxPublisher()
         {
-            var cfgDir = ResolveCfgDir();
+            var cfgDir  = ResolveCfgDir();
+            var cfgPath = Path.Combine(cfgDir, "influx_config.json");
 
-            _httpSender = new DaqAccelHttpSender(AppEvents.RaiseLog)
-            {
-                DeviceId       = "realtime",
-                Modules        = new[] { _daqCfg.Module },
-                ChannelTriplet = _daqCfg.Channel,
-                SampleRate     = 1280,
-                FrameSamples   = 64,
-                ServerUrl      = HttpServerUrl,
-                IepeMilliAmps  = _daqCfg.IepeCurrentAmps * 1000.0, // A → mA
-                MinG           = -25,
-                MaxG           = 25,
-                NumWorkers     = 6,
-                QueueCapacity  = 200
-            };
-            _httpSender.LoadSensitivityCsv(Path.Combine(cfgDir, "sensitivity.csv"));
-            _httpSender.LoadOffsetCsv(Path.Combine(cfgDir, "offsets.csv"));
+            var cfg = InfluxConfig.LoadOrDefault(cfgPath);
 
-            _motion.SetAccelHttpSender(_httpSender);
+            // 기본 파일이 없으면 샘플 생성
+            if (!File.Exists(cfgPath))
+                cfg.Save(cfgPath);
 
-            // DAQ 상태 메시지 → AxisInfoForm UI에 반영 (스레드 안전)
-            _httpSender.FrameStatusUpdated += msg =>
-            {
-                if (_axisInfo != null && !_axisInfo.IsDisposed)
-                    _axisInfo.BeginInvoke(new Action(() => _axisInfo.UpdateDaqStatus(msg)));
-            };
+            _influxPublisher = new AccelInfluxPublisher(cfg, AppEvents.RaiseLog);
+
+            // DaqAccelCsvLogger 블록 → InfluxDB (모션 런 중)
+            _daq.BlockReceived += _influxPublisher.Feed;
+
+            _motion.SetAccelInfluxPublisher(_influxPublisher);
         }
 
         /// <summary>E:\Data\PHM_Logs 가 있으면 그 경로, 없으면 C:\PHM_Logs 를 루트로 사용합니다.</summary>
@@ -278,19 +258,13 @@ namespace PHM_Project_DockPanel
         {
             if (enabled)
             {
-                if (_httpSender.IsRunning) return;  // 중복 시작 방지
-
-                if (_httpSender.StartStreaming())
-                    AppEvents.RaiseLog("[HTTP] 실시간 가속도 스트리밍 시작");
-                else
-                    AppEvents.RaiseLog("[HTTP] 스트리밍 시작 실패");
+                _influxPublisher?.Enable();
+                AppEvents.RaiseLog("[InfluxDB] 실시간 게시 활성화");
             }
             else
             {
-                if (!_httpSender.IsRunning) return;
-
-                _httpSender.StopStreaming();
-                AppEvents.RaiseLog("[HTTP] 실시간 가속도 스트리밍 종료");
+                _influxPublisher?.Disable();
+                AppEvents.RaiseLog("[InfluxDB] 실시간 게시 비활성화");
             }
         }
 
@@ -330,7 +304,14 @@ namespace PHM_Project_DockPanel
                 CreateDockMenuItem("Teaching", DockState.DockBottom,
                     typeof(TeachingForm), () => new TeachingForm(_motion)));
             monitorMenu.DropDownItems.Add(
-                CreateDockMenuItem<PassiveMonitorForm>("Passive Monitor", DockState.Document));
+                CreateDockMenuItem("Passive Monitor", DockState.Document,
+                    typeof(PassiveMonitorForm), () =>
+                    {
+                        var pmf = new PassiveMonitorForm();
+                        if (_influxPublisher != null)
+                            pmf.BlockPublished += _influxPublisher.Feed;
+                        return pmf;
+                    }));
 
             var logMenu = new ToolStripMenuItem("로그 관리");
             logMenu.DropDownItems.Add(CreateDockMenuItem<LogWriterForm>("Log Writer", DockState.DockBottom));
@@ -556,8 +537,8 @@ namespace PHM_Project_DockPanel
         // ────────────────────────────────────────────────────────────────────
         private void DisposeServices()
         {
-            try { _httpSender?.StopStreaming(); } catch { }
-            try { _httpSender?.Dispose(); } catch { }
+            try { _influxPublisher?.Disable(); } catch { }
+            try { _influxPublisher?.Dispose(); } catch { }
             try { _daq?.Dispose(); } catch { }
             try { _controller?.Dispose(); } catch { }
         }
@@ -582,7 +563,13 @@ namespace PHM_Project_DockPanel
             if (persistString == typeof(LogGraphForm).ToString())
                 return _logGraph ?? (_logGraph = new LogGraphForm());
 
-            if (persistString == typeof(PassiveMonitorForm).ToString()) return new PassiveMonitorForm();
+            if (persistString == typeof(PassiveMonitorForm).ToString())
+            {
+                var pmf = new PassiveMonitorForm();
+                if (_influxPublisher != null)
+                    pmf.BlockPublished += _influxPublisher.Feed;
+                return pmf;
+            }
 
             // 데이터 분석 폼 — 상태 없으므로 매번 새로 생성
             if (persistString == typeof(PHMPipelineWizard).ToString()) return new PHMPipelineWizard();

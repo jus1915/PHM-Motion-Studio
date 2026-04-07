@@ -23,6 +23,9 @@ namespace PHM_Project_DockPanel.Windows
         private volatile bool _monitoring;
         private int _blockSize;
 
+        /// <summary>DAQ 콜백 블록마다 발행됩니다. (module, block[3,samples], timestampUtc)</summary>
+        public Action<string, double[,], DateTime> BlockPublished;
+
         // ── 트리거 엔진 ──────────────────────────────────────────────────────
         private EventTrigger _trigger;
         private DaqSensorConfig _cfg;
@@ -445,6 +448,7 @@ namespace PHM_Project_DockPanel.Windows
                 if (!_monitoring || _reader == null) return;
 
                 double[,] block = _reader.EndReadMultiSample(ar);
+                BlockPublished?.Invoke(_cfg.Module, block, DateTime.UtcNow);
                 int ch = Math.Min(block.GetLength(0), 3);
                 int n  = block.GetLength(1);
 
