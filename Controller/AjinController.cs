@@ -27,6 +27,8 @@ namespace PHM_Project_DockPanel.Controller
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmSignalServoOn(int lAxisNo, uint dwOnOff);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmSignalIsServoOn(int lAxisNo, ref uint dwpOnOff);
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmSignalServoAlarmReset(int lAxisNo, uint dwOnOff);
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmSignalIsAlarm(int lAxisNo, ref uint dwpStatus);
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmMotSetAbsRelMode(int lAxisNo, uint dwAbsRelMode);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmMotSetProfileMode(int lAxisNo, uint dwProfileMode);
@@ -256,6 +258,40 @@ namespace PHM_Project_DockPanel.Controller
             CheckConnected();
             AxmStatusSetActPos(axisNo, 0);
             AxmStatusSetCmdPos(axisNo, 0);
+        }
+
+        /// <summary>
+        /// 서보 드라이브 알람을 클리어합니다.
+        /// AlarmReset 신호를 100ms ON → OFF 하고, 서보를 재활성화합니다.
+        /// </summary>
+        public void ClearAlarm(int axisNo)
+        {
+            CheckConnected();
+            try
+            {
+                // 1) AlarmReset 신호 ON
+                AxmSignalServoAlarmReset(axisNo, 1);
+                System.Threading.Thread.Sleep(100);
+                // 2) AlarmReset 신호 OFF
+                AxmSignalServoAlarmReset(axisNo, 0);
+                System.Threading.Thread.Sleep(50);
+
+                AppEvents.RaiseLog($"[Ajin] Axis {axisNo} 알람 클리어 완료");
+            }
+            catch (Exception ex)
+            {
+                AppEvents.RaiseLog($"[Ajin] Axis {axisNo} 알람 클리어 실패: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>알람 상태 조회. true = 알람 발생 중.</summary>
+        public bool IsAlarm(int axisNo)
+        {
+            if (!_connected) return false;
+            uint status = 0;
+            AxmSignalIsAlarm(axisNo, ref status);
+            return status != 0;
         }
 
         public int GetAxisCount()

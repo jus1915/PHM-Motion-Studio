@@ -67,6 +67,7 @@ namespace PHM_Project_DockPanel.Windows
 
         // --- 우측 액션 ---
         private Button btnServoOnGlobal, btnServoOffGlobal, btnAbsMoveGlobal, btnRelMoveGlobal;
+        private Button btnAlarmClear;
         private TextBox txtTargetGlobal;
         private Label lblCheckedAxes;   // 체크된 축 표시
 
@@ -738,6 +739,60 @@ namespace PHM_Project_DockPanel.Windows
             grid.SetColumnSpan(btnSetZero, 2);
             grid.Controls.Add(btnSetZero, 0, 2);
 
+            // Alarm Clear
+            btnAlarmClear = new Button
+            {
+                Text = "Alarm Clear",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 6, 0, 0),
+                BackColor = Color.LightSalmon
+            };
+            btnAlarmClear.Click += async (s, e) =>
+            {
+                var axes = CheckedAxes();
+                if (axes.Length == 0 && _selectedAxis >= 0)
+                    axes = new[] { _selectedAxis };
+
+                if (axes.Length == 0)
+                {
+                    MessageBox.Show("축을 체크하거나 선택하세요.", "Alarm Clear",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                var ajin = _motion?.Controller?.AsAjin;
+                if (ajin == null)
+                {
+                    MessageBox.Show("Alarm Clear는 Ajin 제어기에서만 지원됩니다.",
+                        "Alarm Clear", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                btnAlarmClear.Enabled = false;
+                try
+                {
+                    await Task.Run(() =>
+                    {
+                        foreach (int ax in axes)
+                            ajin.ClearAlarm(ax);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"알람 클리어 실패: {ex.Message}", "오류",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    btnAlarmClear.Enabled = true;
+                }
+            };
+            grid.RowCount = 4;
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.SetColumnSpan(btnAlarmClear, 2);
+            grid.Controls.Add(btnAlarmClear, 0, 3);
+
             root.Controls.Add(lblCheckedAxes);
             root.Controls.Add(lblTarget);
             root.Controls.Add(numTarget);
@@ -792,6 +847,7 @@ namespace PHM_Project_DockPanel.Windows
             btnServoOffGlobal.Enabled = enabled && (_selectedAxis >= 0);
             btnAbsMoveGlobal.Enabled = enabled;
             btnRelMoveGlobal.Enabled = enabled;
+            btnAlarmClear.Enabled    = enabled;
         }
 
         private TextBox CreateTextBox(Panel panel, string label, int left, int top)
