@@ -458,10 +458,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 }
                 else if (_session == SessionType.AnomalyDetection)
                 {
-                    // AD 모드: 콤보 항목(Normal/Anomaly)에 없는 값은 Normal 로 보정
-                    bool valid = rowLabel.Equals("Normal",  StringComparison.OrdinalIgnoreCase)
-                              || rowLabel.Equals("Anomaly", StringComparison.OrdinalIgnoreCase);
-                    if (!valid) rowLabel = "Normal";
+                    // AD 모드: 콤보 항목은 정확히 "Normal" / "Anomaly" 이어야 함 (대소문자 정규화)
+                    if (rowLabel.Equals("Anomaly", StringComparison.OrdinalIgnoreCase))
+                        rowLabel = "Anomaly";
+                    else
+                        rowLabel = "Normal"; // normal, fault 등 그 외 모두 Normal로
                 }
                 dr["Label"] = rowLabel;
                 for (int i = 0; i < _featureList.Length; i++)
