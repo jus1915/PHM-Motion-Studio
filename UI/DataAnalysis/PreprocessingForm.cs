@@ -233,7 +233,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Vertical,
                 FixedPanel = FixedPanel.Panel1,
-                IsSplitterFixed = true
+                IsSplitterFixed = false,
+                Panel1MinSize = 280,
+                SplitterDistance = 300
             };
 
             // ----- Left -----

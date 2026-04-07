@@ -118,9 +118,16 @@ schema.tagValues(
             string url = $"{_cfg.Url.TrimEnd('/')}/api/v2/query?org={Uri.EscapeDataString(_cfg.Org)}";
 
             var content = new StringContent(flux, Encoding.UTF8, "application/vnd.flux");
-            content.Headers.Add("Accept", "application/csv");
 
-            var resp = await _http.PostAsync(url, content, ct).ConfigureAwait(false);
+            // Accept 헤더는 content headers가 아닌 request message 헤더에 추가해야 함
+            var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, url)
+            {
+                Content = content
+            };
+            request.Headers.Accept.Add(
+                new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/csv"));
+
+            var resp = await _http.SendAsync(request, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
                 string err = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
