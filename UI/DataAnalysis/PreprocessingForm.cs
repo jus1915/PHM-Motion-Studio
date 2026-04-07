@@ -19,7 +19,7 @@ using PHM_Project_DockPanel.Services.DAQ;
 
 namespace PHM_Project_DockPanel.UI.DataAnalysis
 {
-    public partial class PreprocessingForm : DockContent
+    public partial class SignalExplorerForm : DockContent
     {
         private const int AutoCheckLimit = 100;
         private const int MaxDisplayPointsPerSeries = 4000; // 화면 표시용 상한
@@ -174,6 +174,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private DateTimePicker _dtpTo;
         private NumericUpDown _nudSegSeconds;
         private Button _btnInfluxQuery;
+        private Button _btnInfluxUploadCsv;
+        private Button _btnInfluxDeleteSelected;
+        private Button _btnInfluxDeleteLabel;
+        private Button _btnInfluxDeleteAll;
         private ListBox _lstSegments;
         private Label _lblInfluxStatus;
 
@@ -182,10 +186,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // ===========================
         // Ctor
         // ===========================
-        public PreprocessingForm()
+        public SignalExplorerForm()
         {
             InitializeComponent();
-            Text = "데이터 전처리";
+            Text = "신호 탐색기";
 
             this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             this.UpdateStyles();
@@ -2272,16 +2276,345 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Font = new Font(this.Font.FontFamily, 8f)
             };
 
+            // CRUD 버튼 행
+            var rowCrud = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom, Height = 30,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                BackColor = SystemColors.ControlLight
+            };
+            _btnInfluxUploadCsv = new Button
+            {
+                Text = "CSV → DB", Width = 72, Height = 24,
+                Margin = new Padding(3, 3, 2, 0),
+                BackColor = Color.FromArgb(220, 240, 220)
+            };
+            _btnInfluxUploadCsv.Click += BtnInfluxUploadCsv_Click;
+
+            _btnInfluxDeleteSelected = new Button
+            {
+                Text = "선택 삭제", Width = 70, Height = 24,
+                Margin = new Padding(2, 3, 2, 0),
+                BackColor = Color.FromArgb(255, 230, 220)
+            };
+            _btnInfluxDeleteSelected.Click += BtnInfluxDeleteSelected_Click;
+
+            _btnInfluxDeleteLabel = new Button
+            {
+                Text = "레이블 삭제", Width = 78, Height = 24,
+                Margin = new Padding(2, 3, 2, 0),
+                BackColor = Color.FromArgb(255, 220, 200)
+            };
+            _btnInfluxDeleteLabel.Click += BtnInfluxDeleteLabel_Click;
+
+            _btnInfluxDeleteAll = new Button
+            {
+                Text = "전체 삭제", Width = 68, Height = 24,
+                Margin = new Padding(2, 3, 0, 0),
+                BackColor = Color.FromArgb(255, 200, 180)
+            };
+            _btnInfluxDeleteAll.Click += BtnInfluxDeleteAll_Click;
+
+            rowCrud.Controls.Add(_btnInfluxUploadCsv);
+            rowCrud.Controls.Add(_btnInfluxDeleteSelected);
+            rowCrud.Controls.Add(_btnInfluxDeleteLabel);
+            rowCrud.Controls.Add(_btnInfluxDeleteAll);
+
             // 세그먼트 목록
-            _lstSegments = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
+            _lstSegments = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended };
             _lstSegments.SelectedIndexChanged += LstSegments_SelectedIndexChanged;
 
             // 역순 추가 (마지막 추가 = 시각적 최상단)
+            pnl.Controls.Add(rowCrud);
             pnl.Controls.Add(_lstSegments);
             pnl.Controls.Add(_lblInfluxStatus);
             pnl.Controls.Add(row1);
             pnl.Controls.Add(row0);
             return pnl;
+        }
+
+        // ── CRUD 핸들러 ───────────────────────────────────────────────────────
+        private async void BtnInfluxUploadCsv_Click(object sender, EventArgs e)
+        {
+            string device = _cmbInfluxDevice.SelectedItem?.ToString() ?? "unknown";
+
+            // 레이블 입력
+            string label = "";
+            using (var dlgLabel = new Form
+            {
+                Text = "CSV → InfluxDB 업로드",
+                Size = new Size(340, 150),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false, MinimizeBox = false
+            })
+            {
+                var lbl = new Label { Text = "레이블:", Left = 10, Top = 18, AutoSize = true };
+                var txt = new TextBox { Left = 70, Top = 14, Width = 220, Text = "normal" };
+                var ok  = new Button  { Text = "업로드", Left = 155, Top = 80, Width = 80, DialogResult = DialogResult.OK };
+                var cancel = new Button { Text = "취소", Left = 245, Top = 80, Width = 60, DialogResult = DialogResult.Cancel };
+                dlgLabel.Controls.AddRange(new Control[] { lbl, txt, ok, cancel });
+                dlgLabel.AcceptButton = ok;
+                if (dlgLabel.ShowDialog(this) != DialogResult.OK) return;
+                label = txt.Text.Trim();
+            }
+
+            // CSV 파일 선택 (다중 선택)
+            string[] csvFiles;
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "업로드할 CSV 파일 선택",
+                Filter = "CSV 파일 (*.csv)|*.csv",
+                Multiselect = true
+            })
+            {
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+                csvFiles = ofd.FileNames;
+            }
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.DarkBlue;
+            _lblInfluxStatus.Text = "업로드 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                var progress = new Progress<string>(msg =>
+                {
+                    if (!IsDisposed) BeginInvoke(new Action(() => _lblInfluxStatus.Text = msg));
+                });
+
+                // 기준 시각 = 파일명에서 추출 불가 → 파일 수정시각 사용
+                for (int i = 0; i < csvFiles.Length; i++)
+                {
+                    string path = csvFiles[i];
+                    DateTime baseTime = File.GetLastWriteTimeUtc(path);
+                    await _influxSource.WriteCsvAsync(path, device, label,
+                        AppState.Accel, baseTime, progress).ConfigureAwait(false);
+                    this.BeginInvoke(new Action(() =>
+                        _lblInfluxStatus.Text = $"업로드 완료: {i + 1}/{csvFiles.Length}"));
+                }
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"업로드 완료 ({csvFiles.Length}개 파일)";
+                    LoadInfluxMetadataAsync(); // 메타 갱신
+                }));
+            }
+            catch (Exception ex)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"업로드 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private async void BtnInfluxDeleteSelected_Click(object sender, EventArgs e)
+        {
+            if (_lstSegments.SelectedIndices.Count == 0)
+            {
+                MessageBox.Show("삭제할 세그먼트를 선택하세요.", "알림",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var selected = _lstSegments.SelectedIndices.Cast<int>()
+                                       .Where(i => i < _influxSegments.Count)
+                                       .Select(i => _influxSegments[i])
+                                       .ToList();
+
+            if (MessageBox.Show(
+                $"선택한 세그먼트 {selected.Count}개를 삭제합니다.\n(각 세그먼트의 시간 범위 내 해당 device/label 데이터 삭제)\n\n계속하시겠습니까?",
+                "삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.DarkOrange;
+            _lblInfluxStatus.Text = "삭제 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                foreach (var seg in selected)
+                {
+                    DateTime from = seg.StartTime;
+                    DateTime to   = seg.StartTime.AddSeconds(
+                        seg.Time != null && seg.Time.Length > 0
+                            ? seg.Time[seg.Time.Length - 1] + 0.01
+                            : (double)_nudSegSeconds.Value + 0.01);
+                    await _influxSource.DeleteAsync(seg.Device, seg.Label, from, to)
+                                       .ConfigureAwait(false);
+                }
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"삭제 완료 ({selected.Count}개 세그먼트)";
+                    // 리스트에서 제거
+                    var indices = _lstSegments.SelectedIndices.Cast<int>().OrderByDescending(i => i).ToList();
+                    foreach (int i in indices)
+                    {
+                        _lstSegments.Items.RemoveAt(i);
+                        _influxSegments.RemoveAt(i);
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private async void BtnInfluxDeleteLabel_Click(object sender, EventArgs e)
+        {
+            string device = _cmbInfluxDevice.SelectedItem?.ToString();
+
+            // 삭제할 레이블 선택 다이얼로그
+            var allLabels = new List<string>();
+            for (int i = 1; i < _cmbInfluxLabel.Items.Count; i++)
+                allLabels.Add(_cmbInfluxLabel.Items[i].ToString());
+
+            if (allLabels.Count == 0)
+            {
+                MessageBox.Show("조회된 레이블이 없습니다. 먼저 '조회'를 실행하세요.",
+                    "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string chosenLabel = null;
+            using (var dlg = new Form
+            {
+                Text = "레이블별 삭제",
+                Size = new Size(300, 180),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false, MinimizeBox = false
+            })
+            {
+                dlg.Controls.Add(new Label { Text = "삭제할 레이블:", Left = 10, Top = 16, AutoSize = true });
+                var cmb = new ComboBox { Left = 10, Top = 36, Width = 260,
+                    DropDownStyle = ComboBoxStyle.DropDownList };
+                foreach (var l in allLabels) cmb.Items.Add(l);
+                cmb.SelectedIndex = 0;
+                var ok     = new Button { Text = "삭제", Left = 140, Top = 100, Width = 70, DialogResult = DialogResult.OK, BackColor = Color.LightCoral };
+                var cancel = new Button { Text = "취소", Left = 220, Top = 100, Width = 60, DialogResult = DialogResult.Cancel };
+                dlg.Controls.AddRange(new Control[] { cmb, ok, cancel });
+                dlg.AcceptButton = ok;
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                chosenLabel = cmb.SelectedItem?.ToString();
+            }
+
+            if (string.IsNullOrEmpty(chosenLabel)) return;
+
+            if (MessageBox.Show(
+                $"device={device ?? "(전체)"}, label={chosenLabel}\n의 모든 데이터를 삭제합니다.\n\n계속하시겠습니까?",
+                "삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.DarkOrange;
+            _lblInfluxStatus.Text = $"레이블 '{chosenLabel}' 삭제 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                await _influxSource.DeleteAsync(device, chosenLabel).ConfigureAwait(false);
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"삭제 완료: label={chosenLabel}";
+                    // 세그먼트 목록에서 해당 레이블 제거
+                    for (int i = _influxSegments.Count - 1; i >= 0; i--)
+                    {
+                        if (_influxSegments[i].Label == chosenLabel)
+                        {
+                            _lstSegments.Items.RemoveAt(i);
+                            _influxSegments.RemoveAt(i);
+                        }
+                    }
+                    // 콤보에서도 제거
+                    _cmbInfluxLabel.Items.Remove(chosenLabel);
+                }));
+            }
+            catch (Exception ex)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private async void BtnInfluxDeleteAll_Click(object sender, EventArgs e)
+        {
+            string device = _cmbInfluxDevice.SelectedItem?.ToString();
+
+            if (MessageBox.Show(
+                $"device={device ?? "(전체)"}의 모든 accel 데이터를 삭제합니다.\n\n⚠ 이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
+                "전체 삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            // 두 번 확인
+            if (MessageBox.Show("정말로 삭제하시겠습니까?",
+                "최종 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Error) != DialogResult.Yes) return;
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.Red;
+            _lblInfluxStatus.Text = "전체 삭제 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                await _influxSource.DeleteAsync(device, null).ConfigureAwait(false);
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = "전체 삭제 완료";
+                    _lstSegments.Items.Clear();
+                    _influxSegments.Clear();
+                    LoadInfluxMetadataAsync();
+                }));
+            }
+            catch (Exception ex)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private void SetCrudButtonsEnabled(bool enabled)
+        {
+            _btnInfluxQuery.Enabled          = enabled;
+            _btnInfluxUploadCsv.Enabled      = enabled;
+            _btnInfluxDeleteSelected.Enabled = enabled;
+            _btnInfluxDeleteLabel.Enabled    = enabled;
+            _btnInfluxDeleteAll.Enabled      = enabled;
         }
 
         private void RdoInflux_CheckedChanged(object sender, EventArgs e)

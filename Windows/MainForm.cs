@@ -361,7 +361,7 @@ namespace PHM_Project_DockPanel
             menuDataAnalysis.DropDownItems.Add(
                 CreateDockMenuItem<PHMPipelineWizard>("PHM 파이프라인(마법사)", DockState.Document));
             menuDataAnalysis.DropDownItems.Add(
-                CreateDockMenuItem<PreprocessingForm>("데이터 전처리", DockState.Document));
+                CreateDockMenuItem<SignalExplorerForm>("신호 탐색기", DockState.Document));
             menuDataAnalysis.DropDownItems.Add(
                 CreateDockMenuItem<AnomalyDetectionForm>("이상 탐지", DockState.Document));
             menuDataAnalysis.DropDownItems.Add(
@@ -600,7 +600,8 @@ namespace PHM_Project_DockPanel
 
             // 데이터 분석 폼 — 상태 없으므로 매번 새로 생성
             if (persistString == typeof(PHMPipelineWizard).ToString()) return new PHMPipelineWizard();
-            if (persistString == typeof(PreprocessingForm).ToString()) return new PreprocessingForm();
+            if (persistString == typeof(SignalExplorerForm).ToString() ||
+                persistString == typeof(PreprocessingForm).ToString()) return new SignalExplorerForm();
             if (persistString == typeof(AnomalyDetectionForm).ToString()) return new AnomalyDetectionForm();
             if (persistString == typeof(AIForm).ToString()) return new AIForm();
             if (persistString == typeof(DashboardForm).ToString()) return new DashboardForm();

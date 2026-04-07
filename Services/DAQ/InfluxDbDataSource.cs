@@ -2,6 +2,7 @@ using PHM_Project_DockPanel.Services.Core;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
@@ -295,6 +296,150 @@ schema.tagValues(
             flush();
             return segments;
         }
+
+        // ── Delete API ────────────────────────────────────────────────────────
+        /// <summary>
+        /// 지정 조건의 데이터를 InfluxDB에서 삭제합니다.
+        /// device=null/label=null 이면 해당 필터 생략 (전체).
+        /// from/to=null 이면 전체 기간.
+        /// </summary>
+        public async Task DeleteAsync(
+            string device, string label,
+            DateTime? from = null, DateTime? to = null,
+            CancellationToken ct = default)
+        {
+            var start = (from ?? DateTime.UtcNow.AddYears(-10)).ToUniversalTime()
+                            .ToString("yyyy-MM-ddTHH:mm:ssZ");
+            var stop  = (to   ?? DateTime.UtcNow.AddYears(1)).ToUniversalTime()
+                            .ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+            // predicate 조립
+            var predicateParts = new List<string> { "_measurement=\"accel\"" };
+            if (!string.IsNullOrEmpty(device))
+                predicateParts.Add($"device=\"{Esc(device)}\"");
+            if (!string.IsNullOrEmpty(label))
+                predicateParts.Add($"label=\"{Esc(label)}\"");
+
+            string predicate = string.Join(" AND ", predicateParts);
+
+            // JSON body
+            string json = $"{{\"start\":\"{start}\",\"stop\":\"{stop}\",\"predicate\":\"{predicate.Replace("\"", "\\\"")}\"}}";
+
+            string url = $"{_cfg.Url.TrimEnd('/')}/api/v2/delete" +
+                         $"?org={Uri.EscapeDataString(_cfg.Org)}" +
+                         $"&bucket={Uri.EscapeDataString(_cfg.Bucket)}";
+
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var resp = await _http.PostAsync(url, content, ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                string err = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                throw new InvalidOperationException($"InfluxDB 삭제 실패 ({(int)resp.StatusCode}): {err.Trim()}");
+            }
+        }
+
+        // ── Write from CSV ────────────────────────────────────────────────────
+        /// <summary>
+        /// CSV 파일(time_s, x, y, z 헤더)을 읽어 InfluxDB에 씁니다.
+        /// baseTimeUtc: 파일의 기준 시각 (null=현재 UTC). time_s 가 있으면 그만큼 오프셋.
+        /// </summary>
+        public async Task WriteCsvAsync(
+            string csvPath, string device, string label,
+            double sampleRateHz = 1000.0,
+            DateTime? baseTimeUtc = null,
+            IProgress<string> progress = null,
+            CancellationToken ct = default)
+        {
+            var baseTime = (baseTimeUtc ?? DateTime.UtcNow).ToUniversalTime();
+            var lines    = new List<string>(4096);
+
+            string tagSet = $"device={EscapeTag(device ?? "unknown")}";
+            if (!string.IsNullOrEmpty(label))
+                tagSet += $",label={EscapeTag(label)}";
+
+            progress?.Report($"CSV 읽는 중: {System.IO.Path.GetFileName(csvPath)}");
+
+            using (var sr = new System.IO.StreamReader(csvPath, Encoding.UTF8, true))
+            {
+                string header = sr.ReadLine();
+                if (header == null) return;
+
+                var cols = header.Split(new[] { ',', ';', '\t' }, StringSplitOptions.None);
+                int iTime = -1, ix = -1, iy = -1, iz = -1;
+                for (int c = 0; c < cols.Length; c++)
+                {
+                    string h = cols[c].Trim().ToLower();
+                    if (h == "time_s" || h == "time") iTime = c;
+                    else if (h == "x") ix = c;
+                    else if (h == "y") iy = c;
+                    else if (h == "z") iz = c;
+                }
+                if (ix < 0) throw new InvalidOperationException("CSV에 'x' 컬럼이 없습니다.");
+
+                double sp = sampleRateHz > 0 ? 1.0 / sampleRateHz : 0.001;
+                int idx = 0;
+                string line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    var parts = line.Split(new[] { ',', ';', '\t' }, StringSplitOptions.None);
+                    double xv = ParseField(parts, ix);
+                    double yv = ParseField(parts, iy);
+                    double zv = ParseField(parts, iz);
+
+                    double tSec;
+                    if (iTime >= 0 && iTime < parts.Length)
+                        double.TryParse(parts[iTime].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out tSec);
+                    else
+                        tSec = idx * sp;
+
+                    long tsMs = new DateTimeOffset(baseTime).ToUnixTimeMilliseconds()
+                                + (long)(tSec * 1000);
+
+                    lines.Add(string.Format(CultureInfo.InvariantCulture,
+                        $"accel,{tagSet} x={{0:G8}},y={{1:G8}},z={{2:G8}} {tsMs}", xv, yv, zv));
+                    idx++;
+
+                    // 배치 1000개마다 쓰기
+                    if (lines.Count >= 1000)
+                    {
+                        await FlushLinesAsync(lines, ct).ConfigureAwait(false);
+                        progress?.Report($"  {idx:N0}개 샘플 업로드 중...");
+                        lines.Clear();
+                    }
+                }
+            }
+            if (lines.Count > 0)
+                await FlushLinesAsync(lines, ct).ConfigureAwait(false);
+
+            progress?.Report($"업로드 완료");
+        }
+
+        private async Task FlushLinesAsync(List<string> lines, CancellationToken ct)
+        {
+            string url = $"{_cfg.Url.TrimEnd('/')}/api/v2/write" +
+                         $"?org={Uri.EscapeDataString(_cfg.Org)}" +
+                         $"&bucket={Uri.EscapeDataString(_cfg.Bucket)}" +
+                         $"&precision=ms";
+            string body = string.Join("\n", lines);
+            var content = new StringContent(body, Encoding.UTF8, "text/plain");
+            var resp = await _http.PostAsync(url, content, ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                string err = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                throw new InvalidOperationException($"InfluxDB Write 실패 ({(int)resp.StatusCode}): {err.Trim()}");
+            }
+        }
+
+        private static double ParseField(string[] parts, int idx)
+        {
+            if (idx < 0 || idx >= parts.Length) return 0.0;
+            double v;
+            double.TryParse(parts[idx].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out v);
+            return v;
+        }
+
+        private static string EscapeTag(string s)
+            => (s ?? "unknown").Replace(" ", "\\ ").Replace(",", "\\,").Replace("=", "\\=");
 
         // ── 필터 문자열 ───────────────────────────────────────────────────────
         private static string BuildFilters(string device, string label)
