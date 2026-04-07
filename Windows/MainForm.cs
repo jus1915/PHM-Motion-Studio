@@ -225,11 +225,12 @@ namespace PHM_Project_DockPanel
             _motion.SetAccelInfluxPublisher(_influxPublisher);
         }
 
-        /// <summary>E:\Data\PHM_Logs 가 있으면 그 경로, 없으면 C:\PHM_Logs 를 루트로 사용합니다.</summary>
+        /// <summary>E:\Data\PHM_Logs → C:\Data\PHM_Logs → C:\PHM_Logs 순으로 존재하는 루트 사용.</summary>
         private static string ResolveCfgDir()
         {
-            var root = Directory.Exists(@"E:\Data\PHM_Logs") ? @"E:\Data\PHM_Logs" : @"C:\PHM_Logs";
-            return Path.Combine(root, "Tests");
+            foreach (var root in new[] { @"E:\Data\PHM_Logs", @"C:\Data\PHM_Logs", @"C:\PHM_Logs" })
+                if (Directory.Exists(root)) return Path.Combine(root, "Tests");
+            return Path.Combine(@"C:\Data\PHM_Logs", "Tests"); // 폴더 없으면 기본 생성 경로
         }
 
         // ────────────────────────────────────────────────────────────────────
