@@ -1317,6 +1317,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                                     })
                                     .ToList();
 
+            // UI 컨트롤 값은 Task.Run 진입 전 UI 스레드에서 미리 캡처
+            double capturedSampleRate = CurrentSampleRate();
+
             Task.Run(new Action(() =>
             {
                 var results = new List<(string Name, double[] F, double[] S)>(targets.Count);
@@ -1325,7 +1328,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     var t = targets[i];
                     if (t.Y.Length < 4) continue;
                     double[] freq;
-                    double sr = CurrentSampleRate();
+                    double sr = capturedSampleRate;
                     var spec = SignalFeatures.ComputeMagnitudeSpectrum(t.Y, sr, out freq);
                     results.Add((t.Name, freq, spec));
                 }
