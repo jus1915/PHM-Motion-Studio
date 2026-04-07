@@ -9,30 +9,31 @@ namespace PHM_Project_DockPanel.Services.DAQ
     // =========================================================================
     public sealed class TriggerConfig
     {
-        public double OnsetThreshold    { get; set; } = 0.01;
+        // RMS 게이트 (느슨하게 설정, 주요 게이트는 Peak)
+        public double OnsetThreshold    { get; set; } = 0.005; // 고정 임계값 (적응형 OFF 시)
         public double OffsetThreshold   { get; set; } = 0.005;
         public int    MinEventFrames    { get; set; } = 5;
         public int    MaxEventFrames    { get; set; } = 5000;
         public int    PreFrames         { get; set; } = 3;
         public int    PostFrames        { get; set; } = 5;
 
-        // Layer 1: 피크
-        public double PeakThreshold     { get; set; } = 0.05;
+        // Layer 1: 피크 (로봇 진동의 주요 감지 기준)
+        public double PeakThreshold     { get; set; } = 0.025; // 기존 0.05 → 0.025 g
 
         // Layer 1: STA/LTA
         public int    StaFrames         { get; set; } = 3;
         public int    LtaFrames         { get; set; } = 50;
-        public double StaLtaRatio       { get; set; } = 3.0;
+        public double StaLtaRatio       { get; set; } = 2.0;   // 기존 3.0 → 2.0
 
         // Layer 2: 적응형 노이즈 floor
-        public bool   UseAdaptiveThreshold   { get; set; } = true;
-        public double OnsetNoiseMultiplier   { get; set; } = 4.0;
-        public double OffsetNoiseMultiplier  { get; set; } = 2.0;
+        public bool   UseAdaptiveThreshold   { get; set; } = false; // 기본 OFF (고정 임계값 사용)
+        public double OnsetNoiseMultiplier   { get; set; } = 2.0;   // 기존 4.0 → 2.0
+        public double OffsetNoiseMultiplier  { get; set; } = 1.5;
         public double NoiseFloorGamma        { get; set; } = 0.98;
 
         // Layer 2: Onset 게이트 조합
         public bool   RequirePeakForOnset    { get; set; } = true;
-        public bool   RequireStaLtaForOnset  { get; set; } = true;
+        public bool   RequireStaLtaForOnset  { get; set; } = false; // 기본 OFF (로봇 진동에 부적합)
 
         // Layer 3: HoldOff
         public int    HoldOffFrames     { get; set; } = 3;
