@@ -191,20 +191,30 @@ namespace PHM_Project_DockPanel
 
         private void InitInfluxPublisher()
         {
-            var cfgDir  = ResolveCfgDir();
-            var cfgPath = Path.Combine(cfgDir, "influx_config.json");
-
-            var cfg = InfluxConfig.LoadOrDefault(cfgPath);
-
-            // 기본 파일이 없으면 샘플 생성
-            if (!File.Exists(cfgPath))
+            // 우선순위 순으로 탐색: 로그 폴더 → DAQ_Test infra 폴더 → 실행 파일 폴더
+            var candidatePaths = new[]
             {
-                cfg.Save(cfgPath);
-                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 생성: {cfgPath}  (기본값 사용)");
+                Path.Combine(ResolveCfgDir(), "influx_config.json"),
+                @"D:\Dev\hvs\WorkingSource\DAQ_Test\infra\influx_config.json",
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
+            };
+
+            string foundPath = null;
+            foreach (var p in candidatePaths)
+                if (File.Exists(p)) { foundPath = p; break; }
+
+            // 어디에도 없으면 기본 위치에 샘플 파일 생성
+            string savePath = foundPath ?? candidatePaths[0];
+            var cfg = InfluxConfig.LoadOrDefault(savePath);
+
+            if (foundPath == null)
+            {
+                cfg.Save(savePath);
+                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 생성: {savePath}  (기본값 — URL/Token 수정 후 재시작)");
             }
             else
             {
-                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 로드: {cfgPath}");
+                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 로드: {foundPath}");
             }
 
             _influxPublisher = new AccelInfluxPublisher(cfg, AppEvents.RaiseLog);
