@@ -26,6 +26,11 @@ namespace PHM_Project_DockPanel.Services
             if (h != null) h(enabled);
         }
 
+        /// <summary>InfluxDB 저장 레이블 변경 (빈 문자열 = 레이블 없음)</summary>
+        public static event Action<string> InfluxLabelChanged;
+        public static void RaiseInfluxLabelChanged(string label)
+            => InfluxLabelChanged?.Invoke(label ?? "");
+
         public enum LogDataKind { Torque, Accel }
 
         public static event Action<LogDataKind, string> ShowLogGraphRequestedEx;

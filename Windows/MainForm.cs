@@ -243,6 +243,12 @@ namespace PHM_Project_DockPanel
         {
             // 실시간 가속도 스트리밍 토글
             AppEvents.AccelRealtimeToggled += OnAccelRealtimeToggled;
+            // InfluxDB 저장 레이블
+            AppEvents.InfluxLabelChanged += label =>
+            {
+                if (_influxPublisher != null)
+                    _influxPublisher.Label = label;
+            };
 
             // Simulator 창 닫기 요청
             AppEvents.RequestCloseSimulator += () =>

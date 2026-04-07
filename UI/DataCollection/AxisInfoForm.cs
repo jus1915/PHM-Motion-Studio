@@ -35,6 +35,8 @@ namespace PHM_Project_DockPanel.Windows
         private CheckBox _chkAccelCollect;     // 가속도 수집
         private CheckBox _chkTorqueCollect;    // 토크 수집
         private CheckBox _chkRealtime;
+        private ComboBox _cmbLabel;
+        private Label _lblLabelCaption;
 
         // ▷ 레거시 호환용(외부 코드가 LogCheckBox에 접근하던 경우 대응)
         private CheckBox _chkLogCombined = new CheckBox { Visible = false }; // 두 체크의 OR, UI에 미표시
@@ -162,8 +164,34 @@ namespace PHM_Project_DockPanel.Windows
             {
                 bool enabled = _chkRealtime.Checked;
                 UpdateRealtimeStatusLabel(enabled);
+                _cmbLabel.Enabled = enabled;
                 AppEvents.RaiseAccelRealtimeToggled(enabled); // 로그 출력 안 함
             };
+
+            // 레이블 콤보박스
+            _lblLabelCaption = new Label
+            {
+                Text = "레이블:",
+                AutoSize = true,
+                Margin = new Padding(10, 10, 2, 0)
+            };
+
+            _cmbLabel = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDown,
+                Width = 120,
+                Margin = new Padding(0, 6, 5, 0),
+                Enabled = false
+            };
+            _cmbLabel.Items.AddRange(new object[]
+            {
+                "", "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness"
+            });
+            _cmbLabel.SelectedIndex = 0;
+            _cmbLabel.TextChanged += (s, e) =>
+                AppEvents.RaiseInfluxLabelChanged(_cmbLabel.Text.Trim());
+            _cmbLabel.SelectedIndexChanged += (s, e) =>
+                AppEvents.RaiseInfluxLabelChanged(_cmbLabel.Text.Trim());
 
             btnConnect = new Button { Text = "Connect", Width = 100, Margin = new Padding(8, 4, 0, 0) };
             btnConnect.Click += BtnConnect_Click;
@@ -174,6 +202,8 @@ namespace PHM_Project_DockPanel.Windows
             rightControlPanel.Controls.Add(_chkAccelCollect);
             rightControlPanel.Controls.Add(_chkTorqueCollect);
             rightControlPanel.Controls.Add(_chkRealtime);
+            rightControlPanel.Controls.Add(_lblLabelCaption);
+            rightControlPanel.Controls.Add(_cmbLabel);
             rightControlPanel.Controls.Add(btnConnect);
             rightControlPanel.Controls.Add(btnDisconnect);
 

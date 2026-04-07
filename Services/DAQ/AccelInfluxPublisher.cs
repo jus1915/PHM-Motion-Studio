@@ -60,6 +60,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
         /// <summary>샘플 단위 타임스탬프 계산에 사용. ApplyDaqConfig 후 설정하세요.</summary>
         public double SampleRate { get; set; } = 1000.0;
 
+        /// <summary>InfluxDB 태그 label=값. 빈 문자열이면 태그 미포함.</summary>
+        public string Label { get; set; } = "";
+
         // ── 세션 태그 (PHM_Motion RunAsync 에서 주입) ───────────────────────
         private volatile string _sessionId;
         private volatile bool   _sessionActive;
@@ -132,6 +135,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
             prefix.Append(",device=").Append(EscapeTag(module));
             if (_sessionActive && !string.IsNullOrEmpty(_sessionId))
                 prefix.Append(",session=").Append(EscapeTag(_sessionId));
+            var lbl = Label;
+            if (!string.IsNullOrEmpty(lbl))
+                prefix.Append(",label=").Append(EscapeTag(lbl));
             string tagPrefix = prefix.ToString();
 
             // 샘플별 line protocol 조립 — 한 번에 큐에 넣기 (멀티라인 배치)
