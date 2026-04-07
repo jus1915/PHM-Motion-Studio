@@ -57,6 +57,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public InfluxConfig Config { get; set; }
         public bool IsEnabled { get; private set; }
 
+        /// <summary>샘플 단위 타임스탬프 계산에 사용. ApplyDaqConfig 후 설정하세요.</summary>
+        public double SampleRate { get; set; } = 1000.0;
+
         // ── 세션 태그 (PHM_Motion RunAsync 에서 주입) ───────────────────────
         private volatile string _sessionId;
         private volatile bool   _sessionActive;
@@ -109,6 +112,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
         /// <summary>
         /// DaqAccelCsvLogger.BlockReceived 또는 PassiveMonitorForm.BlockPublished 에서 호출됩니다.
         /// block[channels, samples] — 이미 g 단위.
+        /// timestampUtc 는 블록의 마지막 샘플 시각 기준.
         /// </summary>
         public void Feed(string module, double[,] block, DateTime timestampUtc)
         {
@@ -116,43 +120,37 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
             int ch = block.GetLength(0);
             int n  = block.GetLength(1);
-            if (n == 0) return;
+            if (ch < 3 || n == 0) return;
 
-            // 채널별 RMS
-            var rms = new double[ch];
-            for (int c = 0; c < ch; c++)
-            {
-                double sum2 = 0;
-                for (int i = 0; i < n; i++) { double v = block[c, i]; sum2 += v * v; }
-                rms[c] = Math.Sqrt(sum2 / n);
-            }
+            // 블록 마지막 샘플 타임스탬프 (ms)
+            long blockEndMs = new DateTimeOffset(timestampUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
+            double intervalMs = 1000.0 / SampleRate;
 
-            long tsMs = new DateTimeOffset(timestampUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
-
-            // InfluxDB line protocol
-            var sb = new StringBuilder();
-            sb.Append("vibration_rms");
-            sb.Append(",device=").Append(EscapeTag(module));
+            // 태그 공통 접두어 (measurement,tag=val )
+            var prefix = new StringBuilder();
+            prefix.Append("accel");
+            prefix.Append(",device=").Append(EscapeTag(module));
             if (_sessionActive && !string.IsNullOrEmpty(_sessionId))
-                sb.Append(",session=").Append(EscapeTag(_sessionId));
-            sb.Append(' ');
+                prefix.Append(",session=").Append(EscapeTag(_sessionId));
+            string tagPrefix = prefix.ToString();
 
-            bool first = true;
-            if (ch >= 3)
+            // 샘플별 line protocol 조립 — 한 번에 큐에 넣기 (멀티라인 배치)
+            var sb = new StringBuilder(n * 80);
+            for (int i = 0; i < n; i++)
             {
+                // 샘플 i의 타임스탬프: 블록 끝 기준으로 역산
+                long tsMs = blockEndMs - (long)Math.Round((n - 1 - i) * intervalMs);
+
+                sb.Append(tagPrefix);
+                sb.Append(' ');
                 sb.AppendFormat(CultureInfo.InvariantCulture,
-                    "rms_x={0:G6},rms_y={1:G6},rms_z={2:G6}", rms[0], rms[1], rms[2]);
-                first = false;
-            }
-            for (int c = 0; c < ch; c++)
-            {
-                if (!first) sb.Append(',');
-                sb.AppendFormat(CultureInfo.InvariantCulture, "rms_{0}={1:G6}", c, rms[c]);
-                first = false;
+                    "x={0:G8},y={1:G8},z={2:G8}",
+                    block[0, i], block[1, i], block[2, i]);
+                sb.Append(' ').Append(tsMs);
+                sb.Append('\n');
             }
 
-            sb.Append(' ').Append(tsMs);
-
+            // 멀티라인 배치를 큐에 단일 항목으로 추가
             try { _queue.TryAdd(sb.ToString()); } catch { }
         }
 

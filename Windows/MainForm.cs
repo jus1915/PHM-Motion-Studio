@@ -184,6 +184,9 @@ namespace PHM_Project_DockPanel
             _daq.SetModuleOffset(cfg.Module, 0.0, 0.0, 0.0);
             _daq.IepeCurrentAmps = cfg.IepeCurrentAmps;
 
+            if (_influxPublisher != null)
+                _influxPublisher.SampleRate = cfg.SampleRate;
+
             AppEvents.RaiseLog($"[DAQ 설정 적용] {cfg.Module}/{cfg.Channel}  " +
                                $"Sens X={cfg.SensX} Y={cfg.SensY} Z={cfg.SensZ} mV/g  " +
                                $"Rate={cfg.SampleRate} Hz  ±{cfg.GRange} g");
