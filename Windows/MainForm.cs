@@ -198,7 +198,14 @@ namespace PHM_Project_DockPanel
 
             // 기본 파일이 없으면 샘플 생성
             if (!File.Exists(cfgPath))
+            {
                 cfg.Save(cfgPath);
+                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 생성: {cfgPath}  (기본값 사용)");
+            }
+            else
+            {
+                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 로드: {cfgPath}");
+            }
 
             _influxPublisher = new AccelInfluxPublisher(cfg, AppEvents.RaiseLog);
 

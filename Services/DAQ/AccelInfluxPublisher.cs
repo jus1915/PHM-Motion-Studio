@@ -81,7 +81,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
             IsEnabled = true;
             _cts = new CancellationTokenSource();
             _worker = Task.Run(() => WorkerLoop(_cts.Token));
-            _log("[InfluxDB] 실시간 게시 시작");
+            _log($"[InfluxDB] 실시간 게시 시작 → {Config.Url}  org={Config.Org}  bucket={Config.Bucket}");
         }
 
         public void Disable()
@@ -168,6 +168,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
             _http.DefaultRequestHeaders.Remove("Authorization");
             _http.DefaultRequestHeaders.Add("Authorization", $"Token {Config.Token}");
 
+            int _errCount = 0;
+
             while (!ct.IsCancellationRequested)
             {
                 try
@@ -179,12 +181,36 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         try
                         {
                             var resp = await _http.PostAsync(writeUrl, content, ct).ConfigureAwait(false);
-                            if (!resp.IsSuccessStatusCode)
-                                _log($"[InfluxDB] Write 실패 ({(int)resp.StatusCode})");
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                if (_errCount > 0)
+                                {
+                                    _log("[InfluxDB] 연결 복구됨");
+                                    _errCount = 0;
+                                }
+                            }
+                            else
+                            {
+                                string body = "";
+                                try { body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); } catch { }
+                                _errCount++;
+                                if (_errCount <= 3 || _errCount % 20 == 0)
+                                    _log($"[InfluxDB] Write 실패 ({(int)resp.StatusCode}): {body.Trim()}");
+                            }
                         }
                         catch (Exception ex) when (!(ex is OperationCanceledException))
                         {
-                            _log($"[InfluxDB] 전송 오류: {ex.Message}");
+                            _errCount++;
+                            // 첫 3회, 이후 20회마다만 로깅 (로그 스팸 방지)
+                            if (_errCount <= 3 || _errCount % 20 == 0)
+                            {
+                                var inner = ex.InnerException?.Message ?? ex.Message;
+                                _log($"[InfluxDB] 전송 오류 (#{_errCount}): {inner}  → {writeUrl}");
+                            }
+
+                            // 연결 실패 시 잠시 대기 (재시도 폭풍 방지)
+                            if (_errCount >= 3)
+                                await Task.Delay(2000, ct).ConfigureAwait(false);
                         }
                     }
                 }
