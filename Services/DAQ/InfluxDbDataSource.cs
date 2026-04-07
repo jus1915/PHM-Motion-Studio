@@ -107,7 +107,7 @@ schema.tagValues(
 
             progress?.Report($"총 {rows.Count:N0}개 샘플 → 세그먼트 분할 중...");
 
-            string lbl = label ?? "unlabeled";
+            string lbl = label ?? "";   // 빈 문자열 → AIForm에서 세션별 기본값(Normal 등) 적용
             string dev = device ?? "unknown";
             return Segmentize(rows, lbl, dev, segmentSeconds);
         }
@@ -267,10 +267,11 @@ schema.tagValues(
                     yArr[i] = buf[i].Item3;
                     zArr[i] = buf[i].Item4;
                 }
+                string segLabel = string.IsNullOrEmpty(label) ? "seg" : label;
                 segments.Add(new SignalSegment
                 {
-                    Name      = $"{label}_{segIdx:D4}",
-                    Label     = label,
+                    Name      = $"{segLabel}_{segIdx:D4}",
+                    Label     = label,   // 원래 값 보존 (빈 문자열도 허용)
                     Device    = device,
                     StartTime = buf[0].Item1,
                     Time      = time,

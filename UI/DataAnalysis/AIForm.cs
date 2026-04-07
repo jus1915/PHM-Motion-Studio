@@ -453,7 +453,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 // InfluxDB 세그먼트는 Label 프로퍼티가 설정됨 → 그대로 사용, 없으면 세션별 기본값
                 string rowLabel = GetProp<string>(row, "Label") ?? "";
                 if (string.IsNullOrEmpty(rowLabel))
+                {
                     rowLabel = (_session == SessionType.AnomalyDetection) ? "Normal" : "";
+                }
+                else if (_session == SessionType.AnomalyDetection)
+                {
+                    // AD 모드: 콤보 항목(Normal/Anomaly)에 없는 값은 Normal 로 보정
+                    bool valid = rowLabel.Equals("Normal",  StringComparison.OrdinalIgnoreCase)
+                              || rowLabel.Equals("Anomaly", StringComparison.OrdinalIgnoreCase);
+                    if (!valid) rowLabel = "Normal";
+                }
                 dr["Label"] = rowLabel;
                 for (int i = 0; i < _featureList.Length; i++)
                 {
