@@ -601,7 +601,7 @@ namespace PHM_Project_DockPanel
             // 데이터 분석 폼 — 상태 없으므로 매번 새로 생성
             if (persistString == typeof(PHMPipelineWizard).ToString()) return new PHMPipelineWizard();
             if (persistString == typeof(SignalExplorerForm).ToString() ||
-                persistString == typeof(PreprocessingForm).ToString()) return new SignalExplorerForm();
+                persistString == "PHM_Project_DockPanel.UI.DataAnalysis.PreprocessingForm") return new SignalExplorerForm();
             if (persistString == typeof(AnomalyDetectionForm).ToString()) return new AnomalyDetectionForm();
             if (persistString == typeof(AIForm).ToString()) return new AIForm();
             if (persistString == typeof(DashboardForm).ToString()) return new DashboardForm();
