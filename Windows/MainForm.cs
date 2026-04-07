@@ -262,8 +262,12 @@ namespace PHM_Project_DockPanel
             {
                 this.BeginInvoke(new Action(() =>
                 {
-                    var logGraph = EnsureLogGraphOpen();
-                    logGraph.LoadCsv(filePath);
+                    try
+                    {
+                        var logGraph = EnsureLogGraphOpen();
+                        logGraph.LoadCsv(filePath);
+                    }
+                    catch (ObjectDisposedException) { }
                 }));
             };
 
@@ -272,11 +276,15 @@ namespace PHM_Project_DockPanel
             {
                 this.BeginInvoke(new Action(() =>
                 {
-                    var logGraph = EnsureLogGraphOpen();
-                    var tgt = kind == AppEvents.LogDataKind.Accel
-                        ? LogGraphForm.LogKind.Accel
-                        : LogGraphForm.LogKind.Torque;
-                    logGraph.LoadCsv(filePath, tgt);
+                    try
+                    {
+                        var logGraph = EnsureLogGraphOpen();
+                        var tgt = kind == AppEvents.LogDataKind.Accel
+                            ? LogGraphForm.LogKind.Accel
+                            : LogGraphForm.LogKind.Torque;
+                        logGraph.LoadCsv(filePath, tgt);
+                    }
+                    catch (ObjectDisposedException) { }
                 }));
             };
         }
@@ -664,7 +672,9 @@ namespace PHM_Project_DockPanel
         {
             var existing = FindOpenForm<LogGraphForm>();
             if (existing != null) { existing.Activate(); return existing; }
-            _logGraph = _logGraph ?? new LogGraphForm();
+            // _logGraph가 Disposed 상태면 새로 생성
+            if (_logGraph == null || _logGraph.IsDisposed)
+                _logGraph = new LogGraphForm();
             _logGraph.Show(_dockPanel, DockState.Document);
             return _logGraph;
         }
