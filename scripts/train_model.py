@@ -20,13 +20,46 @@ params JSON 구조:
 결과: stdout에 JSON 출력 (accuracy, info 필드)
       output 경로에 ONNX 파일 생성
 
-의존성:
-    pip install scikit-learn skl2onnx onnx numpy
+의존성: 첫 실행 시 자동 설치됨 (pip 필요)
+    scikit-learn skl2onnx onnx numpy
 """
+
+import sys
+import subprocess
+
+
+def _ensure_packages():
+    """필요한 패키지가 없으면 자동으로 pip 설치합니다."""
+    REQUIRED = [
+        ("numpy", "numpy"),
+        ("sklearn", "scikit-learn"),
+        ("skl2onnx", "skl2onnx"),
+        ("onnx", "onnx"),
+    ]
+    missing = []
+    for import_name, pip_name in REQUIRED:
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(pip_name)
+
+    if missing:
+        print(f"[setup] 패키지 자동 설치: {', '.join(missing)}", file=sys.stderr)
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--quiet"] + missing,
+                stdout=subprocess.DEVNULL,
+            )
+            print("[setup] 설치 완료", file=sys.stderr)
+        except subprocess.CalledProcessError as e:
+            print(f"[setup] 설치 실패: {e}", file=sys.stderr)
+            sys.exit(1)
+
+
+_ensure_packages()
 
 import argparse
 import json
-import sys
 import os
 import numpy as np
 import csv

@@ -893,7 +893,22 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = false }),
                     System.Text.Encoding.UTF8);
 
-                string python = string.IsNullOrWhiteSpace(txtPythonPath?.Text) ? "python" : txtPythonPath.Text.Trim();
+                string userPython = txtPythonPath?.Text?.Trim() ?? "";
+                string python = FindPythonExe(userPython);
+                if (python == null)
+                {
+                    MessageBox.Show(
+                        "Python을 찾을 수 없습니다.\n\n" +
+                        "다음 중 하나를 수행하세요:\n" +
+                        "  1. Python 공식 사이트(python.org)에서 설치\n" +
+                        "  2. 위 'Python:' 입력란에 python.exe 전체 경로 입력\n\n" +
+                        "시도한 경로: py, python, python3" + (string.IsNullOrEmpty(userPython) ? "" : $", {userPython}"),
+                        "Python 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                if (txtPythonPath != null && txtPythonPath.Text.Trim() != python)
+                    txtPythonPath.Text = python;   // 자동 탐지 결과를 UI에 반영
+
                 string args = $"\"{scriptPath}\" --params \"{paramsPath}\"";
 
                 string stdout = "", stderr = "";
@@ -920,7 +935,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Python 실행 실패: {ex.Message}\n\nPython 경로를 확인하세요: {python}", "실행 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show($"Python 실행 실패: {ex.Message}\n\n탐지된 경로: {python}", "실행 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
 
@@ -955,6 +970,36 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 case "MLP": return "mlp";
                 default: return displayName.ToLower().Replace(' ', '_');
             }
+        }
+
+        /// <summary>사용 가능한 Python 실행 파일을 탐색합니다. 없으면 null 반환.</summary>
+        private static string FindPythonExe(string userPath)
+        {
+            // 우선순위: 사용자 지정 → py (Windows Launcher) → python → python3
+            var candidates = new List<string>();
+            if (!string.IsNullOrWhiteSpace(userPath)) candidates.Add(userPath);
+            candidates.AddRange(new[] { "py", "python", "python3" });
+
+            foreach (var cand in candidates)
+            {
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(cand, "--version")
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    using (var p = System.Diagnostics.Process.Start(psi))
+                    {
+                        if (p.WaitForExit(3000) && p.ExitCode == 0)
+                            return cand;
+                    }
+                }
+                catch { }
+            }
+            return null;
         }
 
         private void ExportSamplesToCsv(string path)
