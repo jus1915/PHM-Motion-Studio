@@ -891,7 +891,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 };
                 System.IO.File.WriteAllText(paramsPath,
                     JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = false }),
-                    System.Text.Encoding.UTF8);
+                    new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false)); // BOM 없음
 
                 string userPython = txtPythonPath?.Text?.Trim() ?? "";
                 string python = FindPythonExe(userPython);

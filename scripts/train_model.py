@@ -66,7 +66,8 @@ import csv
 
 
 def load_params(params_path: str) -> dict:
-    with open(params_path, "r", encoding="utf-8") as f:
+    # utf-8-sig: BOM 포함/미포함 모두 처리
+    with open(params_path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
