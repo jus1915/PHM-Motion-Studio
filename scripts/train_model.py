@@ -273,10 +273,28 @@ def main():
         "features": feature_keys,
         "class_names": class_names,
         "y_column": params.get("y_column", ""),
-        "threshold": params.get("threshold", 0.0),      # C# kNN 임계값 (레거시)
+        "threshold": params.get("threshold", 0.0),      # C# kNN 임계값
         "score_threshold": score_threshold,              # decision_function 기반 임계값 (None이면 label만 사용)
         "n_features": n_features,
+        "k": params.get("k", 5),
+        "standardize": params.get("standardize", False),
     }
+
+    # knn 타입 AD: C# kNN 거리 스코어와 일치시키기 위해 학습 벡터 저장
+    # (Dashboard에서 SignalFeatures.ScoreKnn()으로 동일한 스코어 계산)
+    if session == "AD" and model_key == "knn":
+        try:
+            scaler = pipeline.named_steps.get("scaler")
+            if scaler is not None:
+                meta["mean"] = scaler.mean_.tolist()
+                meta["std"] = scaler.scale_.tolist()
+            else:
+                meta["mean"] = None
+                meta["std"] = None
+            # 학습 벡터 저장 (표준화 전 원본 - C# ScoreKnn이 내부적으로 표준화 처리)
+            meta["train_vectors"] = X_train.tolist()
+        except Exception as e:
+            pass  # 저장 실패해도 ONNX label 기반으로 동작
     meta_path = os.path.splitext(output_path)[0] + "_meta.json"
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)

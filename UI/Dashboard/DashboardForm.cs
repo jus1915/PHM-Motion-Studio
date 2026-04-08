@@ -319,10 +319,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public string ModelType;          // "knn", "isoforest", "ocsvm", "svm", "rf", "gbm", "mlp"
             public string[] Features;         // 피처 키 목록 (추출 순서)
             public string YColumn;            // CSV Y 컬럼명
-            public double Threshold;          // C# kNN 임계값 (레거시)
+            public double Threshold;          // C# kNN 임계값
             public double ScoreThreshold;     // decision_function 기반 임계값 (0이면 미산출 → label만 사용)
             public string[] ClassNames;       // FD 클래스명
             public InferenceSession OnnxSession;
+            // knn AD 전용: C# kNN 거리 스코어링 (AI Form 평가와 동일한 값)
+            public double[][] TrainVectors;   // 학습 벡터 (raw, 표준화 전)
+            public int K = 5;
+            public bool Standardize;
+            public double[] Mean;
+            public double[] Std;
         }
         private readonly Dictionary<int, OnnxSklModel> _axisSklModels = new Dictionary<int, OnnxSklModel>();
         #endregion
@@ -2004,7 +2010,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 string[] features = Array.Empty<string>();
                 string yColumn = "";
                 double threshold = 0.5;
-                double scoreThreshold = 0.0;  // 0 = 미산출 (label만 사용)
+                double scoreThreshold = 0.0;
+                int knn_k = 5;
+                bool knn_standardize = false;
+                double[] knn_mean = null;
+                double[] knn_std = null;
+                double[][] knn_trainVectors = null;
                 string[] classNames = new[] { "Normal", "Anomaly" };
 
                 if (File.Exists(metaPath))
@@ -2018,6 +2029,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         if (root.TryGetProperty("y_column", out var ycProp)) yColumn = ycProp.GetString() ?? "";
                         if (root.TryGetProperty("threshold", out var thrProp) && thrProp.TryGetDouble(out double thrVal)) threshold = thrVal;
                         if (root.TryGetProperty("score_threshold", out var stProp) && stProp.ValueKind != JsonValueKind.Null && stProp.TryGetDouble(out double stVal)) scoreThreshold = stVal;
+                        if (root.TryGetProperty("k", out var kProp) && kProp.TryGetInt32(out int kVal)) knn_k = kVal;
+                        if (root.TryGetProperty("standardize", out var szProp)) knn_standardize = szProp.GetBoolean();
+                        if (root.TryGetProperty("mean", out var meanProp) && meanProp.ValueKind == JsonValueKind.Array)
+                            knn_mean = meanProp.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+                        if (root.TryGetProperty("std", out var stdProp) && stdProp.ValueKind == JsonValueKind.Array)
+                            knn_std = stdProp.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+                        if (root.TryGetProperty("train_vectors", out var tvProp) && tvProp.ValueKind == JsonValueKind.Array)
+                            knn_trainVectors = tvProp.EnumerateArray()
+                                .Select(row => row.EnumerateArray().Select(e => e.GetDouble()).ToArray())
+                                .ToArray();
                         if (root.TryGetProperty("features", out var fProp) && fProp.ValueKind == JsonValueKind.Array)
                             features = fProp.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray();
                         if (root.TryGetProperty("class_names", out var cnProp) && cnProp.ValueKind == JsonValueKind.Array)
@@ -2069,7 +2090,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     Threshold      = threshold > 0 ? threshold : 0.5,
                     ScoreThreshold = scoreThreshold,
                     ClassNames     = classNames,
-                    OnnxSession    = sess
+                    OnnxSession    = sess,
+                    TrainVectors   = knn_trainVectors,
+                    K              = knn_k,
+                    Standardize    = knn_standardize,
+                    Mean           = knn_mean,
+                    Std            = knn_std,
                 };
 
                 RefreshModelPathList();
@@ -2097,7 +2123,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             double[] vec = BuildFeatureVectorFromCsv(csvPath, skl.YColumn, skl.Features);
             if (vec == null || vec.Length != skl.Features.Length) return false;
 
-            // 2) float 텐서 구성
+            // ★ knn AD: 학습 벡터가 있으면 C# kNN 거리로 rawScore 계산 (AI Form 평가와 동일)
+            if (skl.Session == "AD" && skl.ModelType == "knn" &&
+                skl.TrainVectors != null && skl.TrainVectors.Length > 0)
+            {
+                rawScore = SignalFeatures.ScoreKnn(vec, skl.TrainVectors, skl.K,
+                                                   skl.Standardize, skl.Mean, skl.Std);
+                double thr = skl.Threshold > 0 ? skl.Threshold : 1.0;
+                isAnomaly = rawScore >= thr;
+                info = $"KNN AD  score={rawScore:F4}  thr={thr:F4}  =>  {(isAnomaly ? "이상" : "정상")}";
+                return true;
+            }
+
+            // 2) float 텐서 구성 (knn 외 모든 모델)
             var inputData = new DenseTensor<float>(new[] { 1, vec.Length });
             for (int i = 0; i < vec.Length; i++) inputData[0, i] = (float)vec[i];
 
@@ -2832,21 +2870,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     }
 
                     // 임계값 결정:
-                    // - score_threshold(decision function 기반)가 있으면 그것 사용
-                    // - 없으면 label(-1/1) 기반으로만 이상 판정 (thr=0 표시용)
-                    double thr = skl.ScoreThreshold > 0 ? skl.ScoreThreshold : 0.0;
-                    bool useScoreThreshold = skl.ScoreThreshold > 0;
+                    // knn AD: C# kNN 거리 기준 → Threshold 직접 사용
+                    // 그 외 AD: score_threshold(decision function 기반) 있으면 사용, 없으면 label만
+                    bool isKnnAd = skl.Session == "AD" && skl.ModelType == "knn"
+                                   && skl.TrainVectors != null && skl.TrainVectors.Length > 0;
+                    double thr = isKnnAd                      ? skl.Threshold
+                               : skl.ScoreThreshold > 0      ? skl.ScoreThreshold
+                                                              : 0.0;
+                    bool useScoreThreshold = isKnnAd || skl.ScoreThreshold > 0;
 
                     AlarmLevel level;
                     if (skl.Session == "AD")
                     {
                         if (useScoreThreshold)
-                            // rawScore > thr → 경고, rawScore > thr*1.5 → 위험
-                            level = rawScore > thr * 1.5 ? AlarmLevel.Danger
-                                  : rawScore > thr       ? AlarmLevel.Warning
+                            level = rawScore >= thr * 1.5 ? AlarmLevel.Danger
+                                  : rawScore >= thr       ? AlarmLevel.Warning
                                   : AlarmLevel.Normal;
                         else
-                            // score_threshold 없으면 label만 신뢰
                             level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
                     }
                     else
