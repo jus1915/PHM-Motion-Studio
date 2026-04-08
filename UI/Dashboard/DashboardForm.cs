@@ -2450,6 +2450,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _watcher.Created += OnFileCreatedOrChanged;
             _watcher.Changed += OnFileCreatedOrChanged;
             _watcher.Renamed += OnFileRenamed;
+            _watcher.Error   += OnWatcherError;
 
             // 6) 베이스라인(현재 길이 기록) — 이벤트 켜기 전에
             var option = WatchSubdirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
@@ -2492,6 +2493,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     _watcher.Created -= OnFileCreatedOrChanged;
                     _watcher.Changed -= OnFileCreatedOrChanged;
                     _watcher.Renamed -= OnFileRenamed;
+                    _watcher.Error   -= OnWatcherError;
                     _watcher.Dispose();
                 }
                 catch { }
@@ -2518,6 +2520,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // CSV만 처리 (임시 파일/기타 확장자 무시)
             if (!e.FullPath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
                 return;
+
+            // ★ 진단: FSW 이벤트 수신 확인
+            BeginInvoke(new Action(() =>
+                AppendEventLog($"[FSW] {e.ChangeType} {Path.GetFileName(e.FullPath)}")));
 
             try
             {
@@ -2563,6 +2569,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 System.Diagnostics.Debug.WriteLine(ex);
             }
         }
+
+        private void OnWatcherError(object sender, ErrorEventArgs e)
+        {
+            BeginInvoke(new Action(() =>
+                AppendEventLog($"[FSW-ERROR] 감시 오류: {e.GetException()?.Message} — 재시작 중...")));
+
+            // 오류 발생 시 Watcher 재시작
+            try
+            {
+                if (_watcher != null)
+                {
+                    _watcher.EnableRaisingEvents = false;
+                    _watcher.EnableRaisingEvents = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new Action(() =>
+                    AppendEventLog($"[FSW-ERROR] 재시작 실패: {ex.Message}")));
+            }
+        }
         #endregion
 
         #region 파일 처리/스코어링
@@ -2577,14 +2604,29 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 long lastLen = 0;
                 lock (_sync) { _lastProcessedLen.TryGetValue(path, out lastLen); }
-                if (curLen <= lastLen) return; // 증분 없음 → 스킵
+                if (curLen <= lastLen)
+                {
+                    BeginInvoke(new Action(() =>
+                        AppendEventLog($"[SKIP] 증분없음 cur={curLen} last={lastLen}  {Path.GetFileName(path)}")));
+                    return;
+                }
 
                 string[] headers = Retry<string[]>(() => SignalFeatures.GetCsvHeaders(path), 5, 100);
-                if (headers == null || headers.Length == 0) return;
+                if (headers == null || headers.Length == 0)
+                {
+                    BeginInvoke(new Action(() =>
+                        AppendEventLog($"[SKIP] 헤더 없음  {Path.GetFileName(path)}")));
+                    return;
+                }
 
                 var axesByName = AxesFromFilename(path);
                 HashSet<string> headerSet = new HashSet<string>(headers.Select(h => h == null ? null : h.Trim()).Where(h => !string.IsNullOrEmpty(h)), StringComparer.OrdinalIgnoreCase);
                 List<int> movedAxes = DetermineMovedAxes(path, headers, MotionEps);
+
+                // ★ 진단: 처리 진입 확인
+                BeginInvoke(new Action(() =>
+                    AppendEventLog($"[PROC] {Path.GetFileName(path)}  headers={headers.Length}  movedAxes=[{string.Join(",", movedAxes)}]  axesByName=[{string.Join(",", axesByName)}]  models: KNN={_axisModels.Count} SKL={_axisSklModels.Count} AE={_axisOnnx.Count}")));
+
                 bool anyAxisProcessed = false;
 
                 // ---------- (A) AE 우선 ----------
@@ -2749,11 +2791,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     int axis = kv.Key;
                     OnnxSklModel skl = kv.Value;
                     if (skl == null || skl.OnnxSession == null) continue;
-                    if (axesByName.Count > 0 && !axesByName.Contains(axis)) continue;
-                    if (string.IsNullOrWhiteSpace(skl.YColumn) || !headerSet.Contains(skl.YColumn)) continue;
+                    if (axesByName.Count > 0 && !axesByName.Contains(axis))
+                    {
+                        BeginInvoke(new Action(() => AppendEventLog($"[SKL-SKIP] axis {axis} 파일명 불일치 axesByName=[{string.Join(",", axesByName)}]")));
+                        continue;
+                    }
+                    if (string.IsNullOrWhiteSpace(skl.YColumn) || !headerSet.Contains(skl.YColumn))
+                    {
+                        BeginInvoke(new Action(() => AppendEventLog($"[SKL-SKIP] axis {axis} YColumn='{skl.YColumn}' not in headers")));
+                        continue;
+                    }
 
                     bool isAnom; int predClass; float[] probs; string sklInfo;
-                    if (!TrySklOnnxScore(skl, path, out isAnom, out predClass, out probs, out sklInfo)) continue;
+                    if (!TrySklOnnxScore(skl, path, out isAnom, out predClass, out probs, out sklInfo))
+                    {
+                        BeginInvoke(new Action(() => AppendEventLog($"[SKL-SKIP] axis {axis} TrySklOnnxScore 실패: {sklInfo}")));
+                        continue;
+                    }
 
                     AlarmLevel level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
                     anyAxisProcessed = true;
