@@ -227,16 +227,19 @@ def main():
     pipeline = build_pipeline(model_key, session, params)
 
     if session == "AD":
-        # AD 모델은 레이블 없이 (정상 데이터만으로) 학습
+        # AD 모델은 정상 데이터만으로 학습
         pipeline.fit(X_train)
-        # 학습 데이터 점수 계산 (정보용)
+        # predict() → 1=정상, -1=이상 (IsolationForest/OneClassSVM/LOF 공통)
+        # 학습 데이터의 정상 분류율을 표시 (임계값 무관)
         try:
-            scores = pipeline.score_samples(X)
-            threshold = float(params.get("threshold", 0.0))
-            pred = (scores < threshold).astype(int)
-            accuracy = float(np.mean(pred == y))
-            info = f"학습={len(X_train)} 정상샘플, 전체={len(X)} 샘플"
-        except Exception:
+            preds = pipeline.predict(X_train)  # 학습셋 기준
+            n_normal = int(np.sum(preds == 1))
+            n_total = len(X_train)
+            normal_rate = n_normal / n_total if n_total > 0 else 0.0
+            accuracy = normal_rate  # 정상샘플 중 정상으로 판정된 비율
+            info = (f"학습={n_total} 정상샘플 | "
+                    f"정상 분류율={n_normal}/{n_total} ({100*normal_rate:.1f}%)")
+        except Exception as ex:
             accuracy = None
             info = f"학습={len(X_train)} 정상샘플"
     else:
