@@ -900,9 +900,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     MessageBox.Show(
                         "Python을 찾을 수 없습니다.\n\n" +
                         "다음 중 하나를 수행하세요:\n" +
-                        "  1. Python 공식 사이트(python.org)에서 설치\n" +
-                        "  2. 위 'Python:' 입력란에 python.exe 전체 경로 입력\n\n" +
-                        "시도한 경로: py, python, python3" + (string.IsNullOrEmpty(userPython) ? "" : $", {userPython}"),
+                        "  1. Python 공식 사이트(python.org)에서 설치 후 재시도\n" +
+                        "     (설치 시 'Add python.exe to PATH' 체크)\n" +
+                        "  2. 위 'Python:' 입력란에 python.exe 전체 경로를 직접 입력\n" +
+                        "     예) C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
                         "Python 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
@@ -975,13 +976,46 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         /// <summary>사용 가능한 Python 실행 파일을 탐색합니다. 없으면 null 반환.</summary>
         private static string FindPythonExe(string userPath)
         {
-            // 우선순위: 사용자 지정 → py (Windows Launcher) → python → python3
             var candidates = new List<string>();
+
+            // 1) 사용자 지정 경로
             if (!string.IsNullOrWhiteSpace(userPath)) candidates.Add(userPath);
+
+            // 2) PATH에 등록된 명령어
             candidates.AddRange(new[] { "py", "python", "python3" });
 
+            // 3) Windows 레지스트리에서 설치 경로 탐색
+            foreach (var exePath in FindPythonFromRegistry())
+                candidates.Add(exePath);
+
+            // 4) 일반 설치 폴더 탐색 (PATH 미등록 케이스 대응)
+            var searchRoots = new[]
+            {
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python"),
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Programs", "Python"),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                @"C:\",
+            };
+            foreach (var root in searchRoots)
+            {
+                if (!System.IO.Directory.Exists(root)) continue;
+                try
+                {
+                    foreach (var dir in System.IO.Directory.GetDirectories(root, "Python3*")
+                                            .OrderByDescending(d => d))
+                    {
+                        var exe = System.IO.Path.Combine(dir, "python.exe");
+                        if (System.IO.File.Exists(exe)) candidates.Add(exe);
+                    }
+                }
+                catch { }
+            }
+
+            // 후보 중 실제 실행 가능한 첫 번째 반환
             foreach (var cand in candidates)
             {
+                if (string.IsNullOrWhiteSpace(cand)) continue;
                 try
                 {
                     var psi = new System.Diagnostics.ProcessStartInfo(cand, "--version")
@@ -1000,6 +1034,49 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 catch { }
             }
             return null;
+        }
+
+        /// <summary>레지스트리 HKCU/HKLM에서 Python InstallPath를 읽어 python.exe 경로 목록 반환.</summary>
+        private static IEnumerable<string> FindPythonFromRegistry()
+        {
+            var result = new List<string>();
+            var hives = new[]
+            {
+                Microsoft.Win32.Registry.CurrentUser,
+                Microsoft.Win32.Registry.LocalMachine
+            };
+            foreach (var hive in hives)
+            {
+                try
+                {
+                    using (var key = hive.OpenSubKey(@"SOFTWARE\Python\PythonCore"))
+                    {
+                        if (key == null) continue;
+                        foreach (var ver in key.GetSubKeyNames().OrderByDescending(v => v))
+                        {
+                            try
+                            {
+                                using (var instKey = key.OpenSubKey(ver + @"\InstallPath"))
+                                {
+                                    if (instKey == null) continue;
+                                    var exePath = instKey.GetValue("ExecutablePath") as string;
+                                    if (string.IsNullOrEmpty(exePath))
+                                    {
+                                        var folder = instKey.GetValue("") as string;
+                                        if (!string.IsNullOrEmpty(folder))
+                                            exePath = System.IO.Path.Combine(folder.TrimEnd('\\', '/'), "python.exe");
+                                    }
+                                    if (!string.IsNullOrEmpty(exePath) && System.IO.File.Exists(exePath))
+                                        result.Add(exePath);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+            return result;
         }
 
         private void ExportSamplesToCsv(string path)
