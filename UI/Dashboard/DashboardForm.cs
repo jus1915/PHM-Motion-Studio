@@ -2127,12 +2127,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (skl.Session == "AD" && skl.ModelType == "knn" &&
                 skl.TrainVectors != null && skl.TrainVectors.Length > 0)
             {
-                // [진단] 피처 벡터 첫 3개 값 + 학습 벡터[0] 첫 3개 비교
-                string vecStr = string.Join(", ", vec.Take(3).Select(v => v.ToString("F4")));
-                string trnStr = string.Join(", ", skl.TrainVectors[0].Take(3).Select(v => v.ToString("F4")));
-                BeginInvoke(new Action(() =>
-                    AppendEventLog($"[DBG] vec[0..2]=[{vecStr}]  train[0][0..2]=[{trnStr}]  std={skl.Standardize}  n_train={skl.TrainVectors.Length}")));
-
                 rawScore = SignalFeatures.ScoreKnn(vec, skl.TrainVectors, skl.K,
                                                    skl.Standardize, skl.Mean, skl.Std);
                 double thr = skl.Threshold > 0 ? skl.Threshold : 1.0;
@@ -2587,10 +2581,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (!e.FullPath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
                 return;
 
-            // ★ 진단: FSW 이벤트 수신 확인
-            BeginInvoke(new Action(() =>
-                AppendEventLog($"[FSW] {e.ChangeType} {Path.GetFileName(e.FullPath)}")));
-
             try
             {
                 CancellationTokenSource cts;
@@ -2671,27 +2661,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 long lastLen = 0;
                 lock (_sync) { _lastProcessedLen.TryGetValue(path, out lastLen); }
                 if (curLen <= lastLen)
-                {
-                    BeginInvoke(new Action(() =>
-                        AppendEventLog($"[SKIP] 증분없음 cur={curLen} last={lastLen}  {Path.GetFileName(path)}")));
                     return;
-                }
 
                 string[] headers = Retry<string[]>(() => SignalFeatures.GetCsvHeaders(path), 5, 100);
-                if (headers == null || headers.Length == 0)
-                {
-                    BeginInvoke(new Action(() =>
-                        AppendEventLog($"[SKIP] 헤더 없음  {Path.GetFileName(path)}")));
-                    return;
-                }
+                if (headers == null || headers.Length == 0) return;
 
                 var axesByName = AxesFromFilename(path);
                 HashSet<string> headerSet = new HashSet<string>(headers.Select(h => h == null ? null : h.Trim()).Where(h => !string.IsNullOrEmpty(h)), StringComparer.OrdinalIgnoreCase);
                 List<int> movedAxes = DetermineMovedAxes(path, headers, MotionEps);
-
-                // ★ 진단: 처리 진입 확인
-                BeginInvoke(new Action(() =>
-                    AppendEventLog($"[PROC] {Path.GetFileName(path)}  headers={headers.Length}  movedAxes=[{string.Join(",", movedAxes)}]  axesByName=[{string.Join(",", axesByName)}]  models: KNN={_axisModels.Count} SKL={_axisSklModels.Count} AE={_axisOnnx.Count}")));
 
                 bool anyAxisProcessed = false;
 
@@ -2857,23 +2834,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     int axis = kv.Key;
                     OnnxSklModel skl = kv.Value;
                     if (skl == null || skl.OnnxSession == null) continue;
-                    if (axesByName.Count > 0 && !axesByName.Contains(axis))
-                    {
-                        BeginInvoke(new Action(() => AppendEventLog($"[SKL-SKIP] axis {axis} 파일명 불일치 axesByName=[{string.Join(",", axesByName)}]")));
-                        continue;
-                    }
-                    if (string.IsNullOrWhiteSpace(skl.YColumn) || !headerSet.Contains(skl.YColumn))
-                    {
-                        BeginInvoke(new Action(() => AppendEventLog($"[SKL-SKIP] axis {axis} YColumn='{skl.YColumn}' not in headers")));
-                        continue;
-                    }
+                    if (axesByName.Count > 0 && !axesByName.Contains(axis)) continue;
+                    if (string.IsNullOrWhiteSpace(skl.YColumn) || !headerSet.Contains(skl.YColumn)) continue;
 
                     bool isAnom; int predClass; float[] probs; double rawScore; string sklInfo;
                     if (!TrySklOnnxScore(skl, path, out isAnom, out predClass, out probs, out rawScore, out sklInfo))
-                    {
-                        BeginInvoke(new Action(() => AppendEventLog($"[SKL-SKIP] axis {axis} TrySklOnnxScore 실패: {sklInfo}")));
                         continue;
-                    }
 
                     // 임계값 결정:
                     // knn AD: C# kNN 거리 기준 → Threshold 직접 사용
