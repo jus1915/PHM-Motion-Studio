@@ -79,6 +79,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         // 공통/학습 탭
         private ComboBox cmbSession;                    // ★ 세션 전환
+        private ComboBox cmbModelType;                  // ★ 모델 유형
+        private Label lblKParam;                        // k 파라미터 레이블 (kNN 전용)
+        private TextBox txtPythonPath;                  // Python 실행 경로
         private CheckedListBox clbTimeFeatures;
         private CheckedListBox clbFreqFeatures;
         private Button btnTimeSelectAll, btnTimeClearAll;
@@ -203,14 +206,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Padding = new Padding(0, 0, 6, 0)
             };
             rightStack.RowStyles.Clear();
-            rightStack.RowStyles.Add(new RowStyle());                       // (0) 세션 콤보 ★
-            rightStack.RowStyles.Add(new RowStyle());                       // (1) Y 라벨
-            rightStack.RowStyles.Add(new RowStyle());                       // (2) k 라벨
-            rightStack.RowStyles.Add(new RowStyle());                       // (3) k numeric
-            rightStack.RowStyles.Add(new RowStyle());                       // (4) 표준화
-            rightStack.RowStyles.Add(new RowStyle());                       // (5) 전체선택/해제(모두)
-            rightStack.RowStyles.Add(new RowStyle());                       // (6) 학습/저장 버튼들
-            rightStack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // (7) filler
+            rightStack.RowStyles.Add(new RowStyle());                       // (0) 세션 콤보
+            rightStack.RowStyles.Add(new RowStyle());                       // (1) 모델 유형
+            rightStack.RowStyles.Add(new RowStyle());                       // (2) Y 라벨
+            rightStack.RowStyles.Add(new RowStyle());                       // (3) k 라벨
+            rightStack.RowStyles.Add(new RowStyle());                       // (4) k numeric
+            rightStack.RowStyles.Add(new RowStyle());                       // (5) 표준화
+            rightStack.RowStyles.Add(new RowStyle());                       // (6) Python 경로
+            rightStack.RowStyles.Add(new RowStyle());                       // (7) 전체선택/해제(모두)
+            rightStack.RowStyles.Add(new RowStyle());                       // (8) 학습/저장 버튼들
+            rightStack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // (9) filler
 
             // 세션 전환 콤보
             var lblSess = new Label { Text = "세션:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
@@ -221,16 +226,32 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             cmbSession.SelectedIndexChanged += (s, e) =>
             {
                 _session = (cmbSession.SelectedIndex == 0) ? SessionType.AnomalyDetection : SessionType.FaultDiagnosis;
+                UpdateModelTypeItems();
                 ApplySessionUI();
             };
             var sessPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Dock = DockStyle.Top };
             sessPanel.Controls.Add(lblSess);
             sessPanel.Controls.Add(cmbSession);
 
+            // 모델 유형 콤보
+            var lblModelType = new Label { Text = "모델:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+            cmbModelType = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180 };
+            cmbModelType.SelectedIndexChanged += (s, e) => UpdateModelTypeUI();
+            var modelTypePanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Dock = DockStyle.Top };
+            modelTypePanel.Controls.Add(lblModelType);
+            modelTypePanel.Controls.Add(cmbModelType);
+
             lblYColumn = new Label { AutoSize = true, Text = "Y 컬럼: (미지정)", Margin = new Padding(0, 6, 0, 0) };
-            var lblK = new Label { Text = "k:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+            lblKParam = new Label { Text = "k:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
             numK = new NumericUpDown { Minimum = 1, Maximum = 50, Value = 5, Width = 80, Anchor = AnchorStyles.Left | AnchorStyles.Top };
             chkStd = new CheckBox { Text = "표준화", Checked = true, AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+
+            // Python 경로
+            var lblPython = new Label { Text = "Python:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+            txtPythonPath = new TextBox { Text = "python", Width = 160, Margin = new Padding(0, 4, 0, 0) };
+            var pythonPathPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Dock = DockStyle.Top };
+            pythonPathPanel.Controls.Add(lblPython);
+            pythonPathPanel.Controls.Add(txtPythonPath);
 
             var pnlBoth = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = true, AutoSize = true, Dock = DockStyle.Top };
             btnAllSelectBoth = new Button { Text = "전체 선택(모두)", Width = 130 };
@@ -243,7 +264,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             btnMarkAllNormal = new Button { Text = "전체 정상", Width = 90 };
             btnMarkAllAnomaly = new Button { Text = "전체 이상", Width = 90 };
             btnTrain = new Button { Text = "학습", Width = 80 };
-            btnSaveModel = new Button { Text = "모델 저장", Width = 90 };
+            btnSaveModel = new Button { Text = "ONNX 저장", Width = 100 };
             btnMarkAllNormal.Click += (s, e) => MarkAll("Normal");
             btnMarkAllAnomaly.Click += (s, e) => MarkAll("Anomaly");
             btnTrain.Click += (s, e) => TrainModel();
@@ -251,13 +272,18 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             pnlTrainBtns.Controls.AddRange(new Control[] { btnMarkAllNormal, btnMarkAllAnomaly, btnTrain, btnSaveModel });
 
             rightStack.Controls.Add(sessPanel, 0, 0);
-            rightStack.Controls.Add(lblYColumn, 0, 1);
-            rightStack.Controls.Add(lblK, 0, 2);
-            rightStack.Controls.Add(numK, 0, 3);
-            rightStack.Controls.Add(chkStd, 0, 4);
-            rightStack.Controls.Add(pnlBoth, 0, 5);
-            rightStack.Controls.Add(pnlTrainBtns, 0, 6);
+            rightStack.Controls.Add(modelTypePanel, 0, 1);
+            rightStack.Controls.Add(lblYColumn, 0, 2);
+            rightStack.Controls.Add(lblKParam, 0, 3);
+            rightStack.Controls.Add(numK, 0, 4);
+            rightStack.Controls.Add(chkStd, 0, 5);
+            rightStack.Controls.Add(pythonPathPanel, 0, 6);
+            rightStack.Controls.Add(pnlBoth, 0, 7);
+            rightStack.Controls.Add(pnlTrainBtns, 0, 8);
             rightScroll.Controls.Add(rightStack);
+
+            // 모델 유형 초기 목록
+            UpdateModelTypeItems();
 
             top3.Controls.Add(grpTime, 0, 0);
             top3.Controls.Add(grpFreq, 1, 0);
@@ -391,6 +417,26 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     gridTrain.Columns.Insert(idx, col);
                 }
             }
+        }
+
+        private void UpdateModelTypeItems()
+        {
+            string current = cmbModelType.SelectedItem?.ToString() ?? "kNN";
+            cmbModelType.Items.Clear();
+            if (_session == SessionType.AnomalyDetection)
+                cmbModelType.Items.AddRange(new object[] { "kNN", "Isolation Forest", "One-Class SVM" });
+            else
+                cmbModelType.Items.AddRange(new object[] { "kNN", "SVM", "Random Forest", "Gradient Boosting", "MLP" });
+            int idx = cmbModelType.Items.IndexOf(current);
+            cmbModelType.SelectedIndex = idx >= 0 ? idx : 0;
+        }
+
+        private void UpdateModelTypeUI()
+        {
+            bool isKnn = (cmbModelType.SelectedItem?.ToString() ?? "kNN") == "kNN";
+            if (lblKParam != null) lblKParam.Visible = isKnn;
+            if (numK != null) numK.Visible = isKnn;
+            if (txtPythonPath?.Parent != null) txtPythonPath.Parent.Visible = !isKnn;
         }
 
         private void CheckAll(CheckedListBox clb, bool check)
@@ -544,12 +590,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _samples = BuildSamplesFromGrid(_selectedKeys); if (_samples.Count == 0) { MessageBox.Show("유효한 샘플이 없습니다."); return; }
             _k = (int)numK.Value; _useStandardize = chkStd.Checked;
 
+            string modelTypeName = cmbModelType.SelectedItem?.ToString() ?? "kNN";
+
             // 표준화 파라미터: 학습셋 기준 (누설 방지)
             if (_useStandardize)
             {
                 var Xall = _samples.Select(s => s.X).ToArray();
                 (_mean, _std) = Standardizer.Fit(Xall);
-                //Standardizer.TransformInPlace(Xall, _mean, _std);
                 for (int i = 0; i < _samples.Count; i++) _samples[i].X = Xall[i];
             }
             else { _mean = null; _std = null; }
@@ -564,6 +611,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 }
                 _trainSet = _samples.Where(s => s.Label == 0).ToList();
                 if (_trainSet.Count == 0) { MessageBox.Show("정상으로 표시된 샘플이 없습니다."); return; }
+                // kNN은 C#, 그 외 Python 기반 모델도 검증 미리보기는 kNN으로 표시
                 _model = new KNNAnomalyModel(_k, _useStandardize, _mean, _std);
                 _model.Fit(_trainSet.Select(s => s.X).ToList(), _trainSet.Select(_ => 0).ToList());
                 _trainVectors = _trainSet.Select(s => s.X).ToArray();
@@ -579,11 +627,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 _trainSet = _samples.ToList();
                 _model = new KNNClassifier(_k, _useStandardize, _mean, _std);
                 _model.Fit(_trainSet.Select(s => s.X).ToList(), _trainSet.Select(s => s.Label).ToList());
-                _trainVectors = null; // CLS는 보관 불필요
+                _trainVectors = null;
                 _classNames = _enc.ClassNames();
             }
 
-            MessageBox.Show($"학습 완료\n세션={_session} / 샘플={_trainSet.Count} / 특징={_selectedKeys.Length}\nk={_k}, 표준화={_useStandardize}");
+            string note = modelTypeName == "kNN" ? "" : $"\n\n※ '{modelTypeName}' 모델은 [ONNX 저장] 시 Python으로 학습·변환됩니다.\n  검증 미리보기는 kNN으로 표시됩니다.";
+            MessageBox.Show($"학습 완료\n세션={_session} / 모델={modelTypeName} / 샘플={_trainSet.Count} / 특징={_selectedKeys.Length}{note}");
         }
 
         // ====== 검증 ======
@@ -791,53 +840,138 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void SaveModelBySession()
         {
-            if (_model == null) { MessageBox.Show("먼저 학습을 수행하세요."); return; }
+            if (_samples == null || _samples.Count == 0) { MessageBox.Show("먼저 학습을 수행하세요."); return; }
             if (_selectedKeys == null || _selectedKeys.Length == 0) { MessageBox.Show("특징 선택이 비었습니다."); return; }
 
-            double thrToSave = (double)numThreshold.Value;
-            if (_session == SessionType.AnomalyDetection)
+            string modelTypeName = cmbModelType.SelectedItem?.ToString() ?? "kNN";
+            string sessionStr = _session == SessionType.AnomalyDetection ? "AD" : "FD";
+            string defaultName = $"{modelTypeName.ToLower().Replace(' ', '_').Replace('-', '_')}_{sessionStr.ToLower()}_model.onnx";
+
+            using (var sfd = new SaveFileDialog { Filter = "ONNX Model (*.onnx)|*.onnx", FileName = defaultName })
             {
-                // 임계값 자동 산출 (필요시)
-                if (thrToSave <= 0.0)
+                if (sfd.ShowDialog() != DialogResult.OK) return;
+                string onnxPath = sfd.FileName;
+
+                // 특징 데이터를 임시 CSV로 내보내기
+                string csvPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_train_features.csv");
+                ExportSamplesToCsv(csvPath);
+
+                // Python 스크립트 경로 결정
+                string scriptPath = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".",
+                    "scripts", "train_model.py");
+                if (!System.IO.File.Exists(scriptPath))
+                {
+                    MessageBox.Show($"Python 스크립트를 찾을 수 없습니다:\n{scriptPath}\n\nscripts/train_model.py 를 실행 파일 폴더에 배치하세요.",
+                        "스크립트 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // 임계값 계산 (AD)
+                double thrToSave = (double)numThreshold.Value;
+                if (_session == SessionType.AnomalyDetection && thrToSave <= 0.0)
                 {
                     var loo = ComputeTrainScoresLOO();
-                    if (loo.Length >= 2)
-                    {
-                        thrToSave = Percentile(loo, 0.99);
-                        try { numThreshold.Value = (decimal)thrToSave; } catch { }
-                        MessageBox.Show($"검증 없이 자동 임계값 적용\nLOO 99% = {thrToSave:F3}", "자동 임계값", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    else
-                    {
-                        MessageBox.Show("학습 샘플 수가 너무 적어(≤1) 자동 임계값을 계산할 수 없습니다.", "임계값 미설정", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
+                    if (loo.Length >= 2) { thrToSave = Percentile(loo, 0.99); try { numThreshold.Value = (decimal)thrToSave; } catch { } }
                 }
-            }
 
-            var payload = new
-            {
-                Session = _session.ToString(),
-                ModelType = (_session == SessionType.AnomalyDetection ? "KNN_AD" : "KNN_CLS"),
-                K = _k,
-                Standardize = _useStandardize,
-                Features = _selectedKeys,
-                Threshold = (_session == SessionType.AnomalyDetection ? thrToSave : (double?)null),
-                Mean = _mean,
-                Std = _std,
-                Train = (_session == SessionType.AnomalyDetection ? _trainVectors : null),
-                YColumn = _yColumnName,
-                ClassNames = (_session == SessionType.FaultDiagnosis ? _classNames : null) // ← 문자열 클래스명 보존
-            };
-
-            using (var sfd = new SaveFileDialog { Filter = "PHM Model (*.json)|*.json", FileName = (_session == SessionType.AnomalyDetection ? "knn_ad_model.json" : "knn_cls_model.json") })
-            {
-                if (sfd.ShowDialog() == DialogResult.OK)
+                // 파라미터를 임시 JSON 파일로 저장 (인수 이스케이프 문제 회피)
+                string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_train_params.json");
+                var paramsObj = new
                 {
-                    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
-                    System.IO.File.WriteAllText(sfd.FileName, json);
-                    MessageBox.Show("모델 저장 완료");
+                    csv = csvPath,
+                    output = onnxPath,
+                    session = sessionStr,
+                    model = ModelTypeToScriptKey(modelTypeName),
+                    k = _k,
+                    standardize = _useStandardize,
+                    threshold = thrToSave,
+                    features = _selectedKeys,
+                    class_names = _classNames
+                };
+                System.IO.File.WriteAllText(paramsPath,
+                    JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = false }),
+                    System.Text.Encoding.UTF8);
+
+                string python = string.IsNullOrWhiteSpace(txtPythonPath?.Text) ? "python" : txtPythonPath.Text.Trim();
+                string args = $"\"{scriptPath}\" --params \"{paramsPath}\"";
+
+                string stdout = "", stderr = "";
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(python, args)
+                    {
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
+                    using (var proc = System.Diagnostics.Process.Start(psi))
+                    {
+                        stdout = proc.StandardOutput.ReadToEnd();
+                        stderr = proc.StandardError.ReadToEnd();
+                        proc.WaitForExit();
+                        if (proc.ExitCode != 0)
+                        {
+                            MessageBox.Show($"Python 오류 (exitcode={proc.ExitCode}):\n{stderr}\n\n{stdout}", "ONNX 저장 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+                    }
                 }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Python 실행 실패: {ex.Message}\n\nPython 경로를 확인하세요: {python}", "실행 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // stdout에서 metrics 파싱 (선택적)
+                string metricsMsg = "";
+                if (!string.IsNullOrWhiteSpace(stdout))
+                {
+                    try
+                    {
+                        var doc = System.Text.Json.JsonDocument.Parse(stdout.Trim());
+                        if (doc.RootElement.TryGetProperty("accuracy", out var acc))
+                            metricsMsg = $"\n정확도: {acc.GetDouble():F3}";
+                        if (doc.RootElement.TryGetProperty("info", out var info))
+                            metricsMsg += $"\n{info.GetString()}";
+                    }
+                    catch { metricsMsg = $"\n{stdout.Trim()}"; }
+                }
+                MessageBox.Show($"ONNX 모델 저장 완료\n{onnxPath}{metricsMsg}", "저장 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
+        }
+
+        private static string ModelTypeToScriptKey(string displayName)
+        {
+            switch (displayName)
+            {
+                case "kNN": return "knn";
+                case "Isolation Forest": return "isoforest";
+                case "One-Class SVM": return "ocsvm";
+                case "SVM": return "svm";
+                case "Random Forest": return "rf";
+                case "Gradient Boosting": return "gbm";
+                case "MLP": return "mlp";
+                default: return displayName.ToLower().Replace(' ', '_');
+            }
+        }
+
+        private void ExportSamplesToCsv(string path)
+        {
+            var sb = new System.Text.StringBuilder();
+            // 헤더
+            sb.Append("FileName,Label");
+            foreach (var k in _selectedKeys) sb.Append($",{k}");
+            sb.AppendLine();
+            // 데이터
+            foreach (var s in _samples)
+            {
+                sb.Append($"\"{s.FileName}\",\"{s.LabelName}\"");
+                foreach (var x in s.X) sb.Append($",{x.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+                sb.AppendLine();
+            }
+            System.IO.File.WriteAllText(path, sb.ToString(), System.Text.Encoding.UTF8);
         }
 
         private double[] ComputeTrainScoresLOO()

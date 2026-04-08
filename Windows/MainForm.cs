@@ -257,34 +257,30 @@ namespace PHM_Project_DockPanel
                     menu.Checked = false;
             };
 
-            // LogGraph에 파일 로드 요청 (단순)
+            // LogGraph에 파일 로드 요청 (단순) — 이미 열려 있을 때만 업데이트
             AppEvents.ShowLogGraphRequested += filePath =>
             {
                 this.BeginInvoke(new Action(() =>
                 {
-                    try
-                    {
-                        var logGraph = EnsureLogGraphOpen();
+                    var logGraph = FindOpenForm<LogGraphForm>();
+                    if (logGraph != null)
                         logGraph.LoadCsv(filePath);
-                    }
-                    catch (ObjectDisposedException) { }
                 }));
             };
 
-            // LogGraph에 파일 로드 요청 (종류 포함)
+            // LogGraph에 파일 로드 요청 (종류 포함) — 이미 열려 있을 때만 업데이트
             AppEvents.ShowLogGraphRequestedEx += (kind, filePath) =>
             {
                 this.BeginInvoke(new Action(() =>
                 {
-                    try
+                    var logGraph = FindOpenForm<LogGraphForm>();
+                    if (logGraph != null)
                     {
-                        var logGraph = EnsureLogGraphOpen();
                         var tgt = kind == AppEvents.LogDataKind.Accel
                             ? LogGraphForm.LogKind.Accel
                             : LogGraphForm.LogKind.Torque;
                         logGraph.LoadCsv(filePath, tgt);
                     }
-                    catch (ObjectDisposedException) { }
                 }));
             };
         }
