@@ -545,6 +545,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         public DashboardForm()
         {
             this.Text = "실시간 대시보드";
+            this.MinimumSize = new Size(1000, 600);
             BuildUI();
             _notifier = new NotifyIcon
             {
@@ -628,18 +629,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 하단 
 
             // ====== Left Sidebar ======
-            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 220 };
+            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 250 };
             var left = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents = false,
-                AutoScroll = true,           // 내용이 넘칠 때 스크롤
+                AutoScroll = false,
                 Padding = new Padding(4, 4, 4, 30),
                 Margin = Padding.Empty
             };
             left.SuspendLayout();
-            int ctrlWidth = leftWrap.Width - 16;  // 스크롤바 여백 포함
+            // left.Padding.Horizontal(=8) + 컨트롤 Margin.Horizontal(=4) 를 빼서 수평 스크롤 없음
+            int ctrlWidth = leftWrap.Width - 12;
             int btnH = 28;
 
             btnLoadSklModel = new Button { Text = "SKL ONNX 추가 (AI폼)", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), BackColor = Color.FromArgb(220, 235, 255) };
@@ -830,9 +832,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
 
-            cardDanger = new KpiCard { Title = "위험 건수", ValueText = "0 건", DeltaText = "—", Footnote = "지난 주 대비 —", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(130, 180) };
-            cardWarning = new KpiCard { Title = "경고 건수", ValueText = "0 건", DeltaText = "—", Footnote = "지난 주 대비 —", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(130, 180) };
-            cardCycles = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "지난 주 대비 —", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(130, 180) };
+            cardDanger  = new KpiCard { Title = "위험 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
+            cardWarning = new KpiCard { Title = "경고 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
+            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
             kpiPanel.Controls.Add(cardDanger, 0, 0);
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles, 2, 0);
@@ -1150,7 +1152,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             leftWrap.Resize += (s, e) =>
             {
-                int w = Math.Max(180, leftWrap.ClientSize.Width - 16);
+                int w = Math.Max(180, leftWrap.ClientSize.Width - 12);
 
                 Control[] toResize = new Control[]
                 {
