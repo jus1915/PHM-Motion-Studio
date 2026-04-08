@@ -627,20 +627,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 상단
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 하단 
 
-            // ====== Left Sidebar (Toolbar를 왼쪽으로) ======
-            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 200 }; // 고정 폭
+            // ====== Left Sidebar ======
+            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 220 };
             var left = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents = false,
-                AutoScroll = false,
-                Padding = new Padding(4, 4, 4, 30), // ← Bottom 12px (오른쪽과 통일)
+                AutoScroll = true,           // 내용이 넘칠 때 스크롤
+                Padding = new Padding(4, 4, 4, 30),
                 Margin = Padding.Empty
             };
             left.SuspendLayout();
-            int ctrlWidth = leftWrap.Width - 8;      // ← 여유 최소화
-            int btnH = 28;                           // ← 버튼 높이 고정(컴팩트)
+            int ctrlWidth = leftWrap.Width - 16;  // 스크롤바 여백 포함
+            int btnH = 28;
 
             btnLoadSklModel = new Button { Text = "SKL ONNX 추가 (AI폼)", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), BackColor = Color.FromArgb(220, 235, 255) };
             btnLoadSklModel.Click += (s, e) => LoadSklOnnxModel();
@@ -652,42 +652,48 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
 
             // ===== 소스 모드 선택 =====
-            rbtnCsvMode = new RadioButton { Text = "폴더 감시", Checked = true, Width = ctrlWidth / 2 - 2, Height = 22, Margin = new Padding(2, 4, 0, 0) };
-            rbtnDbMode  = new RadioButton { Text = "DB 모니터링", Width = ctrlWidth / 2 - 2, Height = 22, Margin = new Padding(0, 4, 2, 0) };
-            var pnlMode = new Panel { Width = ctrlWidth, Height = 26, Margin = new Padding(2, 4, 2, 2) };
+            int rbW = ctrlWidth / 2 - 2;
+            rbtnCsvMode = new RadioButton { Text = "폴더 감시",   Checked = true, Width = rbW, Height = 22, Left = 0,        Top = 2, AutoSize = false };
+            rbtnDbMode  = new RadioButton { Text = "DB 모니터링", Checked = false, Width = rbW, Height = 22, Left = rbW + 4, Top = 2, AutoSize = false };
+            var pnlMode = new Panel { Width = ctrlWidth, Height = 28, Margin = new Padding(2, 4, 2, 2) };
             pnlMode.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode });
-            rbtnDbMode.Left = rbtnCsvMode.Right + 2;
 
             rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourceMode(false); };
             rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourceMode(true);  };
 
             // ===== CSV 소스 패널 =====
-            pnlCsvSource = new Panel { Width = ctrlWidth, Height = btnH + 28, Margin = new Padding(2) };
-            btnSelectFolder = new Button { Text = "CSV 폴더", Width = ctrlWidth, Height = btnH, Margin = Padding.Empty };
+            pnlCsvSource = new Panel { Width = ctrlWidth, Height = btnH + 30, Margin = new Padding(2) };
+            btnSelectFolder = new Button { Text = "CSV 폴더", Width = ctrlWidth, Height = btnH, Left = 0, Top = 0 };
             btnSelectFolder.Click += (s, e) => SelectFolder();
-            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Top = btnH + 2, Left = 0 };
+            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Top = btnH + 4, Left = 0 };
             pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, lblFolder });
 
-            // ===== DB 소스 패널 =====
-            pnlDbSource = new Panel { Width = ctrlWidth, Height = 160, Margin = new Padding(2), Visible = false };
-            int dbY = 0, lblW = 48, dbH = 22;
+            // ===== DB 소스 패널 (TableLayoutPanel으로 정렬) =====
+            int lblW = 52, dbH = 24, dbGap = 4;
+            int dbY = 0;
 
-            var lblDevice = new Label { Text = "장치:", Left = 0, Top = dbY + 3, Width = lblW, AutoSize = false };
-            cmbDbDevice = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
-            btnDbRefresh = new Button { Text = "↺", Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH };
+            pnlDbSource = new Panel { Width = ctrlWidth, Margin = new Padding(2), Visible = false };
+
+            // 장치
+            var lblDevice = new Label  { Text = "장치:",  AutoSize = false, Width = lblW, Height = dbH, Left = 0,        Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbDevice   = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
+            btnDbRefresh  = new Button { Text = "↺", Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH };
             btnDbRefresh.Click += (s, e) => RefreshDbDevices();
-            dbY += dbH + 2;
+            dbY += dbH + dbGap;
 
-            var lblLabelDb = new Label { Text = "레이블:", Left = 0, Top = dbY + 3, Width = lblW, AutoSize = false };
+            // 레이블
+            var lblLabelDb = new Label { Text = "레이블:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
             cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
-            dbY += dbH + 2;
+            dbY += dbH + dbGap;
 
-            var lblPoll = new Label { Text = "폴링(초):", Left = 0, Top = dbY + 3, Width = lblW + 10, AutoSize = false };
-            numPollInterval = new NumericUpDown { Left = lblW + 12, Top = dbY, Width = 60, Height = dbH, Minimum = 1, Maximum = 60, Value = 2, DecimalPlaces = 0 };
-            dbY += dbH + 4;
+            // 폴링 간격
+            var lblPoll = new Label { Text = "폴링(초):", AutoSize = false, Width = lblW + 4, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            numPollInterval = new NumericUpDown { Left = lblW + 6, Top = dbY, Width = 56, Height = dbH, Minimum = 1, Maximum = 60, Value = 2, DecimalPlaces = 0 };
+            dbY += dbH + dbGap;
 
-            var lblCfg = new Label { Text = "설정 파일:", Left = 0, Top = dbY + 3, Width = ctrlWidth, AutoSize = false };
-            dbY += 18;
+            // 설정 파일
+            var lblCfg = new Label { Text = "설정 파일:", AutoSize = false, Width = ctrlWidth, Height = 18, Left = 0, Top = dbY, TextAlign = ContentAlignment.MiddleLeft };
+            dbY += 20;
             txtInfluxCfgPath = new TextBox { Left = 0, Top = dbY, Width = ctrlWidth - 26, Height = dbH, Text = FindInfluxConfigPath() };
             var btnBrowseCfg = new Button { Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH, Text = "…" };
             btnBrowseCfg.Click += (s, e) =>
@@ -695,7 +701,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 using (var ofd = new OpenFileDialog { Filter = "JSON|*.json|All|*.*", Title = "InfluxDB 설정 파일" })
                     if (ofd.ShowDialog() == DialogResult.OK) txtInfluxCfgPath.Text = ofd.FileName;
             };
+            dbY += dbH + dbGap;
 
+            pnlDbSource.Height = dbY + 2;
             pnlDbSource.Controls.AddRange(new Control[] {
                 lblDevice, cmbDbDevice, btnDbRefresh,
                 lblLabelDb, cmbDbLabel,
@@ -1142,22 +1150,39 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             leftWrap.Resize += (s, e) =>
             {
-                int w = Math.Max(180, leftWrap.ClientSize.Width - 8);
+                int w = Math.Max(180, leftWrap.ClientSize.Width - 16);
 
                 Control[] toResize = new Control[]
                 {
-                btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
-                pnlMode, pnlCsvSource, pnlDbSource,
-                btnStart, btnStop
+                    btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
+                    pnlMode, pnlCsvSource, pnlDbSource,
+                    btnStart, btnStop
                 };
-
                 foreach (Control c in toResize)
                     if (c != null) c.Width = w;
 
                 gbAging.Width = w;
                 gbModelPaths.Width = w;
 
-                LayoutLeftAuto(); // 높이 재분배
+                // pnlCsvSource 내부
+                if (btnSelectFolder != null) btnSelectFolder.Width = w;
+                if (lblFolder != null) lblFolder.MaximumSize = new Size(w, 0);
+
+                // pnlDbSource 내부 너비 조정
+                if (pnlDbSource != null)
+                {
+                    int lw = 52;
+                    if (cmbDbDevice  != null) { cmbDbDevice.Width  = w - lw - 28; btnDbRefresh.Left  = w - 24; }
+                    if (cmbDbLabel   != null)   cmbDbLabel.Width   = w - lw - 2;
+                    if (txtInfluxCfgPath != null) { txtInfluxCfgPath.Width = w - 26; }
+                    // btnBrowseCfg는 txtInfluxCfgPath 오른쪽에 고정
+                    foreach (Control c in pnlDbSource.Controls)
+                    {
+                        if (c is Button b && b.Text == "…") b.Left = w - 24;
+                    }
+                }
+
+                LayoutLeftAuto();
             };
             this.Resize += (s, e) => LayoutLeftAuto();
 
