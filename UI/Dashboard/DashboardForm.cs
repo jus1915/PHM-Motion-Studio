@@ -315,12 +315,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             public int AxisId;
             public string ModelPath;
-            public string Session;       // "AD" or "FD"
-            public string ModelType;     // "knn", "isoforest", "ocsvm", "svm", "rf", "gbm", "mlp"
-            public string[] Features;    // 피처 키 목록 (추출 순서)
-            public string YColumn;       // CSV Y 컬럼명
-            public double Threshold;     // AD 임계값 (기본 0.5)
-            public string[] ClassNames;  // FD 클래스명
+            public string Session;            // "AD" or "FD"
+            public string ModelType;          // "knn", "isoforest", "ocsvm", "svm", "rf", "gbm", "mlp"
+            public string[] Features;         // 피처 키 목록 (추출 순서)
+            public string YColumn;            // CSV Y 컬럼명
+            public double Threshold;          // C# kNN 임계값 (레거시)
+            public double ScoreThreshold;     // decision_function 기반 임계값 (0이면 미산출 → label만 사용)
+            public string[] ClassNames;       // FD 클래스명
             public InferenceSession OnnxSession;
         }
         private readonly Dictionary<int, OnnxSklModel> _axisSklModels = new Dictionary<int, OnnxSklModel>();
@@ -2003,6 +2004,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 string[] features = Array.Empty<string>();
                 string yColumn = "";
                 double threshold = 0.5;
+                double scoreThreshold = 0.0;  // 0 = 미산출 (label만 사용)
                 string[] classNames = new[] { "Normal", "Anomaly" };
 
                 if (File.Exists(metaPath))
@@ -2015,6 +2017,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         if (root.TryGetProperty("model_type", out var mtProp)) modelType = mtProp.GetString() ?? "";
                         if (root.TryGetProperty("y_column", out var ycProp)) yColumn = ycProp.GetString() ?? "";
                         if (root.TryGetProperty("threshold", out var thrProp) && thrProp.TryGetDouble(out double thrVal)) threshold = thrVal;
+                        if (root.TryGetProperty("score_threshold", out var stProp) && stProp.ValueKind != JsonValueKind.Null && stProp.TryGetDouble(out double stVal)) scoreThreshold = stVal;
                         if (root.TryGetProperty("features", out var fProp) && fProp.ValueKind == JsonValueKind.Array)
                             features = fProp.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray();
                         if (root.TryGetProperty("class_names", out var cnProp) && cnProp.ValueKind == JsonValueKind.Array)
@@ -2057,15 +2060,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 _axisSklModels[axis] = new OnnxSklModel
                 {
-                    AxisId     = axis,
-                    ModelPath  = onnxPath,
-                    Session    = session.ToUpperInvariant(),
-                    ModelType  = modelType,
-                    Features   = features,
-                    YColumn    = yColumn,
-                    Threshold  = threshold > 0 ? threshold : 0.5,
-                    ClassNames = classNames,
-                    OnnxSession = sess
+                    AxisId         = axis,
+                    ModelPath      = onnxPath,
+                    Session        = session.ToUpperInvariant(),
+                    ModelType      = modelType,
+                    Features       = features,
+                    YColumn        = yColumn,
+                    Threshold      = threshold > 0 ? threshold : 0.5,
+                    ScoreThreshold = scoreThreshold,
+                    ClassNames     = classNames,
+                    OnnxSession    = sess
                 };
 
                 RefreshModelPathList();
@@ -2827,11 +2831,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         continue;
                     }
 
-                    double thr = skl.Threshold;
-                    // AD일 때 rawScore(decision function 부호반전)와 threshold 비교로 위험도 판정
+                    // 임계값 결정:
+                    // - score_threshold(decision function 기반)가 있으면 그것 사용
+                    // - 없으면 label(-1/1) 기반으로만 이상 판정 (thr=0 표시용)
+                    double thr = skl.ScoreThreshold > 0 ? skl.ScoreThreshold : 0.0;
+                    bool useScoreThreshold = skl.ScoreThreshold > 0;
+
                     AlarmLevel level;
                     if (skl.Session == "AD")
-                        level = isAnom ? (rawScore >= thr * 2.0 ? AlarmLevel.Danger : AlarmLevel.Warning) : AlarmLevel.Normal;
+                    {
+                        if (useScoreThreshold)
+                            // rawScore > thr → 경고, rawScore > thr*1.5 → 위험
+                            level = rawScore > thr * 1.5 ? AlarmLevel.Danger
+                                  : rawScore > thr       ? AlarmLevel.Warning
+                                  : AlarmLevel.Normal;
+                        else
+                            // score_threshold 없으면 label만 신뢰
+                            level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+                    }
                     else
                         level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
 
@@ -2862,7 +2879,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                 TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
                                 Axis = axis,
                                 AnomalyScore = Math.Round(rawScore, 4),
-                                Threshold = Math.Round(thr, 4),
+                                Threshold = Math.Round(useScoreThreshold ? thr : skl.Threshold, 4),
                                 Alarm = level == AlarmLevel.Danger ? "위험" : "경고"
                             });
                             if (grid.Rows.Count > 0)

@@ -226,22 +226,36 @@ def main():
     # 파이프라인 구성 및 학습
     pipeline = build_pipeline(model_key, session, params)
 
+    # AD/FD 공통: score_threshold 계산용 변수
+    score_threshold = None  # decision_function 기반 임계값 (C# rawScore = -decision_function)
+
     if session == "AD":
         # AD 모델은 정상 데이터만으로 학습
         pipeline.fit(X_train)
-        # predict() → 1=정상, -1=이상 (IsolationForest/OneClassSVM/LOF 공통)
-        # 학습 데이터의 정상 분류율을 표시 (임계값 무관)
         try:
-            preds = pipeline.predict(X_train)  # 학습셋 기준
+            preds = pipeline.predict(X_train)
             n_normal = int(np.sum(preds == 1))
             n_total = len(X_train)
             normal_rate = n_normal / n_total if n_total > 0 else 0.0
-            accuracy = normal_rate  # 정상샘플 중 정상으로 판정된 비율
+            accuracy = normal_rate
             info = (f"학습={n_total} 정상샘플 | "
                     f"정상 분류율={n_normal}/{n_total} ({100*normal_rate:.1f}%)")
-        except Exception as ex:
+        except Exception:
             accuracy = None
             info = f"학습={len(X_train)} 정상샘플"
+
+        # decision_function으로 score_threshold 계산
+        # C#에서는 rawScore = -decision_function(x) 로 부호 반전하므로
+        # 정상 데이터의 -decision_function 값 중 상위 5% 지점을 임계값으로 사용
+        # (= 95%의 정상 샘플이 threshold 이하 → 정상 판정)
+        try:
+            df_scores = pipeline.decision_function(X_train)  # shape (N,)
+            # 부호 반전: rawScore = -df
+            raw_scores = -df_scores
+            score_threshold = float(np.percentile(raw_scores, 95))
+            info += f" | score_thr={score_threshold:.4f}"
+        except Exception:
+            pass  # decision_function 미지원 모델은 label 기반으로만 동작
     else:
         pipeline.fit(X_train, y_train)
         pred = pipeline.predict(X_train)
@@ -259,7 +273,8 @@ def main():
         "features": feature_keys,
         "class_names": class_names,
         "y_column": params.get("y_column", ""),
-        "threshold": params.get("threshold", 0.0),
+        "threshold": params.get("threshold", 0.0),      # C# kNN 임계값 (레거시)
+        "score_threshold": score_threshold,              # decision_function 기반 임계값 (None이면 label만 사용)
         "n_features": n_features,
     }
     meta_path = os.path.splitext(output_path)[0] + "_meta.json"
