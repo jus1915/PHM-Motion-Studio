@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd /c \"mklink /J \"\"D:\\\\Dev\\\\hvs\\\\WorkingSource\\\\PHM_Project_DockPanel\\\\.claude\\\\worktrees\\\\dreamy-brown\\\\packages\"\" \"\"D:\\\\Dev\\\\hvs\\\\WorkingSource\\\\PHM_Project_DockPanel\\\\packages\"\"\")",
+      "Bash(dotnet build:*)",
+      "Bash(cmd /c \"dir \"\"D:\\\\Dev\\\\hvs\\\\WorkingSource\\\\PHM_Project_DockPanel\\\\.claude\\\\worktrees\\\\dreamy-brown\\\\packages\"\" 2>&1 | head -5\")",
+      "Bash(cmd /c \"dir D:\\\\Dev\\\\hvs\\\\WorkingSource\\\\PHM_Project_DockPanel\\\\.claude\\\\worktrees\\\\dreamy-brown\"\")",
+      "Bash(cmd /c dir \"D:\\\\Dev\\\\hvs\\\\WorkingSource\\\\PHM_Project_DockPanel\\\\.claude\\\\worktrees\\\\dreamy-brown\")",
+      "Bash(where msbuild:*)",
+      "Read(//c//**)",
+      "Bash(MSBUILD=\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\")",
+      "Bash(\"$MSBUILD\" \"D:\\\\Dev\\\\hvs\\\\WorkingSource\\\\PHM_Project_DockPanel\\\\.claude\\\\worktrees\\\\dreamy-brown\\\\PHM_Project_DockPanel.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /v:minimal)"
+    ]
+  }
+}

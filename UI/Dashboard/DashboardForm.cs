@@ -20,6 +20,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 // PHM 프로젝트 내부 기능
 using PHM_Project_DockPanel.Services.Core;
 using PHM_Project_DockPanel.Services; // SignalFeatures
+using PHM_Project_DockPanel.Services.DAQ;
 
 namespace PHM_Project_DockPanel.UI.Dashboard
 {
@@ -354,6 +355,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Dictionary<string, long> _lastProcessedLen = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private readonly object _sync = new object();
 
+        // DB 모니터링 상태
+        private bool _isDbMode = false;
+        private InfluxDbDataSource _influxSource;
+        private CancellationTokenSource _influxPollCts;
+        private DateTime _influxLastQueried = DateTime.MinValue;
+        private readonly HashSet<DateTime> _processedSegTimes = new HashSet<DateTime>();
+        private readonly object _influxSync = new object();
+
         // 통계
         private int cntDanger, cntWarning, cycles;
         private readonly ConcurrentQueue<Tuple<int, DateTime, double>> scoreSeries = new ConcurrentQueue<Tuple<int, DateTime, double>>();
@@ -370,6 +379,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private const bool GAUGE_SORT_DESC = false;   // true면 확률 내림차순으로 정렬해 보여줌
         private Button btnTestProbs;              // ← 추가
         private readonly Random _rng = new Random(); // ← 추가
+
+        // DB 모드 UI 컨트롤
+        private RadioButton rbtnCsvMode, rbtnDbMode;
+        private Panel pnlCsvSource, pnlDbSource;
+        private ComboBox cmbDbDevice, cmbDbLabel;
+        private NumericUpDown numPollInterval;
+        private Button btnDbRefresh;
+        private TextBox txtInfluxCfgPath;
 
         // Preprocessing과 동일한 시간 컬럼 후보
         private static readonly string[] TimeColumnCandidates = { "time_s", "cycle" };
@@ -634,8 +651,57 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             btnLoadOnnxModelSingle = new Button { Text = "딥러닝 ONNX 추가 (AE/CLS)", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
             btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
 
-            btnSelectFolder = new Button { Text = "CSV 폴더", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
+            // ===== 소스 모드 선택 =====
+            rbtnCsvMode = new RadioButton { Text = "폴더 감시", Checked = true, Width = ctrlWidth / 2 - 2, Height = 22, Margin = new Padding(2, 4, 0, 0) };
+            rbtnDbMode  = new RadioButton { Text = "DB 모니터링", Width = ctrlWidth / 2 - 2, Height = 22, Margin = new Padding(0, 4, 2, 0) };
+            var pnlMode = new Panel { Width = ctrlWidth, Height = 26, Margin = new Padding(2, 4, 2, 2) };
+            pnlMode.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode });
+            rbtnDbMode.Left = rbtnCsvMode.Right + 2;
+
+            rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourceMode(false); };
+            rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourceMode(true);  };
+
+            // ===== CSV 소스 패널 =====
+            pnlCsvSource = new Panel { Width = ctrlWidth, Height = btnH + 28, Margin = new Padding(2) };
+            btnSelectFolder = new Button { Text = "CSV 폴더", Width = ctrlWidth, Height = btnH, Margin = Padding.Empty };
             btnSelectFolder.Click += (s, e) => SelectFolder();
+            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Top = btnH + 2, Left = 0 };
+            pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, lblFolder });
+
+            // ===== DB 소스 패널 =====
+            pnlDbSource = new Panel { Width = ctrlWidth, Height = 160, Margin = new Padding(2), Visible = false };
+            int dbY = 0, lblW = 48, dbH = 22;
+
+            var lblDevice = new Label { Text = "장치:", Left = 0, Top = dbY + 3, Width = lblW, AutoSize = false };
+            cmbDbDevice = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
+            btnDbRefresh = new Button { Text = "↺", Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH };
+            btnDbRefresh.Click += (s, e) => RefreshDbDevices();
+            dbY += dbH + 2;
+
+            var lblLabelDb = new Label { Text = "레이블:", Left = 0, Top = dbY + 3, Width = lblW, AutoSize = false };
+            cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
+            dbY += dbH + 2;
+
+            var lblPoll = new Label { Text = "폴링(초):", Left = 0, Top = dbY + 3, Width = lblW + 10, AutoSize = false };
+            numPollInterval = new NumericUpDown { Left = lblW + 12, Top = dbY, Width = 60, Height = dbH, Minimum = 1, Maximum = 60, Value = 2, DecimalPlaces = 0 };
+            dbY += dbH + 4;
+
+            var lblCfg = new Label { Text = "설정 파일:", Left = 0, Top = dbY + 3, Width = ctrlWidth, AutoSize = false };
+            dbY += 18;
+            txtInfluxCfgPath = new TextBox { Left = 0, Top = dbY, Width = ctrlWidth - 26, Height = dbH, Text = FindInfluxConfigPath() };
+            var btnBrowseCfg = new Button { Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH, Text = "…" };
+            btnBrowseCfg.Click += (s, e) =>
+            {
+                using (var ofd = new OpenFileDialog { Filter = "JSON|*.json|All|*.*", Title = "InfluxDB 설정 파일" })
+                    if (ofd.ShowDialog() == DialogResult.OK) txtInfluxCfgPath.Text = ofd.FileName;
+            };
+
+            pnlDbSource.Controls.AddRange(new Control[] {
+                lblDevice, cmbDbDevice, btnDbRefresh,
+                lblLabelDb, cmbDbLabel,
+                lblPoll, numPollInterval,
+                lblCfg, txtInfluxCfgPath, btnBrowseCfg
+            });
 
             btnStart = new Button { Text = "시작", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
             btnStart.Click += (s, e) => StartWatch();
@@ -643,7 +709,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             btnStop = new Button { Text = "중지", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), Enabled = false };
             btnStop.Click += (s, e) => StopWatch();
 
-            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Margin = new Padding(2, 6, 2, 0) };
             lblStatus = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Margin = new Padding(2, 4, 2, 0) };
 
             var gbAging = new GroupBox
@@ -668,7 +733,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             gbAging.Controls.Add(chartDonut);
 
             left.Controls.AddRange(new Control[] {
-                btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle, btnSelectFolder, btnStart, btnStop, lblFolder, lblStatus, gbAging
+                btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
+                pnlMode, pnlCsvSource, pnlDbSource,
+                btnStart, btnStop, lblStatus, gbAging
             });
             left.ResumeLayout(false);
             // === 축별 모델 경로 표 ===
@@ -1035,7 +1102,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 int fixedH = 0;
                 Control[] fixedControls = new Control[] {
         btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
-        btnSelectFolder, btnStart, btnStop, lblFolder, lblStatus
+        pnlMode, pnlCsvSource, pnlDbSource,
+        btnStart, btnStop, lblStatus
     };
                 foreach (var c in fixedControls)
                 {
@@ -1079,7 +1147,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Control[] toResize = new Control[]
                 {
                 btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
-                btnSelectFolder, btnStart, btnStop
+                pnlMode, pnlCsvSource, pnlDbSource,
+                btnStart, btnStop
                 };
 
                 foreach (Control c in toResize)
@@ -2119,11 +2188,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             isAnomaly = false; predClass = -1; probabilities = null; rawScore = 0.0; info = "";
             if (skl?.OnnxSession == null || skl.Features == null || skl.Features.Length == 0) return false;
 
-            // 1) 피처 벡터 추출
             double[] vec = BuildFeatureVectorFromCsv(csvPath, skl.YColumn, skl.Features);
             if (vec == null || vec.Length != skl.Features.Length) return false;
 
-            // ★ knn AD: 학습 벡터가 있으면 C# kNN 거리로 rawScore 계산 (AI Form 평가와 동일)
+            return TrySklOnnxScoreFromVec(skl, vec, out isAnomaly, out predClass, out probabilities, out rawScore, out info);
+        }
+
+        private bool TrySklOnnxScoreFromVec(OnnxSklModel skl, double[] vec,
+            out bool isAnomaly, out int predClass, out float[] probabilities, out double rawScore, out string info)
+        {
+            isAnomaly = false; predClass = -1; probabilities = null; rawScore = 0.0; info = "";
+            if (skl == null || vec == null || vec.Length == 0) return false;
+
+            // ★ knn AD: 학습 벡터가 있으면 C# kNN 거리로 rawScore 계산
             if (skl.Session == "AD" && skl.ModelType == "knn" &&
                 skl.TrainVectors != null && skl.TrainVectors.Length > 0)
             {
@@ -2471,6 +2548,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 return;
             }
 
+            if (_isDbMode) { StartDbWatch(); return; }
+
             // 2) 폴더 체크
             if (string.IsNullOrEmpty(_watchFolder) || !Directory.Exists(_watchFolder))
             {
@@ -2565,8 +2644,300 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _debouncers.Clear();
                 _processing.Clear();
             }
+
+            // DB 폴링도 중지
+            StopDbWatch();
+
             btnStart.Enabled = true; btnStop.Enabled = false; lblStatus.Text = "상태: 중지";
         }
+
+        // ── DB 모드 전환 ──────────────────────────────────────────────────────
+        private void SwitchSourceMode(bool dbMode)
+        {
+            _isDbMode = dbMode;
+            if (pnlCsvSource != null) pnlCsvSource.Visible = !dbMode;
+            if (pnlDbSource != null)  pnlDbSource.Visible  =  dbMode;
+        }
+
+        // ── InfluxDB 설정 파일 자동 탐색 ─────────────────────────────────────
+        private static string FindInfluxConfigPath()
+        {
+            var candidates = new[]
+            {
+                Path.Combine(ResolveDataRoot(), "Tests", "influx_config.json"),
+                @"D:\Dev\hvs\WorkingSource\DAQ_Test\infra\influx_config.json",
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
+            };
+            foreach (var p in candidates)
+                if (File.Exists(p)) return p;
+            return candidates[2]; // fallback: exe 폴더
+        }
+        private static string ResolveDataRoot()
+        {
+            foreach (var r in new[] { @"E:\Data\PHM_Logs", @"C:\Data\PHM_Logs", @"C:\PHM_Logs" })
+                if (Directory.Exists(r)) return r;
+            return @"C:\Data\PHM_Logs";
+        }
+
+        // ── DB 장치/레이블 목록 갱신 ─────────────────────────────────────────
+        private async void RefreshDbDevices()
+        {
+            btnDbRefresh.Enabled = false;
+            try
+            {
+                EnsureInfluxSource();
+                var devices = await _influxSource.GetDevicesAsync();
+                var labels  = await _influxSource.GetLabelsAsync();
+                BeginInvoke(new Action(() =>
+                {
+                    string prevDev = cmbDbDevice.Text;
+                    string prevLbl = cmbDbLabel.Text;
+                    cmbDbDevice.Items.Clear();
+                    cmbDbLabel.Items.Clear();
+                    cmbDbDevice.Items.Add("");
+                    foreach (var d in devices) cmbDbDevice.Items.Add(d);
+                    cmbDbLabel.Items.Add("");
+                    foreach (var l in labels)  cmbDbLabel.Items.Add(l);
+                    cmbDbDevice.Text = prevDev;
+                    cmbDbLabel.Text  = prevLbl;
+                    AppendEventLog($"[DB] 장치 {devices.Count}개, 레이블 {labels.Count}개 로드됨");
+                }));
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new Action(() => AppendEventLog($"[DB] 목록 갱신 오류: {ex.Message}")));
+            }
+            finally { BeginInvoke(new Action(() => btnDbRefresh.Enabled = true)); }
+        }
+
+        private void EnsureInfluxSource()
+        {
+            string cfgPath = txtInfluxCfgPath?.Text?.Trim() ?? "";
+            if (string.IsNullOrEmpty(cfgPath)) cfgPath = FindInfluxConfigPath();
+            var cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            if (_influxSource == null)
+                _influxSource = new InfluxDbDataSource(cfg);
+        }
+
+        // ── DB 감시 시작/중지 ────────────────────────────────────────────────
+        private void StartDbWatch()
+        {
+            StopDbWatch(); // 기존 폴링 정리
+            EnsureInfluxSource();
+
+            _influxLastQueried = DateTime.UtcNow; // 지금부터 새 데이터만 처리
+            lock (_influxSync) _processedSegTimes.Clear();
+
+            string device = cmbDbDevice.Text?.Trim() ?? "";
+            string label  = cmbDbLabel.Text?.Trim()  ?? "";
+            int pollSec   = (int)(numPollInterval?.Value ?? 2);
+
+            _influxPollCts = new CancellationTokenSource();
+            var token = _influxPollCts.Token;
+
+            Task.Run(() => PollInfluxAsync(device, label, pollSec, token), token);
+
+            btnStart.Enabled = false;
+            btnStop.Enabled  = true;
+            lblStatus.Text   = $"상태: DB 수집 중... (장치={device}, 폴링={pollSec}s)";
+            AppendEventLog($"[DB] 모니터링 시작 — 장치='{device}' 레이블='{label}' 폴링={pollSec}s");
+        }
+
+        private void StopDbWatch()
+        {
+            if (_influxPollCts != null)
+            {
+                try { _influxPollCts.Cancel(); } catch { }
+                try { _influxPollCts.Dispose(); } catch { }
+                _influxPollCts = null;
+            }
+        }
+
+        // ── DB 폴링 루프 ─────────────────────────────────────────────────────
+        private async Task PollInfluxAsync(string device, string label, int pollSeconds, CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(pollSeconds * 1000, ct);
+                    var now = DateTime.UtcNow;
+
+                    var segments = await _influxSource.QuerySegmentsAsync(
+                        string.IsNullOrEmpty(device) ? null : device,
+                        string.IsNullOrEmpty(label)  ? null : label,
+                        _influxLastQueried, now,
+                        segmentSeconds: 0.6,
+                        ct: ct);
+
+                    _influxLastQueried = now;
+
+                    foreach (var seg in segments)
+                    {
+                        lock (_influxSync)
+                        {
+                            if (_processedSegTimes.Contains(seg.StartTime)) continue;
+                            _processedSegTimes.Add(seg.StartTime);
+                            // 메모리 누수 방지: 최대 10000개 유지
+                            if (_processedSegTimes.Count > 10000) _processedSegTimes.Clear();
+                        }
+                        ProcessInfluxSegment(seg);
+                    }
+
+                    if (segments.Count > 0)
+                        BeginInvoke(new Action(() =>
+                            lblStatus.Text = $"상태: DB 수집 중... 마지막={DateTime.Now:HH:mm:ss} ({segments.Count}세그)"));
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    BeginInvoke(new Action(() => AppendEventLog($"[DB] 폴링 오류: {ex.Message}")));
+                    await Task.Delay(Math.Max(pollSeconds, 5) * 1000, ct).ContinueWith(_ => { });
+                }
+            }
+        }
+
+        // ── InfluxDB 세그먼트 처리 (ProcessCsvSafe의 DB 버전) ────────────────
+        private void ProcessInfluxSegment(SignalSegment seg)
+        {
+            if (seg == null) return;
+
+            // 세그먼트 이름/장치에서 axis 파싱 (예: "Axis0", "seg_0000" 등)
+            var axesByName = AxesFromDevice(seg.Device ?? "") ;
+            if (axesByName.Count == 0) axesByName = AxesFromDevice(seg.Name ?? "");
+
+            // estSr: 타임스탬프로부터 계산
+            double estSr = 1000.0;
+            if (seg.Time != null && seg.Time.Length >= 2)
+            {
+                double dur = seg.Time[seg.Time.Length - 1] - seg.Time[0];
+                if (dur > 0) estSr = (seg.Time.Length - 1) / dur;
+            }
+
+            // ---------- (B) KNN ----------
+            foreach (KeyValuePair<int, AxisModel> kv in _axisModels)
+            {
+                int axis = kv.Key;
+                var am = kv.Value;
+                if (am?.Model == null) continue;
+                if (axesByName.Count > 0 && !axesByName.Contains(axis)) continue;
+
+                var m = am.Model;
+                if (string.IsNullOrWhiteSpace(m.YColumn)) continue;
+
+                double[] arr = seg.GetChannel(m.YColumn);
+                if (arr == null || arr.Length < 4) continue;
+
+                double[] sample = SignalFeatures.BuildFeatureVectorFromSeries(arr.ToList(), m.Features, estSr);
+                if (sample == null) continue;
+
+                double score = SignalFeatures.ScoreKnn(sample, m.Train, m.K, m.Standardize, m.Mean, m.Std);
+                double thr   = m.Threshold > 0 ? m.Threshold : DefaultThreshold;
+                bool isAnom  = score >= thr;
+                AlarmLevel level = isAnom ? (score >= thr * 10.0 ? AlarmLevel.Danger : AlarmLevel.Warning) : AlarmLevel.Normal;
+
+                var captAxis = axis; var captScore = score; var captThr = thr;
+                var captLevel = level; var captSeg = seg;
+                BeginInvoke(new Action(() =>
+                {
+                    UpdateKpiAndLog(captAxis, captScore, captThr, captLevel,
+                        $"[KNN] axis {captAxis}  score={captScore:F2}  thr={captThr:F2}  => {AlarmText(captLevel)}  ({captSeg.Name})",
+                        captSeg.StartTime);
+                }));
+            }
+
+            // ---------- (C) sklearn ONNX ----------
+            foreach (KeyValuePair<int, OnnxSklModel> kv in _axisSklModels.OrderBy(k => k.Key))
+            {
+                int axis = kv.Key;
+                OnnxSklModel skl = kv.Value;
+                if (skl == null || skl.OnnxSession == null) continue;
+                if (axesByName.Count > 0 && !axesByName.Contains(axis)) continue;
+                if (string.IsNullOrWhiteSpace(skl.YColumn)) continue;
+
+                double[] arr = seg.GetChannel(skl.YColumn);
+                if (arr == null || arr.Length < 4) continue;
+
+                double[] vec = SignalFeatures.BuildFeatureVectorFromSeries(arr.ToList(), skl.Features, estSr);
+                if (vec == null || vec.Length != skl.Features.Length) continue;
+
+                bool isAnom; int predClass; float[] probs; double rawScore; string sklInfo;
+                if (!TrySklOnnxScoreFromVec(skl, vec, out isAnom, out predClass, out probs, out rawScore, out sklInfo))
+                    continue;
+
+                bool isKnnAd = skl.Session == "AD" && skl.ModelType == "knn"
+                               && skl.TrainVectors != null && skl.TrainVectors.Length > 0;
+                double thr = isKnnAd ? skl.Threshold
+                           : skl.ScoreThreshold > 0 ? skl.ScoreThreshold : 0.0;
+                bool useScoreThreshold = isKnnAd || skl.ScoreThreshold > 0;
+
+                AlarmLevel level;
+                if (skl.Session == "AD")
+                    level = useScoreThreshold
+                          ? (rawScore >= thr * 1.5 ? AlarmLevel.Danger : rawScore >= thr ? AlarmLevel.Warning : AlarmLevel.Normal)
+                          : (isAnom ? AlarmLevel.Warning : AlarmLevel.Normal);
+                else
+                    level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+
+                var captAxis = axis; var captSkl = skl; var captRaw = rawScore;
+                var captThr2 = useScoreThreshold ? thr : skl.Threshold;
+                var captLevel = level; var captInfo = sklInfo; var captProbs = probs;
+                var captPred = predClass; var captSeg = seg;
+                BeginInvoke(new Action(() =>
+                {
+                    UpdateKpiAndLog(captAxis, captRaw, captThr2, captLevel,
+                        $"[SKL-{captSkl.Session}] axis {captAxis}  {captInfo}  => {AlarmText(captLevel)}  ({captSeg.Name})",
+                        captSeg.StartTime);
+                    if (captProbs != null && captProbs.Length > 0)
+                        UpdateAxisClassGauge(captAxis, captProbs, captPred >= 0 ? captPred : (isAnom ? 1 : 0));
+                }));
+            }
+        }
+
+        // ── Device 이름에서 axis 번호 파싱 ──────────────────────────────────
+        private static HashSet<int> AxesFromDevice(string deviceOrName)
+        {
+            var axes = new HashSet<int>();
+            if (string.IsNullOrEmpty(deviceOrName)) return axes;
+            var m = Regex.Matches(deviceOrName, @"Axis(?<id>\d+)", RegexOptions.IgnoreCase);
+            foreach (Match mm in m)
+                if (int.TryParse(mm.Groups["id"].Value, out int ax)) axes.Add(ax);
+            return axes;
+        }
+
+        // ── KPI 업데이트 + 이벤트 로그 공통 헬퍼 ──────────────────────────
+        private void UpdateKpiAndLog(int axis, double score, double thr, AlarmLevel level, string logMsg, DateTime timestamp)
+        {
+            if (level == AlarmLevel.Danger)  Interlocked.Increment(ref cntDanger);
+            else if (level == AlarmLevel.Warning) Interlocked.Increment(ref cntWarning);
+            Interlocked.Increment(ref cycles);
+            cardDanger.ValueText  = cntDanger  + " 건";
+            cardWarning.ValueText = cntWarning + " 건";
+            cardCycles.ValueText  = cycles     + " 회";
+
+            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] {logMsg}");
+
+            if (level != AlarmLevel.Normal)
+            {
+                ShowToast(level, axis, score);
+                rows.Add(new EventRow
+                {
+                    TimeLine     = timestamp.ToLocalTime().ToString("yyyy.MM.dd HH:mm:ss"),
+                    Axis         = axis,
+                    AnomalyScore = Math.Round(score, 4),
+                    Threshold    = Math.Round(thr, 4),
+                    Alarm        = level == AlarmLevel.Danger ? "위험" : "경고"
+                });
+                if (grid.Rows.Count > 0)
+                    try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
+            }
+
+            scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, score));
+            while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+        }
+
+        private static string AlarmText(AlarmLevel l)
+            => l == AlarmLevel.Danger ? "DANGER" : l == AlarmLevel.Warning ? "WARN" : "OK";
 
         private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
