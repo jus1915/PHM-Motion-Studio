@@ -2127,6 +2127,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (skl.Session == "AD" && skl.ModelType == "knn" &&
                 skl.TrainVectors != null && skl.TrainVectors.Length > 0)
             {
+                // [진단] 피처 벡터 첫 3개 값 + 학습 벡터[0] 첫 3개 비교
+                string vecStr = string.Join(", ", vec.Take(3).Select(v => v.ToString("F4")));
+                string trnStr = string.Join(", ", skl.TrainVectors[0].Take(3).Select(v => v.ToString("F4")));
+                BeginInvoke(new Action(() =>
+                    AppendEventLog($"[DBG] vec[0..2]=[{vecStr}]  train[0][0..2]=[{trnStr}]  std={skl.Standardize}  n_train={skl.TrainVectors.Length}")));
+
                 rawScore = SignalFeatures.ScoreKnn(vec, skl.TrainVectors, skl.K,
                                                    skl.Standardize, skl.Mean, skl.Std);
                 double thr = skl.Threshold > 0 ? skl.Threshold : 1.0;
