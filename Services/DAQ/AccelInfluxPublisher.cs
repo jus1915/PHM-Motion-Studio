@@ -88,6 +88,25 @@ namespace PHM_Project_DockPanel.Services.DAQ
             _cts = new CancellationTokenSource();
             _worker = Task.Run(() => WorkerLoop(_cts.Token));
             _log($"[InfluxDB] 실시간 게시 시작 → {Config.Url}  org={Config.Org}  bucket={Config.Bucket}");
+
+            // 비동기 연결 확인 (결과가 나오면 로그로만 알림)
+            Task.Run(async () =>
+            {
+                try
+                {
+                    var req = new HttpRequestMessage(HttpMethod.Get, Config.Url + "/health");
+                    var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode)
+                        _log($"[InfluxDB] 경고: 서버 응답 오류 (HTTP {(int)resp.StatusCode}) — 데이터가 전송되지 않을 수 있습니다.");
+                    else
+                        _log($"[InfluxDB] 서버 연결 확인 완료");
+                }
+                catch (Exception ex)
+                {
+                    _log($"[InfluxDB] 경고: 서버에 연결할 수 없습니다 ({Config.Url}) — {ex.Message}");
+                    _log($"[InfluxDB]   데이터 수집은 계속되지만 InfluxDB 전송은 실패합니다.");
+                }
+            });
         }
 
         public void Disable()
