@@ -2080,13 +2080,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         /// <summary>
         /// sklearn ONNX 모델로 스코어링합니다.
-        /// AD: label 출력이 -1=이상, 1=정상 → isAnomaly, score=0.0/1.0
-        /// FD: label 출력이 클래스 인덱스 → pred, probabilities
+        /// AD: label=-1→이상 / scores 출력(decision function)을 rawScore로 반환
+        /// FD: label=클래스인덱스 / probabilities[pred]를 rawScore로 반환
         /// </summary>
         private bool TrySklOnnxScore(OnnxSklModel skl, string csvPath,
-            out bool isAnomaly, out int predClass, out float[] probabilities, out string info)
+            out bool isAnomaly, out int predClass, out float[] probabilities, out double rawScore, out string info)
         {
-            isAnomaly = false; predClass = -1; probabilities = null; info = "";
+            isAnomaly = false; predClass = -1; probabilities = null; rawScore = 0.0; info = "";
             if (skl?.OnnxSession == null || skl.Features == null || skl.Features.Length == 0) return false;
 
             // 1) 피처 벡터 추출
@@ -2141,7 +2141,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     catch { }
                 }
 
-                // "probabilities" 또는 "output_probability" 출력 파싱
+                // "probabilities" 또는 "output_probability" 출력 파싱 (FD 분류기)
                 var probVal = results.FirstOrDefault(r => r.Name == "probabilities" || r.Name == "output_probability");
                 if (probVal != null)
                 {
@@ -2150,6 +2150,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         var pt = probVal.AsTensor<float>();
                         probabilities = new float[pt.Length];
                         for (int i = 0; i < pt.Length; i++) probabilities[i] = pt[i];
+                        // FD rawScore: 예측 클래스의 확률
+                        if (predClass >= 0 && predClass < probabilities.Length)
+                            rawScore = probabilities[predClass];
+                    }
+                    catch { }
+                }
+
+                // "scores" 출력 파싱 (AD 이상탐지: decision_function 값)
+                // sklearn outlier detectors: 음수일수록 이상, 양수일수록 정상
+                // skl2onnx는 scores를 shape (1,1)로 출력
+                var scoresVal = results.FirstOrDefault(r => r.Name == "scores");
+                if (scoresVal != null && skl.Session == "AD")
+                {
+                    try
+                    {
+                        var st = scoresVal.AsTensor<float>();
+                        float s = st[0];  // decision function 값 (음수=이상, 양수=정상)
+                        rawScore = -s;    // 대시보드 관례: 값이 클수록 이상 → 부호 반전
                     }
                     catch { }
                 }
@@ -2159,7 +2177,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 ? (isAnomaly ? "이상" : "정상")
                 : (predClass >= 0 && skl.ClassNames != null && predClass < skl.ClassNames.Length ? skl.ClassNames[predClass] : predClass.ToString());
 
-            info = $"{skl.ModelType?.ToUpperInvariant()} {skl.Session}  =>  {labelStr}";
+            info = $"{skl.ModelType?.ToUpperInvariant()} {skl.Session}  score={rawScore:F4}  =>  {labelStr}";
             return true;
         }
 
@@ -2802,14 +2820,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         continue;
                     }
 
-                    bool isAnom; int predClass; float[] probs; string sklInfo;
-                    if (!TrySklOnnxScore(skl, path, out isAnom, out predClass, out probs, out sklInfo))
+                    bool isAnom; int predClass; float[] probs; double rawScore; string sklInfo;
+                    if (!TrySklOnnxScore(skl, path, out isAnom, out predClass, out probs, out rawScore, out sklInfo))
                     {
                         BeginInvoke(new Action(() => AppendEventLog($"[SKL-SKIP] axis {axis} TrySklOnnxScore 실패: {sklInfo}")));
                         continue;
                     }
 
-                    AlarmLevel level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+                    double thr = skl.Threshold;
+                    // AD일 때 rawScore(decision function 부호반전)와 threshold 비교로 위험도 판정
+                    AlarmLevel level;
+                    if (skl.Session == "AD")
+                        level = isAnom ? (rawScore >= thr * 2.0 ? AlarmLevel.Danger : AlarmLevel.Warning) : AlarmLevel.Normal;
+                    else
+                        level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+
                     anyAxisProcessed = true;
 
                     BeginInvoke(new Action(() =>
@@ -2823,8 +2848,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         cardWarning.ValueText = cntWarning + " 건";
                         cardCycles.ValueText = cycles + " 회";
 
-                        double scoreDisplay = isAnom ? 1.0 : 0.0;
-                        var alarmText = isAnom ? "WARN" : "OK";
+                        var alarmText = level == AlarmLevel.Danger ? "DANGER" : level == AlarmLevel.Warning ? "WARN" : "OK";
                         AppendEventLog($"[SKL-{skl.Session}] axis {axis}  {sklInfo}  => {alarmText}  ({Path.GetFileName(path)})");
 
                         if (probs != null && probs.Length > 0)
@@ -2832,20 +2856,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                         if (level != AlarmLevel.Normal)
                         {
-                            ShowToast(level, axis, scoreDisplay);
+                            ShowToast(level, axis, rawScore);
                             rows.Add(new EventRow
                             {
                                 TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
                                 Axis = axis,
-                                AnomalyScore = scoreDisplay,
-                                Threshold = 0.5,
-                                Alarm = "경고"
+                                AnomalyScore = Math.Round(rawScore, 4),
+                                Threshold = Math.Round(thr, 4),
+                                Alarm = level == AlarmLevel.Danger ? "위험" : "경고"
                             });
                             if (grid.Rows.Count > 0)
                                 try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
                         }
 
-                        scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, scoreDisplay));
+                        scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, rawScore));
                         while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (SKL axis {axis}, {Path.GetFileName(path)})";
                     }));
