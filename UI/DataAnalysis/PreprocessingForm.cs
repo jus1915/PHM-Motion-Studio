@@ -2863,14 +2863,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     double[] arr = seg.GetChannel(channel);
                     if (arr == null || arr.Length < 4) continue;
 
-                    // 샘플레이트 추정
-                    double estSr = sr;
-                    if (seg.Time != null && seg.Time.Length >= 2)
-                    {
-                        double dur = seg.Time[seg.Time.Length - 1] - seg.Time[0];
-                        if (dur > 0) estSr = (seg.Time.Length - 1) / dur;
-                    }
-
+                    // Dashboard 추론과 동일한 샘플레이트 사용 (AppState 기준)
+                    // estSr(타임스탬프 기반 ~1000 Hz)을 사용하면 학습/추론 주파수 특징이 불일치함
                     var ys = arr.ToList();
                     var row = new SignalFeatures.FeatureRow
                     {
@@ -2882,7 +2876,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     int avail = Math.Min(ys.Count, MaxFftSamples);
                     double[] yarr = ys.Take(avail).ToArray();
                     double[] freq;
-                    var spec = SignalFeatures.ComputeMagnitudeSpectrum(yarr, estSr, out freq);
+                    var spec = SignalFeatures.ComputeMagnitudeSpectrum(yarr, sr, out freq);
                     SignalFeatures.FillPeakFeatures(freq, spec, row);
 
                     _featureTable.Add(row);
