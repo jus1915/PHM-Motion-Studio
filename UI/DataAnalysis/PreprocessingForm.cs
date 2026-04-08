@@ -2896,7 +2896,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     RenderFeatureDistribution();
                     lblFeatureInfo.Text = $"샘플: {_featureTable.Count}개 (InfluxDB)";
                     EnsureAIForm();
-                    _aiForm.SetYColumnName(channel + " [InfluxDB]");
+                    _aiForm.SetYColumnName(channel);
                     _aiForm.SetFeatureData(_featureTable.Cast<object>(), FeatureList);
                 }));
             }));
