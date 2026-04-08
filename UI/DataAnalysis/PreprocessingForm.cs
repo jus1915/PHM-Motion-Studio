@@ -1599,7 +1599,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     int avail = Math.Min(ys.Count, MaxFftSamples);
                     var yarr = ys.Take(avail).ToArray();
                     double[] freq;
-                    double sr = SampleRateFor(yColumn);
+                    // time_s 컬럼으로 실제 샘플레이트 자동 감지 (fallback: AppState)
+                    double sr = SignalFeatures.DetectSampleRateFromCsv(path, SampleRateFor(yColumn));
                     var spec = SignalFeatures.ComputeMagnitudeSpectrum(yarr, sr, out freq);
                     SignalFeatures.FillPeakFeatures(freq, spec, row);
 

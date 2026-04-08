@@ -319,14 +319,64 @@ namespace PHM_Project_DockPanel.Services.Core
         }
 
         /// <summary>
+        /// CSV 파일의 time_s 컬럼 간격으로 실제 샘플레이트를 감지합니다.
+        /// time_s 컬럼이 없거나 간격이 비정상이면 fallbackSr를 반환합니다.
+        /// </summary>
+        public static double DetectSampleRateFromCsv(string filePath, double fallbackSr)
+        {
+            try
+            {
+                return RetryIo(() =>
+                {
+                    using (var reader = OpenSharedReader(filePath))
+                    {
+                        string headerLine = reader.ReadLine();
+                        if (headerLine == null) return fallbackSr;
+                        var headers = headerLine.Split(Delimiters, StringSplitOptions.None);
+
+                        // time_s 컬럼만 사용 (CYCLE 등 다른 시간 컬럼은 제외)
+                        int timeIdx = -1;
+                        for (int i = 0; i < headers.Length; i++)
+                            if (headers[i].Trim().Equals("time_s", StringComparison.OrdinalIgnoreCase))
+                            { timeIdx = i; break; }
+                        if (timeIdx < 0) return fallbackSr;
+
+                        string line1 = reader.ReadLine();
+                        string line2 = reader.ReadLine();
+                        if (line1 == null || line2 == null) return fallbackSr;
+
+                        var p1 = line1.Split(Delimiters, StringSplitOptions.None);
+                        var p2 = line2.Split(Delimiters, StringSplitOptions.None);
+                        if (p1.Length <= timeIdx || p2.Length <= timeIdx) return fallbackSr;
+
+                        double t1, t2;
+                        if (!double.TryParse(p1[timeIdx], NumberStyles.Float, Invariant, out t1)) return fallbackSr;
+                        if (!double.TryParse(p2[timeIdx], NumberStyles.Float, Invariant, out t2)) return fallbackSr;
+
+                        double dt = t2 - t1;
+                        // 1 μs ~ 1 s 범위만 유효 (sr: 1 Hz ~ 1 MHz)
+                        if (dt <= 0 || dt > 1.0) return fallbackSr;
+                        return Math.Round(1.0 / dt);
+                    }
+                });
+            }
+            catch
+            {
+                return fallbackSr;
+            }
+        }
+
+        /// <summary>
         /// CSV 파일에서 y컬럼을 읽어 즉시 특징 벡터 생성 (표준화 없음)
+        /// time_s 컬럼이 있으면 실제 샘플레이트를 자동 감지합니다.
         /// </summary>
         public static double[] BuildFeatureVectorFromCsv(string filePath, string yColumn, string[] featureKeysInOrder)
         {
             if (featureKeysInOrder == null || featureKeysInOrder.Length == 0) return null;
             if (!TryParseCsvColumn(filePath, yColumn, out var ys)) return null;
 
-            double sr = AppState.GetForColumn(yColumn);
+            double fallbackSr = AppState.GetForColumn(yColumn);
+            double sr = DetectSampleRateFromCsv(filePath, fallbackSr);
 
             return BuildFeatureVectorFromSeries(ys, featureKeysInOrder, sr);
         }
