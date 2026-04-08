@@ -2219,58 +2219,70 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             var pnl = new Panel { Dock = DockStyle.Fill };
 
-            // row0: Device / Label / Channel
-            var row0 = new FlowLayoutPanel
+            // ── 상단 쿼리 영역: TableLayoutPanel 2열(레이블|컨트롤) ──────────
+            var tbl = new TableLayoutPanel
             {
-                Dock = DockStyle.Top, Height = 30,
-                FlowDirection = FlowDirection.LeftToRight, WrapContents = false
+                Dock = DockStyle.Top,
+                ColumnCount = 2,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(4, 4, 4, 2)
             };
-            row0.Controls.Add(new Label { Text = "Device:", AutoSize = true, Margin = new Padding(4, 6, 2, 0) });
-            _cmbInfluxDevice = new ComboBox { Width = 120, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 6, 0) };
-            row0.Controls.Add(_cmbInfluxDevice);
-            row0.Controls.Add(new Label { Text = "레이블:", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
-            _cmbInfluxLabel = new ComboBox { Width = 100, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 6, 0) };
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));  // 레이블 열
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // 컨트롤 열
+
+            // Device
+            tbl.Controls.Add(new Label { Text = "Device:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 0);
+            _cmbInfluxDevice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
+            tbl.Controls.Add(_cmbInfluxDevice, 1, 0);
+
+            // 레이블
+            tbl.Controls.Add(new Label { Text = "레이블:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 1);
+            _cmbInfluxLabel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
             _cmbInfluxLabel.Items.Add("(전체)");
             _cmbInfluxLabel.SelectedIndex = 0;
-            row0.Controls.Add(_cmbInfluxLabel);
-            row0.Controls.Add(new Label { Text = "채널:", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
-            _cmbInfluxChannel = new ComboBox { Width = 55, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 0, 0) };
+            tbl.Controls.Add(_cmbInfluxLabel, 1, 1);
+
+            // 채널
+            tbl.Controls.Add(new Label { Text = "채널:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 2);
+            _cmbInfluxChannel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
             _cmbInfluxChannel.Items.AddRange(new object[] { "x", "y", "z" });
             _cmbInfluxChannel.SelectedIndex = 0;
-            row0.Controls.Add(_cmbInfluxChannel);
+            tbl.Controls.Add(_cmbInfluxChannel, 1, 2);
 
-            // row1: 시간 범위 / 세그먼트 / 조회 버튼
-            var row1 = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Top, Height = 30,
-                FlowDirection = FlowDirection.LeftToRight, WrapContents = false
-            };
-            row1.Controls.Add(new Label { Text = "시작:", AutoSize = true, Margin = new Padding(4, 6, 2, 0) });
+            // 시작
+            tbl.Controls.Add(new Label { Text = "시작:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 3);
             _dtpFrom = new DateTimePicker
             {
                 Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
-                Width = 140, Margin = new Padding(0, 3, 4, 0), Value = DateTime.Now.AddHours(-1)
+                Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now.AddHours(-1)
             };
-            row1.Controls.Add(_dtpFrom);
-            row1.Controls.Add(new Label { Text = "종료:", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
+            tbl.Controls.Add(_dtpFrom, 1, 3);
+
+            // 종료
+            tbl.Controls.Add(new Label { Text = "종료:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 4);
             _dtpTo = new DateTimePicker
             {
                 Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
-                Width = 140, Margin = new Padding(0, 3, 4, 0), Value = DateTime.Now
+                Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now
             };
-            row1.Controls.Add(_dtpTo);
-            row1.Controls.Add(new Label { Text = "세그(초):", AutoSize = true, Margin = new Padding(0, 6, 2, 0) });
+            tbl.Controls.Add(_dtpTo, 1, 4);
+
+            // 세그(초) + 조회 버튼 — 같은 셀에 FlowLayout
+            tbl.Controls.Add(new Label { Text = "세그(초):", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 5);
+            var segRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0, 1, 0, 2) };
             _nudSegSeconds = new NumericUpDown
             {
-                Width = 60, Minimum = 0.1m, Maximum = 60m, DecimalPlaces = 1,
-                Value = 1.0m, Increment = 0.5m, Margin = new Padding(0, 3, 4, 0)
+                Width = 68, Minimum = 0.1m, Maximum = 60m, DecimalPlaces = 1,
+                Value = 1.0m, Increment = 0.5m, Margin = new Padding(0, 1, 4, 0)
             };
-            row1.Controls.Add(_nudSegSeconds);
-            _btnInfluxQuery = new Button { Text = "조회", Width = 55, Height = 24, Margin = new Padding(0, 3, 0, 0) };
+            _btnInfluxQuery = new Button { Text = "조회 ▶", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0) };
             _btnInfluxQuery.Click += BtnInfluxQuery_Click;
-            row1.Controls.Add(_btnInfluxQuery);
+            segRow.Controls.Add(_nudSegSeconds);
+            segRow.Controls.Add(_btnInfluxQuery);
+            tbl.Controls.Add(segRow, 1, 5);
 
-            // 상태 레이블
+            // ── 상태 레이블 ───────────────────────────────────────────────────
             _lblInfluxStatus = new Label
             {
                 Dock = DockStyle.Top, Height = 20,
@@ -2278,75 +2290,63 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Font = new Font(this.Font.FontFamily, 8f)
             };
 
-            // CRUD 버튼 행
-            var rowCrud = new FlowLayoutPanel
+            // ── CRUD 버튼: 2줄 (선택/해제/업로드 | 선택삭제/레이블삭제/전체삭제) ─
+            var rowCrud1 = new FlowLayoutPanel
             {
-                Dock = DockStyle.Bottom, Height = 30,
+                Dock = DockStyle.Bottom, Height = 28,
                 FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
-                BackColor = SystemColors.ControlLight
+                BackColor = SystemColors.ControlLight, Padding = new Padding(2, 2, 2, 0)
             };
+            var rowCrud2 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom, Height = 28,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                BackColor = SystemColors.ControlLight, Padding = new Padding(2, 0, 2, 2)
+            };
+
+            _btnInfluxCheckAll = new Button { Text = "전체 선택", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0) };
+            _btnInfluxCheckAll.Click += (s, e) => { for (int i = 0; i < _lstSegments.Items.Count; i++) _lstSegments.SetItemChecked(i, true); };
+
+            _btnInfluxUncheckAll = new Button { Text = "전체 해제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0) };
+            _btnInfluxUncheckAll.Click += (s, e) => { for (int i = 0; i < _lstSegments.Items.Count; i++) _lstSegments.SetItemChecked(i, false); };
+
             _btnInfluxUploadCsv = new Button
             {
-                Text = "CSV → DB", Width = 72, Height = 24,
-                Margin = new Padding(3, 3, 2, 0),
+                Text = "CSV→DB", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0),
                 BackColor = Color.FromArgb(220, 240, 220)
             };
             _btnInfluxUploadCsv.Click += BtnInfluxUploadCsv_Click;
 
             _btnInfluxDeleteSelected = new Button
             {
-                Text = "선택 삭제", Width = 70, Height = 24,
-                Margin = new Padding(2, 3, 2, 0),
+                Text = "선택 삭제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0),
                 BackColor = Color.FromArgb(255, 230, 220)
             };
             _btnInfluxDeleteSelected.Click += BtnInfluxDeleteSelected_Click;
 
             _btnInfluxDeleteLabel = new Button
             {
-                Text = "레이블 삭제", Width = 78, Height = 24,
-                Margin = new Padding(2, 3, 2, 0),
+                Text = "레이블 삭제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0),
                 BackColor = Color.FromArgb(255, 220, 200)
             };
             _btnInfluxDeleteLabel.Click += BtnInfluxDeleteLabel_Click;
 
             _btnInfluxDeleteAll = new Button
             {
-                Text = "전체 삭제", Width = 68, Height = 24,
-                Margin = new Padding(2, 3, 0, 0),
+                Text = "전체 삭제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0),
                 BackColor = Color.FromArgb(255, 200, 180)
             };
             _btnInfluxDeleteAll.Click += BtnInfluxDeleteAll_Click;
 
-            // 전체 선택/해제 버튼
-            _btnInfluxCheckAll = new Button
-            {
-                Text = "전체 선택", Width = 68, Height = 24,
-                Margin = new Padding(2, 3, 2, 0)
-            };
-            _btnInfluxCheckAll.Click += (s, e) =>
-            {
-                for (int i = 0; i < _lstSegments.Items.Count; i++)
-                    _lstSegments.SetItemChecked(i, true);
-            };
-            _btnInfluxUncheckAll = new Button
-            {
-                Text = "전체 해제", Width = 68, Height = 24,
-                Margin = new Padding(0, 3, 6, 0)
-            };
-            _btnInfluxUncheckAll.Click += (s, e) =>
-            {
-                for (int i = 0; i < _lstSegments.Items.Count; i++)
-                    _lstSegments.SetItemChecked(i, false);
-            };
+            rowCrud1.Controls.Add(_btnInfluxCheckAll);
+            rowCrud1.Controls.Add(_btnInfluxUncheckAll);
+            rowCrud1.Controls.Add(_btnInfluxUploadCsv);
 
-            rowCrud.Controls.Add(_btnInfluxCheckAll);
-            rowCrud.Controls.Add(_btnInfluxUncheckAll);
-            rowCrud.Controls.Add(_btnInfluxUploadCsv);
-            rowCrud.Controls.Add(_btnInfluxDeleteSelected);
-            rowCrud.Controls.Add(_btnInfluxDeleteLabel);
-            rowCrud.Controls.Add(_btnInfluxDeleteAll);
+            rowCrud2.Controls.Add(_btnInfluxDeleteSelected);
+            rowCrud2.Controls.Add(_btnInfluxDeleteLabel);
+            rowCrud2.Controls.Add(_btnInfluxDeleteAll);
 
-            // 세그먼트 목록 (CheckedListBox)
+            // ── 세그먼트 목록 ─────────────────────────────────────────────────
             _lstSegments = new CheckedListBox
             {
                 Dock = DockStyle.Fill,
@@ -2356,12 +2356,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             };
             _lstSegments.SelectedIndexChanged += LstSegments_SelectedIndexChanged;
 
-            // 역순 추가 (마지막 추가 = 시각적 최상단)
-            pnl.Controls.Add(rowCrud);
+            // 역순 추가 (Bottom→Fill→Top 순)
+            pnl.Controls.Add(rowCrud2);   // Bottom (마지막)
+            pnl.Controls.Add(rowCrud1);   // Bottom (첫번째)
             pnl.Controls.Add(_lstSegments);
             pnl.Controls.Add(_lblInfluxStatus);
-            pnl.Controls.Add(row1);
-            pnl.Controls.Add(row0);
+            pnl.Controls.Add(tbl);
             return pnl;
         }
 
