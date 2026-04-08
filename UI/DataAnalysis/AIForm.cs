@@ -887,7 +887,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     standardize = _useStandardize,
                     threshold = thrToSave,
                     features = _selectedKeys,
-                    class_names = _classNames
+                    class_names = _classNames,
+                    y_column = _yColumnName ?? ""
                 };
                 System.IO.File.WriteAllText(paramsPath,
                     JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = false }),

@@ -307,15 +307,30 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 기존: AE/일반 통합
         private readonly Dictionary<int, OnnxAxisModel> _axisOnnx = new Dictionary<int, OnnxAxisModel>();
 
-            // 추가: 축별 "분류" ONNX
+        // 추가: 축별 "분류" ONNX
         private readonly Dictionary<int, OnnxAxisModel> _axisOnnxCls = new Dictionary<int, OnnxAxisModel>();
+
+        // sklearn 피처 기반 ONNX (AIForm에서 학습·저장한 모델)
+        private class OnnxSklModel
+        {
+            public int AxisId;
+            public string ModelPath;
+            public string Session;       // "AD" or "FD"
+            public string ModelType;     // "knn", "isoforest", "ocsvm", "svm", "rf", "gbm", "mlp"
+            public string[] Features;    // 피처 키 목록 (추출 순서)
+            public string YColumn;       // CSV Y 컬럼명
+            public double Threshold;     // AD 임계값 (기본 0.5)
+            public string[] ClassNames;  // FD 클래스명
+            public InferenceSession OnnxSession;
+        }
+        private readonly Dictionary<int, OnnxSklModel> _axisSklModels = new Dictionary<int, OnnxSklModel>();
         #endregion
 
         // UI
         private KpiCard cardDanger, cardWarning, cardCycles;
         private Chart chartLine, chartDonut;
         private DataGridView grid;
-        private Button btnLoadModelSingle, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnStart, btnStop;
+        private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
         private DataGridView gridModelPaths;
         private TableLayoutPanel sampleGrid;                       // rightBottom 안에서 그리드 역할
@@ -603,13 +618,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int ctrlWidth = leftWrap.Width - 8;      // ← 여유 최소화
             int btnH = 28;                           // ← 버튼 높이 고정(컴팩트)
 
-            btnLoadModelSingle = new Button { Text = "축별 모델 추가", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnLoadModelSingle.Click += (s, e) => LoadAxisModelSingle();
+            btnLoadSklModel = new Button { Text = "SKL ONNX 추가 (AI폼)", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), BackColor = Color.FromArgb(220, 235, 255) };
+            btnLoadSklModel.Click += (s, e) => LoadSklOnnxModel();
 
             btnLoadModelFolder = new Button { Text = "모델 폴더 일괄", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
             btnLoadModelFolder.Click += (s, e) => LoadAxisModelsFromFolder();
 
-            btnLoadOnnxModelSingle = new Button { Text = "ONNX 모델 추가", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
+            btnLoadOnnxModelSingle = new Button { Text = "딥러닝 ONNX 추가 (AE/CLS)", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
             btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
 
             btnSelectFolder = new Button { Text = "CSV 폴더", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
@@ -627,7 +642,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var gbAging = new GroupBox
             {
                 Text = "설비 노후도 분포",
-                AutoSize = false,           // ★
+                AutoSize = false,
                 MinimumSize = new Size(120, 100),
                 Margin = new Padding(2, 6, 2, 6),
                 Padding = new Padding(6)
@@ -646,7 +661,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             gbAging.Controls.Add(chartDonut);
 
             left.Controls.AddRange(new Control[] {
-                btnLoadModelSingle, btnLoadModelFolder, btnLoadOnnxModelSingle, btnSelectFolder, btnStart, btnStop, lblFolder, lblStatus, gbAging
+                btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle, btnSelectFolder, btnStart, btnStop, lblFolder, lblStatus, gbAging
             });
             left.ResumeLayout(false);
             // === 축별 모델 경로 표 ===
@@ -1012,7 +1027,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 // 1) 버튼/라벨 고정 높이 합
                 int fixedH = 0;
                 Control[] fixedControls = new Control[] {
-        btnLoadModelSingle, btnLoadModelFolder, btnLoadOnnxModelSingle,
+        btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
         btnSelectFolder, btnStart, btnStop, lblFolder, lblStatus
     };
                 foreach (var c in fixedControls)
@@ -1056,7 +1071,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 Control[] toResize = new Control[]
                 {
-                btnLoadModelSingle, btnLoadModelFolder, btnLoadOnnxModelSingle,
+                btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
                 btnSelectFolder, btnStart, btnStop
                 };
 
@@ -1435,10 +1450,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 try { kv.Value?.Session?.Dispose(); } catch { }
             _axisOnnx.Clear();
 
-            // ★ 누락된 분류 세션도 정리
             foreach (var kv in _axisOnnxCls.ToList())
                 try { kv.Value?.Session?.Dispose(); } catch { }
             _axisOnnxCls.Clear();
+
+            foreach (var kv in _axisSklModels.ToList())
+                try { kv.Value?.OnnxSession?.Dispose(); } catch { }
+            _axisSklModels.Clear();
         }
 
         private static float[,] BuildSequenceFromCsvSingleChannel(string filePath, string yColumn)
@@ -1960,6 +1978,191 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
         }
 
+        /// <summary>
+        /// AIForm에서 학습·저장한 sklearn ONNX 모델(.onnx + _meta.json)을 로드합니다.
+        /// </summary>
+        private void LoadSklOnnxModel()
+        {
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "SKL ONNX 모델 선택 (AIForm 저장)",
+                Filter = "ONNX 모델 (*.onnx)|*.onnx|모든 파일 (*.*)|*.*",
+                InitialDirectory = Path.Combine(DefaultLogsPath, "Models")
+            })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+                string onnxPath = ofd.FileName;
+
+                // 1) 사이드카 _meta.json 읽기
+                string metaPath = Path.Combine(
+                    Path.GetDirectoryName(onnxPath) ?? "",
+                    Path.GetFileNameWithoutExtension(onnxPath) + "_meta.json");
+
+                string session = "AD";
+                string modelType = "";
+                string[] features = Array.Empty<string>();
+                string yColumn = "";
+                double threshold = 0.5;
+                string[] classNames = new[] { "Normal", "Anomaly" };
+
+                if (File.Exists(metaPath))
+                {
+                    try
+                    {
+                        var metaDoc = JsonDocument.Parse(File.ReadAllText(metaPath));
+                        var root = metaDoc.RootElement;
+                        if (root.TryGetProperty("session", out var sProp)) session = sProp.GetString() ?? "AD";
+                        if (root.TryGetProperty("model_type", out var mtProp)) modelType = mtProp.GetString() ?? "";
+                        if (root.TryGetProperty("y_column", out var ycProp)) yColumn = ycProp.GetString() ?? "";
+                        if (root.TryGetProperty("threshold", out var thrProp) && thrProp.TryGetDouble(out double thrVal)) threshold = thrVal;
+                        if (root.TryGetProperty("features", out var fProp) && fProp.ValueKind == JsonValueKind.Array)
+                            features = fProp.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray();
+                        if (root.TryGetProperty("class_names", out var cnProp) && cnProp.ValueKind == JsonValueKind.Array)
+                            classNames = cnProp.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray();
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"_meta.json 읽기 오류: {ex.Message}\n메타 정보를 수동으로 입력합니다.");
+                    }
+                }
+                else
+                {
+                    MessageBox.Show($"_meta.json 파일이 없습니다 ({Path.GetFileName(metaPath)}).\n기본값(AD, 피처 없음)으로 로드합니다.\nAIForm에서 저장된 모델인지 확인하세요.");
+                }
+
+                // 2) 축 번호 입력
+                int axis = 0;
+                using (var dlg = new InputBox("축 번호 입력", "연결할 축 번호(0,1,2,...)를 입력하세요:"))
+                {
+                    if (dlg.ShowDialog() != DialogResult.OK) return;
+                    if (!int.TryParse(dlg.InputText, out axis) || axis < 0)
+                    { MessageBox.Show("유효한 축 번호가 아닙니다."); return; }
+                }
+
+                // 3) 피처가 없으면 경고
+                if (features.Length == 0)
+                {
+                    MessageBox.Show("피처 목록이 비어 있습니다. _meta.json을 확인하세요.\n모델을 등록하지만 스코어링이 작동하지 않을 수 있습니다.", "경고", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+
+                // 4) ONNX 세션 생성
+                InferenceSession sess;
+                try { sess = new InferenceSession(onnxPath); }
+                catch (Exception ex)
+                { MessageBox.Show("ONNX 세션 생성 실패: " + ex.Message); return; }
+
+                // 기존 세션 교체
+                if (_axisSklModels.TryGetValue(axis, out var old) && old?.OnnxSession != null)
+                    try { old.OnnxSession.Dispose(); } catch { }
+
+                _axisSklModels[axis] = new OnnxSklModel
+                {
+                    AxisId     = axis,
+                    ModelPath  = onnxPath,
+                    Session    = session.ToUpperInvariant(),
+                    ModelType  = modelType,
+                    Features   = features,
+                    YColumn    = yColumn,
+                    Threshold  = threshold > 0 ? threshold : 0.5,
+                    ClassNames = classNames,
+                    OnnxSession = sess
+                };
+
+                RefreshModelPathList();
+                string featStr = features.Length > 0 ? string.Join(", ", features) : "(없음)";
+                MessageBox.Show(
+                    $"축 {axis} SKL ONNX 모델 등록 완료\n" +
+                    $"파일: {Path.GetFileName(onnxPath)}\n" +
+                    $"세션: {session}  알고리즘: {modelType}\n" +
+                    $"YColumn: {yColumn}  피처({features.Length}): {featStr}");
+            }
+        }
+
+        /// <summary>
+        /// sklearn ONNX 모델로 스코어링합니다.
+        /// AD: label 출력이 -1=이상, 1=정상 → isAnomaly, score=0.0/1.0
+        /// FD: label 출력이 클래스 인덱스 → pred, probabilities
+        /// </summary>
+        private bool TrySklOnnxScore(OnnxSklModel skl, string csvPath,
+            out bool isAnomaly, out int predClass, out float[] probabilities, out string info)
+        {
+            isAnomaly = false; predClass = -1; probabilities = null; info = "";
+            if (skl?.OnnxSession == null || skl.Features == null || skl.Features.Length == 0) return false;
+
+            // 1) 피처 벡터 추출
+            double[] vec = BuildFeatureVectorFromCsv(csvPath, skl.YColumn, skl.Features);
+            if (vec == null || vec.Length != skl.Features.Length) return false;
+
+            // 2) float 텐서 구성
+            var inputData = new DenseTensor<float>(new[] { 1, vec.Length });
+            for (int i = 0; i < vec.Length; i++) inputData[0, i] = (float)vec[i];
+
+            // ONNX 모델 입력 이름 자동 탐색
+            string inputName = "float_input";
+            try
+            {
+                var meta = skl.OnnxSession.InputMetadata;
+                if (meta.Count > 0) inputName = meta.Keys.First();
+            }
+            catch { }
+
+            var inputs = new List<NamedOnnxValue>
+            {
+                NamedOnnxValue.CreateFromTensor(inputName, inputData)
+            };
+
+            // 3) 추론
+            IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results;
+            try { results = skl.OnnxSession.Run(inputs); }
+            catch (Exception ex) { info = "ONNX Run 오류: " + ex.Message; return false; }
+
+            using (results)
+            {
+                // "label" 출력 파싱
+                var labelVal = results.FirstOrDefault(r => r.Name == "label");
+                if (labelVal != null)
+                {
+                    try
+                    {
+                        // sklearn ONNX: label은 int64 또는 string
+                        if (labelVal.ElementType == TensorElementType.Int64)
+                        {
+                            var lt = labelVal.AsTensor<long>();
+                            long lbl = lt[0];
+                            if (skl.Session == "AD")
+                                isAnomaly = lbl == -1L;
+                            else
+                            {
+                                predClass = (int)lbl;
+                                isAnomaly = predClass != 0;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // "probabilities" 또는 "output_probability" 출력 파싱
+                var probVal = results.FirstOrDefault(r => r.Name == "probabilities" || r.Name == "output_probability");
+                if (probVal != null)
+                {
+                    try
+                    {
+                        var pt = probVal.AsTensor<float>();
+                        probabilities = new float[pt.Length];
+                        for (int i = 0; i < pt.Length; i++) probabilities[i] = pt[i];
+                    }
+                    catch { }
+                }
+            }
+
+            string labelStr = skl.Session == "AD"
+                ? (isAnomaly ? "이상" : "정상")
+                : (predClass >= 0 && skl.ClassNames != null && predClass < skl.ClassNames.Length ? skl.ClassNames[predClass] : predClass.ToString());
+
+            info = $"{skl.ModelType?.ToUpperInvariant()} {skl.Session}  =>  {labelStr}";
+            return true;
+        }
+
         private void LoadAxisModelsFromFolder()
         {
             using (var ofd = new OpenFileDialog())
@@ -2151,6 +2354,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     gridModelPaths.Rows[r].Cells["Path"].ToolTipText = om.ModelPath;
                 }
 
+                foreach (var kv in _axisSklModels.OrderBy(k => k.Key))
+                {
+                    var sm = kv.Value;
+                    string file = string.IsNullOrEmpty(sm.ModelPath) ? "" : Path.GetFileName(sm.ModelPath);
+                    string tag = sm.Session == "AD" ? "SKL-AD" : "SKL-FD";
+                    int r = gridModelPaths.Rows.Add(kv.Key, $"{file}  ({tag}/{sm.ModelType?.ToUpperInvariant()})");
+                    gridModelPaths.Rows[r].Cells["Path"].ToolTipText = sm.ModelPath;
+                }
+
                 foreach (var kv in _axisModels.OrderBy(k => k.Key))
                 {
                     var am = kv.Value;
@@ -2192,9 +2404,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bool hasKnn = _axisModels != null && _axisModels.Count > 0;
             bool hasAe = _axisOnnx != null && _axisOnnx.Values.Any(om => om?.Session != null && om.IsAutoencoder);
             bool hasCls = _axisOnnxCls != null && _axisOnnxCls.Values.Any(om => om?.Session != null && !om.IsAutoencoder);
-            if (!hasKnn && !hasAe && !hasCls)
+            bool hasSkl = _axisSklModels != null && _axisSklModels.Values.Any(sm => sm?.OnnxSession != null);
+            if (!hasKnn && !hasAe && !hasCls && !hasSkl)
             {
-                MessageBox.Show("먼저 모델을 추가하세요. (AE ONNX / 분류 ONNX / KNN JSON)");
+                MessageBox.Show("먼저 모델을 추가하세요. (SKL ONNX / AE ONNX / 분류 ONNX / KNN JSON)");
                 return;
             }
 
@@ -2527,6 +2740,60 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         }
 
                         lblStatus.Text = "상태: 처리완료 " + DateTime.Now.ToString("HH:mm:ss") + " (axis " + axis + ", " + Path.GetFileName(path) + ")";
+                    }));
+                }
+
+                // ---------- (C) sklearn ONNX (AIForm 모델) ----------
+                foreach (KeyValuePair<int, OnnxSklModel> kv in _axisSklModels.OrderBy(k => k.Key))
+                {
+                    int axis = kv.Key;
+                    OnnxSklModel skl = kv.Value;
+                    if (skl == null || skl.OnnxSession == null) continue;
+                    if (axesByName.Count > 0 && !axesByName.Contains(axis)) continue;
+                    if (string.IsNullOrWhiteSpace(skl.YColumn) || !headerSet.Contains(skl.YColumn)) continue;
+
+                    bool isAnom; int predClass; float[] probs; string sklInfo;
+                    if (!TrySklOnnxScore(skl, path, out isAnom, out predClass, out probs, out sklInfo)) continue;
+
+                    AlarmLevel level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+                    anyAxisProcessed = true;
+
+                    BeginInvoke(new Action(() =>
+                    {
+                        RenderSampleChartSafe(path, skl.YColumn, axis);
+
+                        if (level == AlarmLevel.Danger) Interlocked.Increment(ref cntDanger);
+                        else if (level == AlarmLevel.Warning) Interlocked.Increment(ref cntWarning);
+                        Interlocked.Increment(ref cycles);
+                        cardDanger.ValueText = cntDanger + " 건";
+                        cardWarning.ValueText = cntWarning + " 건";
+                        cardCycles.ValueText = cycles + " 회";
+
+                        double scoreDisplay = isAnom ? 1.0 : 0.0;
+                        var alarmText = isAnom ? "WARN" : "OK";
+                        AppendEventLog($"[SKL-{skl.Session}] axis {axis}  {sklInfo}  => {alarmText}  ({Path.GetFileName(path)})");
+
+                        if (probs != null && probs.Length > 0)
+                            UpdateAxisClassGauge(axis, probs, predClass >= 0 ? predClass : (isAnom ? 1 : 0));
+
+                        if (level != AlarmLevel.Normal)
+                        {
+                            ShowToast(level, axis, scoreDisplay);
+                            rows.Add(new EventRow
+                            {
+                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Axis = axis,
+                                AnomalyScore = scoreDisplay,
+                                Threshold = 0.5,
+                                Alarm = "경고"
+                            });
+                            if (grid.Rows.Count > 0)
+                                try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
+                        }
+
+                        scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, scoreDisplay));
+                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                        lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (SKL axis {axis}, {Path.GetFileName(path)})";
                     }));
                 }
 

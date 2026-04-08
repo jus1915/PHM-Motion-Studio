@@ -252,6 +252,20 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     to_onnx(pipeline, n_features, output_path, session, class_names)
 
+    # _meta.json 사이드카 저장 (DashboardForm에서 SKL 모델 메타데이터 읽기용)
+    meta = {
+        "session": session,
+        "model_type": model_key,
+        "features": feature_keys,
+        "class_names": class_names,
+        "y_column": params.get("y_column", ""),
+        "threshold": params.get("threshold", 0.0),
+        "n_features": n_features,
+    }
+    meta_path = os.path.splitext(output_path)[0] + "_meta.json"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
     result = {"info": info}
     if accuracy is not None:
         result["accuracy"] = accuracy
