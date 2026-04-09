@@ -171,11 +171,13 @@ def to_onnx(pipeline, n_features: int, output_path: str, session: str, class_nam
     if hasattr(final_est, "predict_proba"):
         options = {type(final_est): {"zipmap": False}}
 
+    # target_opset: ai.onnx.ml 3 은 skl2onnx 구버전(1.14 이하)과 호환
+    # 기본 onnx opset 은 15, ml 도메인만 3으로 고정
     onnx_model = convert_sklearn(
         model_to_convert,
         initial_types=initial_type,
         options=options,
-        target_opset=15,
+        target_opset={"": 15, "ai.onnx.ml": 3},
     )
 
     with open(output_path, "wb") as f:
