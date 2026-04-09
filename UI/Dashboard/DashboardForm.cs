@@ -3028,9 +3028,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     int totalSegs = 0;
 
                     // ── (A) accel 세그먼트 ───────────────────────────────────
+                    // segmentSeconds 를 폴 창보다 크게 설정 → 창 내 모든 데이터가
+                    // 하나의 세그먼트로 묶임. 폴 1 회 = 진단 1 회.
+                    double winSecs = Math.Max(pollSeconds * 1.5, 10.0);
                     var accelSegs = await _influxSource.QuerySegmentsAsync(
-                        devArg, lblArg, from, now, segmentSeconds: 0.6, ct: ct);
+                        devArg, lblArg, from, now, segmentSeconds: winSecs, ct: ct);
 
+                    var newAccelSegs = new List<SignalSegment>();
                     foreach (var seg in accelSegs)
                     {
                         lock (_influxSync)
@@ -3039,16 +3043,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                             _processedSegTimes.Add(seg.StartTime);
                             if (_processedSegTimes.Count > 10000) _processedSegTimes.Clear();
                         }
-                        ProcessInfluxSegment(seg);
-                        totalSegs++;
+                        newAccelSegs.Add(seg);
+                    }
+                    if (newAccelSegs.Count > 0)
+                    {
+                        // 동일 창에서 나온 세그먼트는 병합 → 진단 1 회
+                        ProcessInfluxSegment(MergeSegments(newAccelSegs));
+                        totalSegs += newAccelSegs.Count;
                     }
 
                     // ── (B) torque 세그먼트 (토크 모델이 있을 때만) ──────────
                     if (HasTorqueModels())
                     {
                         var torqueSegs = await _influxSource.QueryTorqueSegmentsAsync(
-                            devArg, lblArg, from, now, segmentSeconds: 0.6, ct: ct);
+                            devArg, lblArg, from, now, segmentSeconds: winSecs, ct: ct);
 
+                        var newTorqueSegs = new List<SignalSegment>();
                         foreach (var seg in torqueSegs)
                         {
                             lock (_influxSync)
@@ -3057,8 +3067,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                 _processedTorqueSegTimes.Add(seg.StartTime);
                                 if (_processedTorqueSegTimes.Count > 10000) _processedTorqueSegTimes.Clear();
                             }
-                            ProcessInfluxSegment(seg);
-                            totalSegs++;
+                            newTorqueSegs.Add(seg);
+                        }
+                        if (newTorqueSegs.Count > 0)
+                        {
+                            ProcessInfluxSegment(MergeSegments(newTorqueSegs));
+                            totalSegs += newTorqueSegs.Count;
                         }
                     }
 
@@ -3073,6 +3087,60 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     await Task.Delay(Math.Max(pollSeconds, 5) * 1000, ct).ContinueWith(_ => { });
                 }
             }
+        }
+
+        /// <summary>
+        /// 동일 폴 창의 세그먼트를 시간 순으로 이어 붙여 하나로 반환합니다.
+        /// 이동 1 회분 데이터가 여러 세그먼트로 분할된 경우에도 진단을 1 회만 수행합니다.
+        /// </summary>
+        private static SignalSegment MergeSegments(List<SignalSegment> segs)
+        {
+            if (segs.Count == 1) return segs[0];
+
+            // 시작 시각 순 정렬
+            segs.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            var first = segs[0];
+
+            bool hasX      = segs.Any(s => s.X      != null && s.X.Length      > 0);
+            bool hasY      = segs.Any(s => s.Y      != null && s.Y.Length      > 0);
+            bool hasZ      = segs.Any(s => s.Z      != null && s.Z.Length      > 0);
+            bool hasTorque = segs.Any(s => s.Torque != null && s.Torque.Length > 0);
+
+            int total = segs.Sum(s => s.SampleCount);
+            var time   = new double[total];
+            var xArr   = hasX      ? new double[total] : null;
+            var yArr   = hasY      ? new double[total] : null;
+            var zArr   = hasZ      ? new double[total] : null;
+            var trqArr = hasTorque ? new double[total] : null;
+
+            int offset = 0;
+            foreach (var seg in segs)
+            {
+                double tBase = (seg.StartTime - first.StartTime).TotalSeconds;
+                int n = seg.SampleCount;
+                for (int i = 0; i < n; i++)
+                {
+                    time[offset + i] = tBase + (seg.Time != null && i < seg.Time.Length ? seg.Time[i] : i * 0.001);
+                    if (hasX      && seg.X      != null && i < seg.X.Length)      xArr  [offset + i] = seg.X     [i];
+                    if (hasY      && seg.Y      != null && i < seg.Y.Length)      yArr  [offset + i] = seg.Y     [i];
+                    if (hasZ      && seg.Z      != null && i < seg.Z.Length)      zArr  [offset + i] = seg.Z     [i];
+                    if (hasTorque && seg.Torque != null && i < seg.Torque.Length) trqArr[offset + i] = seg.Torque[i];
+                }
+                offset += n;
+            }
+
+            return new SignalSegment
+            {
+                Name      = first.Name,
+                Label     = first.Label,
+                Device    = first.Device,
+                StartTime = first.StartTime,
+                Time      = time,
+                X         = xArr,
+                Y         = yArr,
+                Z         = zArr,
+                Torque    = trqArr,
+            };
         }
 
         // ── InfluxDB 세그먼트 처리 (ProcessCsvSafe의 DB 버전) ────────────────
