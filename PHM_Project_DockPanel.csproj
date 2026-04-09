@@ -95,6 +95,10 @@
       <Private>true</Private>
     </Reference>
     <!-- ── NuGet 패키지 ── -->
+    <Reference Include="System.Data.SQLite, Version=1.0.118.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>packages\System.Data.SQLite.Core.1.0.118.0\lib\net46\System.Data.SQLite.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <Reference Include="MathNet.Numerics, Version=5.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>packages\MathNet.Numerics.5.0.0\lib\net48\MathNet.Numerics.dll</HintPath>
     </Reference>
