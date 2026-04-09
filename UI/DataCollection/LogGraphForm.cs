@@ -434,6 +434,17 @@ namespace PHM_Project_DockPanel.Windows
 
         public void LoadCsv(string filePath, LogKind? forceKind)
         {
+            // ── 경로 캐시는 항상 업데이트 ─────────────────────────────────────
+            if (forceKind == LogKind.Accel)  _lastAccelPath  = filePath;
+            if (forceKind == LogKind.Torque) _lastTorquePath = filePath;
+
+            // ── 사용자 콤보 선택 우선 적용 ─────────────────────────────────────
+            // 사용자가 이미 종류를 선택했고(preferred != Unknown), 자동 push 종류가 다르면
+            // 뷰 전환을 생략하고 경로만 기억한다.
+            LogKind preferred = AppState.LogGraphPreferredKind;
+            if (preferred != LogKind.Unknown && forceKind.HasValue && forceKind.Value != preferred)
+                return;
+
             if (!TryDetectAndParse(filePath, forceKind))
             {
                 MessageBox.Show("CSV 파싱 실패 또는 지원하지 않는 포맷입니다.", "오류",
@@ -451,14 +462,14 @@ namespace PHM_Project_DockPanel.Windows
 
             if (_kind == LogKind.Torque)
             {
-                _lastTorquePath = filePath;   // 경로 저장
+                _lastTorquePath = filePath;
                 BuildTorqueLayout();
                 DrawFeedbackView();
                 UpdateAccelFileComboVisibility();
             }
             else if (_kind == LogKind.Accel)
             {
-                _lastAccelPath = filePath;    // 경로 저장
+                _lastAccelPath = filePath;
                 BuildAccelLayout();
                 DrawAccelView();
 
