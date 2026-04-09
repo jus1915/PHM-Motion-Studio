@@ -367,6 +367,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private CancellationTokenSource _influxPollCts;
         private DateTime _influxLastQueried = DateTime.MinValue;
         private readonly HashSet<DateTime> _processedSegTimes = new HashSet<DateTime>();
+        private readonly HashSet<DateTime> _processedTorqueSegTimes = new HashSet<DateTime>();
         private readonly object _influxSync = new object();
 
         // 통계
@@ -2337,14 +2338,45 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         /// </summary>
         private bool TrySklOnnxScore(OnnxSklModel skl, string csvPath,
             out bool isAnomaly, out int predClass, out float[] probabilities, out double rawScore, out string info)
+            => TrySklOnnxScore(skl, csvPath, skl?.YColumn, out isAnomaly, out predClass, out probabilities, out rawScore, out info);
+
+        private bool TrySklOnnxScore(OnnxSklModel skl, string csvPath, string yColumn,
+            out bool isAnomaly, out int predClass, out float[] probabilities, out double rawScore, out string info)
         {
             isAnomaly = false; predClass = -1; probabilities = null; rawScore = 0.0; info = "";
             if (skl?.OnnxSession == null || skl.Features == null || skl.Features.Length == 0) return false;
+            if (string.IsNullOrWhiteSpace(yColumn)) return false;
 
-            double[] vec = BuildFeatureVectorFromCsv(csvPath, skl.YColumn, skl.Features);
+            double[] vec = BuildFeatureVectorFromCsv(csvPath, yColumn, skl.Features);
             if (vec == null || vec.Length != skl.Features.Length) return false;
 
             return TrySklOnnxScoreFromVec(skl, vec, out isAnomaly, out predClass, out probabilities, out rawScore, out info);
+        }
+
+        /// <summary>
+        /// CSV 헤더에서 토크 컬럼을 찾습니다.
+        /// "torque" 컬럼이 없으면 "Ax{axis}_Trq(%)" 또는 "AXIS{axis}_FBKTRQ" 패턴을 탐색합니다.
+        /// </summary>
+        private static string ResolveTorqueColumn(string[] headers, int axis)
+        {
+            if (headers == null) return null;
+            // 정확히 "torque" 컬럼이 있으면 그대로
+            string exact = headers.FirstOrDefault(h => string.Equals(h?.Trim(), "torque", StringComparison.OrdinalIgnoreCase));
+            if (exact != null) return exact;
+            // AjinCsvLogger: "Ax0_Trq(%)"
+            string ajin = headers.FirstOrDefault(h =>
+                h != null && System.Text.RegularExpressions.Regex.IsMatch(h.Trim(),
+                    $@"^Ax{axis}_Trq", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+            if (ajin != null) return ajin;
+            // WmxTorqueLogger: "AXIS0_FBKTRQ"
+            string wmx = headers.FirstOrDefault(h =>
+                h != null && System.Text.RegularExpressions.Regex.IsMatch(h.Trim(),
+                    $@"^AXIS{axis}_FBKTRQ", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+            if (wmx != null) return wmx;
+            // 축 무관하게 첫 번째 매칭
+            return headers.FirstOrDefault(h =>
+                h != null && System.Text.RegularExpressions.Regex.IsMatch(h.Trim(),
+                    @"Trq|torque|FBKTRQ", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
         }
 
         private bool TrySklOnnxScoreFromVec(OnnxSklModel skl, double[] vec,
@@ -2966,39 +2998,73 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         // ── DB 폴링 루프 ─────────────────────────────────────────────────────
+        private static readonly HashSet<string> TorqueYColumns =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "torque", "fbtrq", "trq" };
+
+        /// <summary>로드된 모델 중 하나라도 토크 채널을 사용하면 true</summary>
+        private bool HasTorqueModels()
+        {
+            foreach (var kv in _axisSklModels)
+                if (TorqueYColumns.Contains(kv.Value?.YColumn ?? "")) return true;
+            foreach (var kv in _axisModels)
+                if (TorqueYColumns.Contains(kv.Value?.Model?.YColumn ?? "")) return true;
+            return false;
+        }
+
         private async Task PollInfluxAsync(string device, string label, int pollSeconds, CancellationToken ct)
         {
+            string devArg = string.IsNullOrEmpty(device) ? null : device;
+            string lblArg = string.IsNullOrEmpty(label)  ? null : label;
+
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
                     await Task.Delay(pollSeconds * 1000, ct);
                     var now = DateTime.UtcNow;
-
-                    var segments = await _influxSource.QuerySegmentsAsync(
-                        string.IsNullOrEmpty(device) ? null : device,
-                        string.IsNullOrEmpty(label)  ? null : label,
-                        _influxLastQueried, now,
-                        segmentSeconds: 0.6,
-                        ct: ct);
-
+                    var from = _influxLastQueried;
                     _influxLastQueried = now;
 
-                    foreach (var seg in segments)
+                    int totalSegs = 0;
+
+                    // ── (A) accel 세그먼트 ───────────────────────────────────
+                    var accelSegs = await _influxSource.QuerySegmentsAsync(
+                        devArg, lblArg, from, now, segmentSeconds: 0.6, ct: ct);
+
+                    foreach (var seg in accelSegs)
                     {
                         lock (_influxSync)
                         {
                             if (_processedSegTimes.Contains(seg.StartTime)) continue;
                             _processedSegTimes.Add(seg.StartTime);
-                            // 메모리 누수 방지: 최대 10000개 유지
                             if (_processedSegTimes.Count > 10000) _processedSegTimes.Clear();
                         }
                         ProcessInfluxSegment(seg);
+                        totalSegs++;
                     }
 
-                    if (segments.Count > 0)
+                    // ── (B) torque 세그먼트 (토크 모델이 있을 때만) ──────────
+                    if (HasTorqueModels())
+                    {
+                        var torqueSegs = await _influxSource.QueryTorqueSegmentsAsync(
+                            devArg, lblArg, from, now, segmentSeconds: 0.6, ct: ct);
+
+                        foreach (var seg in torqueSegs)
+                        {
+                            lock (_influxSync)
+                            {
+                                if (_processedTorqueSegTimes.Contains(seg.StartTime)) continue;
+                                _processedTorqueSegTimes.Add(seg.StartTime);
+                                if (_processedTorqueSegTimes.Count > 10000) _processedTorqueSegTimes.Clear();
+                            }
+                            ProcessInfluxSegment(seg);
+                            totalSegs++;
+                        }
+                    }
+
+                    if (totalSegs > 0)
                         BeginInvoke(new Action(() =>
-                            lblStatus.Text = $"상태: DB 수집 중... 마지막={DateTime.Now:HH:mm:ss} ({segments.Count}세그)"));
+                            lblStatus.Text = $"상태: DB 수집 중... 마지막={DateTime.Now:HH:mm:ss} ({totalSegs}세그)"));
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
@@ -3502,10 +3568,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     int axis = axesByName.Count > 0 ? axesByName.First() : 0;
                     OnnxSklModel skl = kv.Value;
                     if (skl == null || skl.OnnxSession == null) continue;
-                    if (string.IsNullOrWhiteSpace(skl.YColumn) || !headerSet.Contains(skl.YColumn)) continue;
+                    if (string.IsNullOrWhiteSpace(skl.YColumn)) continue;
+
+                    // 토크 모델은 토크 CSV 컬럼 이름으로 재매핑 (예: "torque" → "Ax0_Trq(%)")
+                    string effectiveYColumn = TorqueYColumns.Contains(skl.YColumn)
+                        ? ResolveTorqueColumn(headers, axesByName.Count > 0 ? axesByName.First() : 0)
+                        : skl.YColumn;
+                    if (string.IsNullOrEmpty(effectiveYColumn) || !headerSet.Contains(effectiveYColumn)) continue;
 
                     bool isAnom; int predClass; float[] probs; double rawScore; string sklInfo;
-                    if (!TrySklOnnxScore(skl, path, out isAnom, out predClass, out probs, out rawScore, out sklInfo))
+                    if (!TrySklOnnxScore(skl, path, effectiveYColumn, out isAnom, out predClass, out probs, out rawScore, out sklInfo))
                         continue;
 
                     // 임계값 결정:
@@ -3535,7 +3607,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                     BeginInvoke(new Action(() =>
                     {
-                        RenderSampleChartSafe(path, skl.YColumn, axis);
+                        RenderSampleChartSafe(path, effectiveYColumn, axis);
 
                         if (level == AlarmLevel.Danger) Interlocked.Increment(ref cntDanger);
                         else if (level == AlarmLevel.Warning) Interlocked.Increment(ref cntWarning);
