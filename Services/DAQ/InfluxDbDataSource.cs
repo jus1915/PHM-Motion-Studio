@@ -37,16 +37,36 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
         private async Task<List<string>> GetTagValuesAsync(string tag, CancellationToken ct)
         {
-            // schema.tagValues 로 tag 값 목록 조회
-            var flux = $@"import ""influxdata/influxdb/schema""
+            // accel + torque 양쪽 measurement 에서 태그 값을 조회해 union
+            var tasks = new[]
+            {
+                ExecuteFluxAsyncSafe($@"import ""influxdata/influxdb/schema""
 schema.tagValues(
   bucket: ""{_cfg.Bucket}"",
   tag: ""{tag}"",
   predicate: (r) => r._measurement == ""accel"",
   start: -365d
-)";
-            var csv = await ExecuteFluxAsync(flux, ct).ConfigureAwait(false);
-            return ParseSingleColumnCsv(csv);
+)", ct),
+                ExecuteFluxAsyncSafe($@"import ""influxdata/influxdb/schema""
+schema.tagValues(
+  bucket: ""{_cfg.Bucket}"",
+  tag: ""{tag}"",
+  predicate: (r) => r._measurement == ""torque"",
+  start: -365d
+)", ct)
+            };
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            var result = new HashSet<string>();
+            foreach (var t in tasks)
+                foreach (var v in ParseSingleColumnCsv(t.Result))
+                    result.Add(v);
+            return result.OrderBy(s => s).ToList();
+        }
+
+        private async Task<string> ExecuteFluxAsyncSafe(string flux, CancellationToken ct)
+        {
+            try { return await ExecuteFluxAsync(flux, ct).ConfigureAwait(false); }
+            catch { return ""; }
         }
 
         // ── 데이터 시간 범위 ───────────────────────────────────────────────────
@@ -54,20 +74,37 @@ schema.tagValues(
             string device = null, string label = null, CancellationToken ct = default)
         {
             var filters = BuildFilters(device, label);
-            string tmpl = $@"from(bucket: ""{_cfg.Bucket}"")
+
+            // accel 과 torque 양쪽에서 시간 범위 조회 후 합집합
+            string accelTmpl = $@"from(bucket: ""{_cfg.Bucket}"")
   |> range(start: -365d)
   |> filter(fn: (r) => r._measurement == ""accel"")
 {filters}  |> filter(fn: (r) => r._field == ""x"")
   |> {{0}}()
   |> keep(columns: [""_time""])";
 
-            string csvFirst = await ExecuteFluxAsync(string.Format(tmpl, "first"), ct).ConfigureAwait(false);
-            string csvLast  = await ExecuteFluxAsync(string.Format(tmpl, "last"),  ct).ConfigureAwait(false);
+            string torqueTmpl = $@"from(bucket: ""{_cfg.Bucket}"")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == ""torque"")
+{filters}  |> filter(fn: (r) => r._field == ""fbtrq"")
+  |> {{0}}()
+  |> keep(columns: [""_time""])";
 
-            var first = ParseFirstTime(csvFirst);
-            var last  = ParseFirstTime(csvLast);
-            if (first == DateTime.MinValue) first = DateTime.UtcNow.AddHours(-1);
-            if (last  == DateTime.MinValue) last  = DateTime.UtcNow;
+            var tasks = new[]
+            {
+                ExecuteFluxAsyncSafe(string.Format(accelTmpl, "first"), ct),
+                ExecuteFluxAsyncSafe(string.Format(accelTmpl, "last"),  ct),
+                ExecuteFluxAsyncSafe(string.Format(torqueTmpl, "first"), ct),
+                ExecuteFluxAsyncSafe(string.Format(torqueTmpl, "last"),  ct),
+            };
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+
+            var times = tasks.Select(t => ParseFirstTime(t.Result))
+                             .Where(d => d != DateTime.MinValue)
+                             .ToList();
+
+            DateTime first = times.Count > 0 ? times.Min() : DateTime.UtcNow.AddHours(-1);
+            DateTime last  = times.Count > 0 ? times.Max() : DateTime.UtcNow;
             return (first, last);
         }
 
@@ -131,6 +168,100 @@ schema.tagValues(
             if (torqueByMs != null && torqueByMs.Count > 0)
                 FillTorque(segments, torqueByMs);
 
+            return segments;
+        }
+
+        // ── 토크 전용 세그먼트 조회 ──────────────────────────────────────────────
+        /// <summary>
+        /// InfluxDB "torque" measurement 에서 fbtrq 를 직접 조회해 세그먼트로 반환합니다.
+        /// 각 SignalSegment.Torque[] 에 데이터가 채워지고 X/Y/Z 는 null 입니다.
+        /// </summary>
+        public async Task<List<SignalSegment>> QueryTorqueSegmentsAsync(
+            string device, string label,
+            DateTime from, DateTime to,
+            double segmentSeconds = 1.0,
+            IProgress<string> progress = null,
+            CancellationToken ct = default)
+        {
+            if (segmentSeconds <= 0) segmentSeconds = 1.0;
+
+            var filters = BuildFilters(device, label);
+            string fromStr = from.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string toStr   = to.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+            progress?.Report("InfluxDB 토크 조회 중...");
+
+            var flux = $@"from(bucket: ""{_cfg.Bucket}"")
+  |> range(start: {fromStr}, stop: {toStr})
+  |> filter(fn: (r) => r._measurement == ""torque"")
+{filters}  |> filter(fn: (r) => r._field == ""fbtrq"")
+  |> keep(columns: [""_time"", ""_value""])
+  |> sort(columns: [""_time""])";
+
+            string csv = await ExecuteFluxAsync(flux, ct).ConfigureAwait(false);
+            progress?.Report("토크 데이터 파싱 중...");
+
+            var tvRows = ParseTimeValueCsv(csv);
+            if (tvRows.Count == 0) return new List<SignalSegment>();
+
+            // ms → sorted list for segmentizing
+            var sortedMs = tvRows.Keys.OrderBy(k => k).ToList();
+            progress?.Report($"총 {sortedMs.Count:N0}개 토크 샘플 → 세그먼트 분할 중...");
+
+            string lbl = label ?? "";
+            string dev = device ?? "unknown";
+            return SegmentizeTorque(sortedMs, tvRows, lbl, dev, segmentSeconds);
+        }
+
+        private static List<SignalSegment> SegmentizeTorque(
+            List<long> sortedMs, Dictionary<long, double> tvRows,
+            string label, string device, double segmentSeconds)
+        {
+            var segments = new List<SignalSegment>();
+            if (sortedMs.Count == 0) return segments;
+
+            long segSpanMs = (long)(segmentSeconds * 1000.0);
+            long segStartMs = sortedMs[0];
+            var buf = new List<long>();
+            int segIdx = 0;
+
+            Action flush = () =>
+            {
+                if (buf.Count < 4) return;
+                double firstMs = buf[0];
+                int n = buf.Count;
+                var time = new double[n];
+                var trq  = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    time[i] = (buf[i] - firstMs) / 1000.0;
+                    trq[i]  = tvRows[buf[i]];
+                }
+                string segLabel = string.IsNullOrEmpty(label) ? "seg" : label;
+                var startUtc = DateTimeOffset.FromUnixTimeMilliseconds(buf[0]).UtcDateTime;
+                segments.Add(new SignalSegment
+                {
+                    Name      = $"{segLabel}_{segIdx:D4}",
+                    Label     = label,
+                    Device    = device,
+                    StartTime = startUtc,
+                    Time      = time,
+                    Torque    = trq,
+                });
+                segIdx++;
+            };
+
+            foreach (long ms in sortedMs)
+            {
+                if (ms - segStartMs >= segSpanMs)
+                {
+                    flush();
+                    buf.Clear();
+                    segStartMs = ms;
+                }
+                buf.Add(ms);
+            }
+            flush();
             return segments;
         }
 

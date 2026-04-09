@@ -2247,7 +2247,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // 채널
             tbl.Controls.Add(new Label { Text = "채널:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 2);
             _cmbInfluxChannel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
-            _cmbInfluxChannel.Items.AddRange(new object[] { "x", "y", "z" });
+            _cmbInfluxChannel.Items.AddRange(new object[] { "x", "y", "z", "torque" });
             _cmbInfluxChannel.SelectedIndex = 0;
             tbl.Controls.Add(_cmbInfluxChannel, 1, 2);
 
@@ -2748,8 +2748,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     if (!IsDisposed) BeginInvoke(new Action(() => _lblInfluxStatus.Text = msg));
                 });
 
-                var segs = await _influxSource.QuerySegmentsAsync(
-                    device, label, from, to, segSecs, progress).ConfigureAwait(false);
+                string selectedChannel = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
+                bool isTorqueQuery = selectedChannel == "torque";
+
+                var segs = isTorqueQuery
+                    ? await _influxSource.QueryTorqueSegmentsAsync(device, label, from, to, segSecs, progress).ConfigureAwait(false)
+                    : await _influxSource.QuerySegmentsAsync(device, label, from, to, segSecs, progress).ConfigureAwait(false);
 
                 this.BeginInvoke(new Action(() =>
                 {
@@ -2829,7 +2833,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                                 chart.Series.Add(series);
                             }
                             series.Points.DataBindXY(dx, dy);
-                            chart.ChartAreas["MainArea"].AxisY.Title = channel + " (g)";
+                            chart.ChartAreas["MainArea"].AxisY.Title =
+                                (channel == "torque" || channel == "fbtrq") ? "torque (%)" : channel + " (g)";
                             AutoAdjustYAxis();
                             ScheduleFreqUpdate();
                         }
@@ -2852,7 +2857,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
 
             string channel = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
-            double sr = AppState.Accel; // InfluxDB 데이터는 가속도 샘플레이트 사용
+            bool isTorque = channel == "torque" || channel == "fbtrq";
+            // 토크는 AjinCsvLogger 폴링 주기로 결정 (기본 100Hz), 가속도는 AppState.Accel
+            double sr = isTorque ? 100.0 : AppState.Accel;
 
             var segments = _influxSegments.ToList(); // snapshot
             _featureTable.Clear();
