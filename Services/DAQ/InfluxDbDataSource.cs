@@ -161,7 +161,7 @@ schema.tagValues(
             progress?.Report($"총 {rows.Count:N0}개 샘플 → 세그먼트 분할 중...");
 
             string lbl = label ?? "";   // 빈 문자열 → AIForm에서 세션별 기본값(Normal 등) 적용
-            string dev = device ?? "unknown";
+            string dev = device;        // null 유지 → DeleteAsync 에서 device 필터 생략됨
             var segments = Segmentize(rows, lbl, dev, segmentSeconds);
 
             // 세그먼트별 토크 배열 채우기
@@ -209,7 +209,7 @@ schema.tagValues(
             progress?.Report($"총 {sortedMs.Count:N0}개 토크 샘플 → 세그먼트 분할 중...");
 
             string lbl = label ?? "";
-            string dev = device ?? "unknown";
+            string dev = device;        // null 유지 → DeleteAsync 에서 device 필터 생략됨
             return SegmentizeTorque(sortedMs, tvRows, lbl, dev, segmentSeconds);
         }
 
@@ -527,40 +527,42 @@ schema.tagValues(
             DateTime? from = null, DateTime? to = null,
             CancellationToken ct = default)
         {
-            // accel + torque 양쪽 measurement 삭제
-            await DeleteMeasurementAsync("accel",  device, label, from, to, ct).ConfigureAwait(false);
-            await DeleteMeasurementAsync("torque", device, label, from, to, ct).ConfigureAwait(false);
-        }
-
-        private async Task DeleteMeasurementAsync(
-            string measurement, string device, string label,
-            DateTime? from, DateTime? to,
-            CancellationToken ct)
-        {
+            // 밀리초 정밀도로 RFC3339 변환
             var start = (from ?? DateTime.UtcNow.AddYears(-10)).ToUniversalTime()
-                            .ToString("yyyy-MM-ddTHH:mm:ssZ");
+                            .ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
             var stop  = (to   ?? DateTime.UtcNow.AddYears(1)).ToUniversalTime()
-                            .ToString("yyyy-MM-ddTHH:mm:ssZ");
+                            .ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
 
-            var predicateParts = new List<string> { $"_measurement=\"{measurement}\"" };
+            // _measurement 를 predicate 에 포함하면 일부 InfluxDB 버전에서 무시됨.
+            // device + label 태그만으로 필터링하고, 버킷 내 모든 measurement(accel/torque) 를 한 번에 삭제.
+            var predicateParts = new List<string>();
             if (!string.IsNullOrEmpty(device))
                 predicateParts.Add($"device=\"{Esc(device)}\"");
             if (!string.IsNullOrEmpty(label))
                 predicateParts.Add($"label=\"{Esc(label)}\"");
 
-            string predicate = string.Join(" AND ", predicateParts);
-            string json = $"{{\"start\":\"{start}\",\"stop\":\"{stop}\",\"predicate\":\"{predicate.Replace("\"", "\\\"")}\"}}";
-
             string url = $"{_cfg.Url.TrimEnd('/')}/api/v2/delete" +
                          $"?org={Uri.EscapeDataString(_cfg.Org)}" +
                          $"&bucket={Uri.EscapeDataString(_cfg.Bucket)}";
+
+            string json;
+            if (predicateParts.Count > 0)
+            {
+                string predicate = string.Join(" AND ", predicateParts);
+                string escaped   = predicate.Replace("\"", "\\\"");
+                json = $"{{\"start\":\"{start}\",\"stop\":\"{stop}\",\"predicate\":\"{escaped}\"}}";
+            }
+            else
+            {
+                json = $"{{\"start\":\"{start}\",\"stop\":\"{stop}\"}}";
+            }
 
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var resp = await _http.PostAsync(url, content, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
                 string err = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                throw new InvalidOperationException($"InfluxDB 삭제 실패 ({measurement}, {(int)resp.StatusCode}): {err.Trim()}");
+                throw new InvalidOperationException($"InfluxDB 삭제 실패 ({(int)resp.StatusCode}): {err.Trim()}");
             }
         }
 

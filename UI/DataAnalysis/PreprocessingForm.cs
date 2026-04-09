@@ -174,6 +174,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private DateTimePicker _dtpTo;
         private NumericUpDown _nudSegSeconds;
         private Button _btnInfluxQuery;
+        private Button _btnInfluxFullRange;
         private Button _btnInfluxUploadCsv;
         private Button _btnInfluxDeleteSelected;
         private Button _btnInfluxDeleteLabel;
@@ -2277,10 +2278,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Width = 68, Minimum = 0.1m, Maximum = 60m, DecimalPlaces = 1,
                 Value = 1.0m, Increment = 0.5m, Margin = new Padding(0, 1, 4, 0)
             };
-            _btnInfluxQuery = new Button { Text = "조회 ▶", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0) };
+            _btnInfluxQuery = new Button { Text = "조회 ▶", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 4, 0) };
             _btnInfluxQuery.Click += BtnInfluxQuery_Click;
+            _btnInfluxFullRange = new Button { Text = "전체 기간", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0) };
+            _btnInfluxFullRange.Click += BtnInfluxFullRange_Click;
             segRow.Controls.Add(_nudSegSeconds);
             segRow.Controls.Add(_btnInfluxQuery);
+            segRow.Controls.Add(_btnInfluxFullRange);
             tbl.Controls.Add(segRow, 1, 5);
 
             // ── 상태 레이블 ───────────────────────────────────────────────────
@@ -2644,6 +2648,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void SetCrudButtonsEnabled(bool enabled)
         {
             _btnInfluxQuery.Enabled          = enabled;
+            _btnInfluxFullRange.Enabled      = enabled;
             _btnInfluxCheckAll.Enabled       = enabled;
             _btnInfluxUncheckAll.Enabled     = enabled;
             _btnInfluxUploadCsv.Enabled      = enabled;
@@ -2716,6 +2721,41 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     _lblInfluxStatus.ForeColor = Color.Red;
                     _lblInfluxStatus.Text = $"오류: {ex.Message}";
                 }));
+            }
+        }
+
+        private async void BtnInfluxFullRange_Click(object sender, EventArgs e)
+        {
+            _btnInfluxFullRange.Enabled = false;
+            _lblInfluxStatus.ForeColor = Color.Gray;
+            _lblInfluxStatus.Text = "전체 기간 조회 중...";
+            try
+            {
+                EnsureInfluxSource();
+                string device = _cmbInfluxDevice.SelectedItem?.ToString();
+                string label  = (_cmbInfluxLabel.SelectedIndex > 0)
+                                ? _cmbInfluxLabel.SelectedItem?.ToString()
+                                : null;
+                var (first, last) = await _influxSource.GetTimeRangeAsync(device, label).ConfigureAwait(false);
+                this.BeginInvoke(new Action(() =>
+                {
+                    _dtpFrom.Value = first.ToLocalTime();
+                    _dtpTo.Value   = last.ToLocalTime();
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"기간: {first.ToLocalTime():yy-MM-dd HH:mm} ~ {last.ToLocalTime():yy-MM-dd HH:mm}";
+                }));
+            }
+            catch (Exception ex)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"기간 조회 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                this.BeginInvoke(new Action(() => _btnInfluxFullRange.Enabled = true));
             }
         }
 
