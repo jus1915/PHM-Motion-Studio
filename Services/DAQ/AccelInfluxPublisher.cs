@@ -1,5 +1,6 @@
 using Newtonsoft.Json;
 using PHM_Project_DockPanel.Services;
+using PHM_Project_DockPanel.Services.Core;
 using System;
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -144,6 +145,15 @@ namespace PHM_Project_DockPanel.Services.DAQ
             int n  = block.GetLength(1);
             if (ch < 3 || n == 0) return;
 
+            // ── 이상치 필터: 각 채널(x/y/z)에 하드 리밋 + 플랫 신호 검사 ──────
+            for (int c = 0; c < 3; c++)
+            {
+                var col = new double[n];
+                for (int i = 0; i < n; i++) col[i] = block[c, i];
+                if (!SegmentValidator.IsValidForIngestion(col, isTorque: false, out _))
+                    return;   // 이상치 포함 블록 → 쓰기 생략
+            }
+
             // 블록 마지막 샘플 타임스탬프 (ms)
             long blockEndMs = new DateTimeOffset(timestampUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
             double intervalMs = 1000.0 / SampleRate;
@@ -187,6 +197,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public void FeedTorqueSample(string module, int axis, double fbtrq, DateTime timestampUtc)
         {
             if (!IsEnabled) return;
+            // 하드 리밋 검사 — 물리적으로 불가능한 토크값 필터
+            if (double.IsNaN(fbtrq) || double.IsInfinity(fbtrq)
+                || Math.Abs(fbtrq) > SegmentValidator.TorqueHardLimitPct) return;
 
             long tsMs = new DateTimeOffset(timestampUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
 

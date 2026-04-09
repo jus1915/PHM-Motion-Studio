@@ -239,7 +239,7 @@ schema.tagValues(
                 }
                 string segLabel = string.IsNullOrEmpty(label) ? "seg" : label;
                 var startUtc = DateTimeOffset.FromUnixTimeMilliseconds(buf[0]).UtcDateTime;
-                segments.Add(new SignalSegment
+                var seg = new SignalSegment
                 {
                     Name      = $"{segLabel}_{segIdx:D4}",
                     Label     = label,
@@ -247,7 +247,9 @@ schema.tagValues(
                     StartTime = startUtc,
                     Time      = time,
                     Torque    = trq,
-                });
+                };
+                if (SegmentValidator.IsValid(seg, out _))
+                    segments.Add(seg);
                 segIdx++;
             };
 
@@ -488,7 +490,7 @@ schema.tagValues(
                     zArr[i] = buf[i].Item4;
                 }
                 string segLabel = string.IsNullOrEmpty(label) ? "seg" : label;
-                segments.Add(new SignalSegment
+                var seg = new SignalSegment
                 {
                     Name      = $"{segLabel}_{segIdx:D4}",
                     Label     = label,   // 원래 값 보존 (빈 문자열도 허용)
@@ -498,7 +500,9 @@ schema.tagValues(
                     X         = xArr,
                     Y         = yArr,
                     Z         = zArr
-                });
+                };
+                if (SegmentValidator.IsValid(seg, out _))
+                    segments.Add(seg);
                 segIdx++;
             };
 

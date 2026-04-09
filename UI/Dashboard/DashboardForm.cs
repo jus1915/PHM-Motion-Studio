@@ -3080,6 +3080,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             if (seg == null) return;
 
+            // ── 이상치 필터 ─────────────────────────────────────────────────
+            if (!SegmentValidator.IsValid(seg, out var rejectReason))
+            {
+                AppendEventLog($"[SKIP] segment {seg.Name} — outlier rejected ({rejectReason})");
+                return;
+            }
+
             // 세그먼트 이름/장치에서 axis 파싱 (예: "Axis0", "seg_0000" 등)
             var axesByName = AxesFromDevice(seg.Device ?? "") ;
             if (axesByName.Count == 0) axesByName = AxesFromDevice(seg.Name ?? "");

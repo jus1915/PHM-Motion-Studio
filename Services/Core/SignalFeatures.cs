@@ -375,11 +375,22 @@ namespace PHM_Project_DockPanel.Services.Core
             if (featureKeysInOrder == null || featureKeysInOrder.Length == 0) return null;
             if (!TryParseCsvColumn(filePath, yColumn, out var ys)) return null;
 
+            // ── 이상치 필터 ─────────────────────────────────────────────────
+            bool isTorque = IsTorqueColumn(yColumn);
+            if (!SegmentValidator.IsValidChannel(ys, isTorque, out _)) return null;
+
             double fallbackSr = AppState.GetForColumn(yColumn);
             double sr = DetectSampleRateFromCsv(filePath, fallbackSr);
 
             return BuildFeatureVectorFromSeries(ys, featureKeysInOrder, sr);
         }
+
+        private static bool IsTorqueColumn(string col)
+            => col != null && (
+                col.IndexOf("torque", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                col.IndexOf("fbtrq",  StringComparison.OrdinalIgnoreCase) >= 0 ||
+                col.IndexOf("_trq",   StringComparison.OrdinalIgnoreCase) >= 0 ||
+                col.EndsWith("trq",   StringComparison.OrdinalIgnoreCase));
 
         public static double? GetFeatureValue(FeatureRow r, string key)
         {

@@ -169,6 +169,7 @@
     <Compile Include="Services\Core\AppState.cs" />
     <Compile Include="Services\Core\AxisConfig.cs" />
     <Compile Include="Services\Core\AxisMonitor.cs" />
+    <Compile Include="Services\Core\SegmentValidator.cs" />
     <Compile Include="Services\Core\SignalFeatures.cs" />
     <Compile Include="Services\DAQ\AccelInfluxPublisher.cs" />
     <Compile Include="Services\DAQ\InfluxDbDataSource.cs" />
