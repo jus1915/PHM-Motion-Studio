@@ -277,7 +277,7 @@ def main():
         "score_threshold": score_threshold,              # decision_function 기반 임계값 (None이면 label만 사용)
         "n_features": n_features,
         "k": params.get("k", 5),
-        "standardize": params.get("standardize", False),
+        "standardize": params.get("standardize", True),  # build_pipeline 기본값과 동일하게 True
     }
 
     # knn 타입 AD: C# kNN 거리 스코어와 일치시키기 위해 학습 벡터 저장
