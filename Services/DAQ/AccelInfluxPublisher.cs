@@ -179,6 +179,32 @@ namespace PHM_Project_DockPanel.Services.DAQ
             try { _queue.TryAdd(sb.ToString()); } catch { }
         }
 
+        // ── 토크 샘플 게시 (AjinCsvLogger 폴링 콜백에서 호출) ──────────────────
+        /// <summary>
+        /// 단일 토크 샘플을 InfluxDB "torque" measurement 에 기록합니다.
+        /// device = module, axis 태그 추가, fbtrq 필드.
+        /// </summary>
+        public void FeedTorqueSample(string module, int axis, double fbtrq, DateTime timestampUtc)
+        {
+            if (!IsEnabled) return;
+
+            long tsMs = new DateTimeOffset(timestampUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
+
+            var sb = new StringBuilder(128);
+            sb.Append("torque");
+            sb.Append(",device=").Append(EscapeTag(module));
+            sb.Append(",axis=").Append(axis.ToString(CultureInfo.InvariantCulture));
+            if (_sessionActive && !string.IsNullOrEmpty(_sessionId))
+                sb.Append(",session=").Append(EscapeTag(_sessionId));
+            var lbl = Label;
+            if (!string.IsNullOrEmpty(lbl))
+                sb.Append(",label=").Append(EscapeTag(lbl));
+            sb.AppendFormat(CultureInfo.InvariantCulture, " fbtrq={0:G8} ", fbtrq);
+            sb.Append(tsMs);
+
+            try { _queue.TryAdd(sb.ToString()); } catch { }
+        }
+
         // ── 백그라운드 워커 ─────────────────────────────────────────────────
         private async Task WorkerLoop(CancellationToken ct)
         {

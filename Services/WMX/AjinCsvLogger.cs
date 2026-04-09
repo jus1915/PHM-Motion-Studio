@@ -37,6 +37,15 @@ namespace PHM_Project_DockPanel.Services.WMX
         public bool IsLogging => _task != null && !_task.IsCompleted;
         public string OutputPath => _filePath;
 
+        /// <summary>장치 식별자 (InfluxDB device 태그). 미설정 시 _fileSuffix 사용.</summary>
+        public string Device { get; set; }
+
+        /// <summary>
+        /// 각 폴링 샘플마다 호출됩니다: (device, axis, fbtrq%, timestampUtc).
+        /// InfluxDB 실시간 토크 게시에 사용.
+        /// </summary>
+        public Action<string, int, double, DateTime> TorqueSampled;
+
         public AjinCsvLogger(
             Func<int, double> getPos,
             Func<int, double> getTorque,
@@ -128,6 +137,7 @@ namespace PHM_Project_DockPanel.Services.WMX
                                 : ((first || dtSec <= 0) ? 0.0 : (pos - prevPos[i]) / dtSec);
 
                             line.Append($",{pos:F4},{vel:F4},{trq:F4}");
+                            TorqueSampled?.Invoke(Device ?? _fileSuffix, ax, trq, DateTime.UtcNow);
                             if (hasCmdPos)
                             {
                                 double cmdPos = SafeGet(_getCmdPos, ax);

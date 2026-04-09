@@ -106,11 +106,32 @@ schema.tagValues(
             if (rows.Count == 0)
                 return new List<SignalSegment>();
 
+            // ── 토크 쿼리 (실패해도 무시) ────────────────────────────────────
+            Dictionary<long, double> torqueByMs = null;
+            try
+            {
+                var torqueFlux = $@"from(bucket: ""{_cfg.Bucket}"")
+  |> range(start: {fromStr}, stop: {toStr})
+  |> filter(fn: (r) => r._measurement == ""torque"")
+{filters}  |> filter(fn: (r) => r._field == ""fbtrq"")
+  |> keep(columns: [""_time"", ""_value""])
+  |> sort(columns: [""_time""])";
+                string torqueCsv = await ExecuteFluxAsync(torqueFlux, ct).ConfigureAwait(false);
+                torqueByMs = ParseTimeValueCsv(torqueCsv);
+            }
+            catch { /* 토크 데이터 없으면 빈 세그먼트로 계속 */ }
+
             progress?.Report($"총 {rows.Count:N0}개 샘플 → 세그먼트 분할 중...");
 
             string lbl = label ?? "";   // 빈 문자열 → AIForm에서 세션별 기본값(Normal 등) 적용
             string dev = device ?? "unknown";
-            return Segmentize(rows, lbl, dev, segmentSeconds);
+            var segments = Segmentize(rows, lbl, dev, segmentSeconds);
+
+            // 세그먼트별 토크 배열 채우기
+            if (torqueByMs != null && torqueByMs.Count > 0)
+                FillTorque(segments, torqueByMs);
+
+            return segments;
         }
 
         // ── 내부 Flux 실행 ────────────────────────────────────────────────────
@@ -227,6 +248,73 @@ schema.tagValues(
                           ParseCol(cols, iz)));
             }
             return rows;
+        }
+
+        /// <summary>(_time, _value) CSV → ms 타임스탬프 → value 딕셔너리</summary>
+        private static Dictionary<long, double> ParseTimeValueCsv(string csv)
+        {
+            var result = new Dictionary<long, double>();
+            if (string.IsNullOrWhiteSpace(csv)) return result;
+
+            int iTime = -1, iVal = -1;
+            bool headerFound = false;
+
+            foreach (var rawLine in csv.Split('\n'))
+            {
+                var line = rawLine.Trim();
+                if (string.IsNullOrEmpty(line) || line.StartsWith("#")) continue;
+
+                var cols = line.Split(',');
+                if (!headerFound)
+                {
+                    for (int i = 0; i < cols.Length; i++)
+                    {
+                        string h = cols[i].Trim();
+                        if (h == "_time")  iTime = i;
+                        else if (h == "_value") iVal  = i;
+                    }
+                    if (iTime >= 0) headerFound = true;
+                    continue;
+                }
+
+                if (iTime < 0 || iTime >= cols.Length) continue;
+                DateTime ts;
+                if (!DateTime.TryParse(cols[iTime].Trim(), null,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out ts)) continue;
+                double val;
+                if (iVal >= 0 && double.TryParse(cols[iVal].Trim(),
+                    NumberStyles.Float, CultureInfo.InvariantCulture, out val))
+                {
+                    long ms = new DateTimeOffset(ts.ToUniversalTime()).ToUnixTimeMilliseconds();
+                    result[ms] = val;
+                }
+            }
+            return result;
+        }
+
+        /// <summary>각 세그먼트의 Torque[] 를 torqueByMs 딕셔너리에서 채웁니다.</summary>
+        private static void FillTorque(List<SignalSegment> segments, Dictionary<long, double> torqueByMs)
+        {
+            foreach (var seg in segments)
+            {
+                if (seg.Time == null || seg.Time.Length == 0) continue;
+                long segStartMs = new DateTimeOffset(seg.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds();
+                var trq = new double[seg.Time.Length];
+                for (int i = 0; i < seg.Time.Length; i++)
+                {
+                    long tMs = segStartMs + (long)(seg.Time[i] * 1000.0);
+                    // 가장 가까운 토크 샘플 탐색 (±20ms 허용)
+                    double best = double.NaN;
+                    long bestDiff = 21;
+                    foreach (long key in torqueByMs.Keys)
+                    {
+                        long diff = Math.Abs(key - tMs);
+                        if (diff < bestDiff) { bestDiff = diff; best = torqueByMs[key]; }
+                    }
+                    trq[i] = double.IsNaN(best) ? 0.0 : best;
+                }
+                seg.Torque = trq;
+            }
         }
 
         private static double ParseCol(string[] cols, int idx)
@@ -473,22 +561,27 @@ schema.tagValues(
         public DateTime StartTime { get; set; }
 
         /// <summary>시간 배열 (초, 0-based)</summary>
-        public double[] Time { get; set; }
-        public double[] X    { get; set; }
-        public double[] Y    { get; set; }
-        public double[] Z    { get; set; }
+        public double[] Time   { get; set; }
+        public double[] X      { get; set; }
+        public double[] Y      { get; set; }
+        public double[] Z      { get; set; }
+        /// <summary>토크 배열 (%). AjinCsvLogger/WmxTorqueLogger 에서 게시된 경우에만 non-null.</summary>
+        public double[] Torque { get; set; }
 
         public int SampleCount => Time?.Length ?? 0;
 
-        /// <summary>"x" | "y" | "z" | "time_s" → 배열 반환</summary>
+        /// <summary>"x" | "y" | "z" | "torque" | "fbtrq" | "time_s" → 배열 반환</summary>
         public double[] GetChannel(string name)
         {
             switch ((name ?? "x").ToLower())
             {
-                case "y":      return Y;
-                case "z":      return Z;
-                case "time_s": return Time;
-                default:       return X;
+                case "y":              return Y;
+                case "z":              return Z;
+                case "time_s":         return Time;
+                case "torque":
+                case "fbtrq":
+                case "trq":            return Torque;
+                default:               return X;
             }
         }
     }

@@ -140,6 +140,8 @@ namespace PHM_Project_DockPanel
                     getTorque: ax => ajin.GetTorque(ax),
                     log:       msg => AppEvents.RaiseLog(msg),
                     getCmdPos: ax => ajin.GetCmdPos(ax));
+                ajinLogger.Device = "Ajin";
+                ajinLogger.TorqueSampled = (dev, ax, val, t) => _influxPublisher?.FeedTorqueSample(dev, ax, val, t);
                 _motion.SetAjinLogger(ajinLogger);
                 AppEvents.RaiseLog("[Ajin] AjinCsvLogger 주입 완료");
             }
@@ -154,6 +156,8 @@ namespace PHM_Project_DockPanel
                     log:        msg => AppEvents.RaiseLog(msg),
                     getVel:     ax => sim.GetVelocity(ax),
                     fileSuffix: "Simulator");
+                simLogger.Device = "Simulator";
+                simLogger.TorqueSampled = (dev, ax, val, t) => _influxPublisher?.FeedTorqueSample(dev, ax, val, t);
                 _motion.SetAjinLogger(simLogger);
                 AppEvents.RaiseLog("[Sim] 가상 토크 로거 주입 완료");
             }
