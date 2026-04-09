@@ -2256,7 +2256,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _dtpFrom = new DateTimePicker
             {
                 Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
-                Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now.AddHours(-1)
+                Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now.AddDays(-1)
             };
             tbl.Controls.Add(_dtpFrom, 1, 3);
 
@@ -2355,7 +2355,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 CheckOnClick = true,
                 BorderStyle = BorderStyle.FixedSingle
             };
-            _lstSegments.SelectedIndexChanged += LstSegments_SelectedIndexChanged;
+            _lstSegments.ItemCheck += LstSegments_ItemCheck;
 
             // 역순 추가 (Bottom→Fill→Top 순)
             pnl.Controls.Add(rowCrud2);   // Bottom (마지막)
@@ -2602,7 +2602,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             string device = _cmbInfluxDevice.SelectedItem?.ToString();
 
             if (MessageBox.Show(
-                $"device={device ?? "(전체)"}의 모든 accel 데이터를 삭제합니다.\n\n⚠ 이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
+                $"device={device ?? "(전체)"}의 모든 accel + torque 데이터를 삭제합니다.\n\n⚠ 이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
                 "전체 삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
 
             // 두 번 확인
@@ -2782,13 +2782,28 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
         }
 
-        private void LstSegments_SelectedIndexChanged(object sender, EventArgs e)
+        private void LstSegments_ItemCheck(object sender, ItemCheckEventArgs e)
         {
-            int idx = _lstSegments.SelectedIndex;
+            int idx = e.Index;
             if (idx < 0 || idx >= _influxSegments.Count) return;
             var seg = _influxSegments[idx];
-            string ch = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
-            AddInfluxSeriesToChart(seg, ch);
+            string seriesName = seg.Name;
+
+            if (e.NewValue == CheckState.Checked)
+            {
+                string ch = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
+                AddInfluxSeriesToChart(seg, ch);
+            }
+            else
+            {
+                // 체크 해제 → 차트에서 시리즈 제거
+                lock (chartSync)
+                {
+                    var s = chart.Series.FindByName(seriesName);
+                    if (s != null) chart.Series.Remove(s);
+                }
+                AutoAdjustYAxis();
+            }
         }
 
         private void AddInfluxSeriesToChart(SignalSegment seg, string channel)

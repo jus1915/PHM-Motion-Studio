@@ -527,21 +527,28 @@ schema.tagValues(
             DateTime? from = null, DateTime? to = null,
             CancellationToken ct = default)
         {
+            // accel + torque 양쪽 measurement 삭제
+            await DeleteMeasurementAsync("accel",  device, label, from, to, ct).ConfigureAwait(false);
+            await DeleteMeasurementAsync("torque", device, label, from, to, ct).ConfigureAwait(false);
+        }
+
+        private async Task DeleteMeasurementAsync(
+            string measurement, string device, string label,
+            DateTime? from, DateTime? to,
+            CancellationToken ct)
+        {
             var start = (from ?? DateTime.UtcNow.AddYears(-10)).ToUniversalTime()
                             .ToString("yyyy-MM-ddTHH:mm:ssZ");
             var stop  = (to   ?? DateTime.UtcNow.AddYears(1)).ToUniversalTime()
                             .ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-            // predicate 조립
-            var predicateParts = new List<string> { "_measurement=\"accel\"" };
+            var predicateParts = new List<string> { $"_measurement=\"{measurement}\"" };
             if (!string.IsNullOrEmpty(device))
                 predicateParts.Add($"device=\"{Esc(device)}\"");
             if (!string.IsNullOrEmpty(label))
                 predicateParts.Add($"label=\"{Esc(label)}\"");
 
             string predicate = string.Join(" AND ", predicateParts);
-
-            // JSON body
             string json = $"{{\"start\":\"{start}\",\"stop\":\"{stop}\",\"predicate\":\"{predicate.Replace("\"", "\\\"")}\"}}";
 
             string url = $"{_cfg.Url.TrimEnd('/')}/api/v2/delete" +
@@ -553,7 +560,7 @@ schema.tagValues(
             if (!resp.IsSuccessStatusCode)
             {
                 string err = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                throw new InvalidOperationException($"InfluxDB 삭제 실패 ({(int)resp.StatusCode}): {err.Trim()}");
+                throw new InvalidOperationException($"InfluxDB 삭제 실패 ({measurement}, {(int)resp.StatusCode}): {err.Trim()}");
             }
         }
 
