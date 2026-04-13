@@ -116,6 +116,18 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private double _optThresh = double.NaN;
         private bool _updatingThreshold = false;
 
+        // ── DL 학습 탭 ───────────────────────────────────────────────────────
+        private TextBox          _dlDataDir, _dlOutputPath, _dlLabelColumn, _dlLr, _dlMlflowUri;
+        private CheckBox         _dlChX, _dlChY, _dlChZ;
+        private ListBox          _dlClassList;
+        private TextBox          _dlNewClassName;
+        private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
+        private Button           _dlBtnTrain, _dlBtnStop;
+        private RichTextBox      _dlLog;
+        private ProgressBar      _dlProgress;
+        private Label            _dlStatus;
+        private System.Diagnostics.Process _dlProc;
+
         public AIForm()
         {
             Text = "AI";
@@ -366,6 +378,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tabs.TabPages.Add(tabTrain);
             tabs.TabPages.Add(tabVal);
             tabs.TabPages.Add(tabEval);
+            tabs.TabPages.Add(BuildDlTab());
             Controls.Add(tabs);
 
             ClientSize = new Size(1180, 740);
@@ -1197,6 +1210,384 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (mean == null || std == null) return; int n = X.Length, d = X[0].Length;
                 for (int i = 0; i < n; i++) for (int j = 0; j < d; j++) X[i][j] = (X[i][j] - mean[j]) / (std[j] == 0 ? 1 : std[j]);
             }
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        //  DL 학습 탭
+        // ════════════════════════════════════════════════════════════════════
+
+        private TabPage BuildDlTab()
+        {
+            var tab = new TabPage("DL 학습");
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            // ── 상단: 설정 2열 ────────────────────────────────────────────
+            var top2 = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(6, 4, 6, 0) };
+            top2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            top2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+
+            top2.Controls.Add(BuildDlLeftPanel(),  0, 0);
+            top2.Controls.Add(BuildDlRightPanel(), 1, 0);
+
+            // ── 하단: 로그 + 진행 ─────────────────────────────────────────
+            var botLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(6, 0, 6, 6) };
+            botLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); // 상태 + 프로그레스바
+            botLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); // 버튼
+            botLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 로그
+
+            // 프로그레스 행
+            var progRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlStatus   = new Label { AutoSize = true, Text = "대기 중", Margin = new Padding(0, 4, 8, 0) };
+            _dlProgress = new ProgressBar { Width = 300, Height = 20, Minimum = 0, Maximum = 100 };
+            progRow.Controls.Add(_dlStatus);
+            progRow.Controls.Add(_dlProgress);
+
+            // 버튼 행
+            var btnRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlBtnTrain = new Button { Text = "▶ DL 학습 시작", Width = 130, Height = 24, BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            _dlBtnStop  = new Button { Text = "■ 중지",          Width = 80,  Height = 24, Enabled = false };
+            _dlBtnTrain.Click += (s, e) => StartDlTrainingAsync();
+            _dlBtnStop.Click  += (s, e) => StopDlTraining();
+            btnRow.Controls.Add(_dlBtnTrain);
+            btnRow.Controls.Add(_dlBtnStop);
+
+            // 로그
+            _dlLog = new RichTextBox
+            {
+                Dock = DockStyle.Fill, ReadOnly = true, BackColor = Color.FromArgb(30, 30, 30),
+                ForeColor = Color.LightGreen, Font = new Font("Consolas", 9f),
+                ScrollBars = RichTextBoxScrollBars.Vertical
+            };
+
+            botLayout.Controls.Add(progRow,  0, 0);
+            botLayout.Controls.Add(btnRow,   0, 1);
+            botLayout.Controls.Add(_dlLog,   0, 2);
+
+            root.Controls.Add(top2,      0, 0);
+            root.Controls.Add(botLayout, 0, 1);
+            tab.Controls.Add(root);
+            return tab;
+        }
+
+        private GroupBox BuildDlLeftPanel()
+        {
+            var grp = new GroupBox { Text = "데이터 소스 / 클래스", Dock = DockStyle.Fill, Padding = new Padding(8) };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6 };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 5; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 클래스 리스트
+
+            int row = 0;
+
+            // 데이터 폴더
+            tl.Controls.Add(Lbl("데이터 폴더:"), 0, row);
+            _dlDataDir = new TextBox { Dock = DockStyle.Fill, Text = @"C:\Data\PHM_Logs\Signals" };
+            var dirRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            dirRow.Controls.Add(_dlDataDir);
+            _dlDataDir.Width = 200;
+            var btnBrowseDir = new Button { Text = "…", Width = 28, Height = 22 };
+            btnBrowseDir.Click += (s, e) => {
+                using (var fbd = new FolderBrowserDialog { SelectedPath = _dlDataDir.Text })
+                    if (fbd.ShowDialog() == DialogResult.OK) _dlDataDir.Text = fbd.SelectedPath;
+            };
+            dirRow.Controls.Add(btnBrowseDir);
+            tl.Controls.Add(dirRow, 1, row++);
+
+            // 입력 채널
+            tl.Controls.Add(Lbl("입력 채널:"), 0, row);
+            var chRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+            _dlChX = new CheckBox { Text = "x", Checked = true, AutoSize = true };
+            _dlChY = new CheckBox { Text = "y", Checked = true, AutoSize = true };
+            _dlChZ = new CheckBox { Text = "z", Checked = true, AutoSize = true };
+            chRow.Controls.AddRange(new Control[] { _dlChX, _dlChY, _dlChZ });
+            tl.Controls.Add(chRow, 1, row++);
+
+            // Label 컬럼
+            tl.Controls.Add(Lbl("Label 컬럼:"), 0, row);
+            _dlLabelColumn = new TextBox { Dock = DockStyle.Fill, Text = "Label" };
+            tl.Controls.Add(_dlLabelColumn, 1, row++);
+
+            // MLflow URI
+            tl.Controls.Add(Lbl("MLflow URI:"), 0, row);
+            _dlMlflowUri = new TextBox { Dock = DockStyle.Fill, Text = "http://localhost:5000" };
+            tl.Controls.Add(_dlMlflowUri, 1, row++);
+
+            // 클래스 관리 헤더
+            tl.Controls.Add(Lbl("결함 클래스:"), 0, row);
+            var addRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlNewClassName = new TextBox { Width = 120, Height = 22 };
+            var btnAddClass = new Button { Text = "+ 추가", Width = 60, Height = 22 };
+            var btnDelClass = new Button { Text = "삭제",   Width = 50, Height = 22 };
+            btnAddClass.Click += (s, e) => {
+                var nm = _dlNewClassName.Text.Trim();
+                if (!string.IsNullOrEmpty(nm) && !_dlClassList.Items.Contains(nm))
+                { _dlClassList.Items.Add(nm); _dlNewClassName.Clear(); }
+            };
+            btnDelClass.Click += (s, e) => {
+                if (_dlClassList.SelectedIndex >= 0) _dlClassList.Items.RemoveAt(_dlClassList.SelectedIndex);
+            };
+            addRow.Controls.AddRange(new Control[] { _dlNewClassName, btnAddClass, btnDelClass });
+            tl.Controls.Add(addRow, 1, row++);
+
+            // 클래스 리스트 (2열 span)
+            _dlClassList = new ListBox { Dock = DockStyle.Fill, SelectionMode = SelectionMode.One };
+            foreach (var c in new[] { "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness" })
+                _dlClassList.Items.Add(c);
+            tl.SetColumnSpan(_dlClassList, 2);
+            tl.Controls.Add(_dlClassList, 0, row);
+
+            grp.Controls.Add(tl);
+            return grp;
+        }
+
+        private GroupBox BuildDlRightPanel()
+        {
+            var grp = new GroupBox { Text = "모델 설정 / 출력", Dock = DockStyle.Fill, Padding = new Padding(8) };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 9 };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 9; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+
+            int row = 0;
+
+            // 윈도우 크기
+            tl.Controls.Add(Lbl("윈도우(샘플):"), 0, row);
+            _dlWindowSize = Nud(64, 65536, 1024); tl.Controls.Add(_dlWindowSize, 1, row++);
+
+            // 스트라이드
+            tl.Controls.Add(Lbl("스트라이드:"), 0, row);
+            _dlStride = Nud(1, 65536, 512); tl.Controls.Add(_dlStride, 1, row++);
+
+            // 에포크
+            tl.Controls.Add(Lbl("에포크:"), 0, row);
+            _dlEpochs = Nud(1, 10000, 50); tl.Controls.Add(_dlEpochs, 1, row++);
+
+            // 배치 크기
+            tl.Controls.Add(Lbl("배치 크기:"), 0, row);
+            _dlBatch = Nud(1, 1024, 32); tl.Controls.Add(_dlBatch, 1, row++);
+
+            // 학습률
+            tl.Controls.Add(Lbl("학습률:"), 0, row);
+            _dlLr = new TextBox { Dock = DockStyle.Fill, Text = "0.001" };
+            tl.Controls.Add(_dlLr, 1, row++);
+
+            // 검증 비율
+            tl.Controls.Add(Lbl("검증 비율(%):"), 0, row);
+            _dlValSplit = Nud(5, 50, 20); tl.Controls.Add(_dlValSplit, 1, row++);
+
+            // 출력 경로
+            tl.Controls.Add(Lbl("출력 모델:"), 0, row);
+            _dlOutputPath = new TextBox { Dock = DockStyle.Fill, Text = @"C:\Data\PHM_Logs\models\cnn1d_fd.onnx" };
+            var outRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlOutputPath.Width = 180;
+            var btnOutPath = new Button { Text = "…", Width = 28, Height = 22 };
+            btnOutPath.Click += (s, e) => {
+                using (var sfd = new SaveFileDialog { Filter = "ONNX|*.onnx", FileName = System.IO.Path.GetFileName(_dlOutputPath.Text) })
+                    if (sfd.ShowDialog() == DialogResult.OK) _dlOutputPath.Text = sfd.FileName;
+            };
+            outRow.Controls.Add(_dlOutputPath);
+            outRow.Controls.Add(btnOutPath);
+            tl.Controls.Add(outRow, 1, row++);
+
+            // Python 경로 (기존 txtPythonPath 공유 — 텍스트만 표시)
+            tl.Controls.Add(Lbl("Python:"), 0, row);
+            var pyNote = new Label { AutoSize = true, Text = "← 학습 탭의 Python 경로 사용", ForeColor = Color.Gray, Margin = new Padding(0, 6, 0, 0) };
+            tl.Controls.Add(pyNote, 1, row++);
+
+            grp.Controls.Add(tl);
+            return grp;
+        }
+
+        private static Label Lbl(string text) =>
+            new Label { Text = text, AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+
+        private static NumericUpDown Nud(int min, int max, int val) =>
+            new NumericUpDown { Minimum = min, Maximum = max, Value = val, Dock = DockStyle.Fill };
+
+        // ── DL 학습 실행 ─────────────────────────────────────────────────────
+
+        private async void StartDlTrainingAsync()
+        {
+            // ── 유효성 검사 ──────────────────────────────────────────────────
+            string dataDir = _dlDataDir?.Text?.Trim() ?? "";
+            if (!System.IO.Directory.Exists(dataDir))
+            { MessageBox.Show("데이터 폴더가 존재하지 않습니다:\n" + dataDir, "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            string outputPath = _dlOutputPath?.Text?.Trim() ?? "";
+            if (string.IsNullOrEmpty(outputPath))
+            { MessageBox.Show("출력 모델 경로를 입력하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            var channels = new List<string>();
+            if (_dlChX.Checked) channels.Add("x");
+            if (_dlChY.Checked) channels.Add("y");
+            if (_dlChZ.Checked) channels.Add("z");
+            if (channels.Count == 0)
+            { MessageBox.Show("입력 채널을 하나 이상 선택하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            var classNames = _dlClassList.Items.Cast<string>().ToList();
+            if (classNames.Count < 2)
+            { MessageBox.Show("결함 클래스를 2개 이상 입력하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            if (!double.TryParse(_dlLr.Text.Trim(), System.Globalization.NumberStyles.Float,
+                CultureInfo.InvariantCulture, out double lr) || lr <= 0)
+            { MessageBox.Show("학습률 형식이 잘못됐습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            // ── Python 및 스크립트 확인 ──────────────────────────────────────
+            string python = FindPythonExe(txtPythonPath?.Text?.Trim() ?? "");
+            if (python == null)
+            { MessageBox.Show("Python을 찾을 수 없습니다.\n학습 탭의 Python 경로를 설정하세요.", "Python 없음", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            string scriptPath = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".",
+                "scripts", "train_dl_model.py");
+            if (!System.IO.File.Exists(scriptPath))
+            { MessageBox.Show("train_dl_model.py 를 찾을 수 없습니다:\n" + scriptPath, "스크립트 없음", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            // ── 출력 폴더 생성 ────────────────────────────────────────────────
+            try { System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(outputPath)); } catch { }
+
+            // ── params JSON 작성 ─────────────────────────────────────────────
+            int totalEpochs = (int)_dlEpochs.Value;
+            string mlflowUri = _dlMlflowUri?.Text?.Trim() ?? "";
+            var paramsObj = new Dictionary<string, object>
+            {
+                ["data_dir"]            = dataDir,
+                ["output"]              = outputPath,
+                ["channels"]            = channels.ToArray(),
+                ["label_column"]        = _dlLabelColumn?.Text?.Trim() ?? "Label",
+                ["class_names"]         = classNames.ToArray(),
+                ["window_size"]         = (int)_dlWindowSize.Value,
+                ["stride"]              = (int)_dlStride.Value,
+                ["epochs"]              = totalEpochs,
+                ["batch_size"]          = (int)_dlBatch.Value,
+                ["lr"]                  = lr,
+                ["val_split"]           = (double)_dlValSplit.Value / 100.0,
+                ["seed"]                = 42,
+                ["mlflow_tracking_uri"] = mlflowUri,
+                ["mlflow_experiment"]   = "PHM-DL",
+            };
+            string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_dl_params.json");
+            System.IO.File.WriteAllText(paramsPath,
+                JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = true }),
+                new System.Text.UTF8Encoding(false));
+
+            // ── UI 상태 전환 ─────────────────────────────────────────────────
+            _dlLog.Clear();
+            _dlProgress.Value = 0;
+            _dlBtnTrain.Enabled = false;
+            _dlBtnStop.Enabled  = true;
+            _dlStatus.Text = "학습 중...";
+            AppendDlLog($"[시작] python \"{scriptPath}\"");
+            AppendDlLog($"[params] {paramsPath}");
+            AppendDlLog("");
+
+            // ── 비동기 프로세스 실행 ─────────────────────────────────────────
+            await System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(python, $"\"{scriptPath}\" --params \"{paramsPath}\"")
+                    {
+                        UseShellExecute        = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError  = true,
+                        CreateNoWindow         = true,
+                    };
+                    _dlProc = System.Diagnostics.Process.Start(psi);
+
+                    // stderr → 로그 (별도 스레드)
+                    _dlProc.ErrorDataReceived += (s2, ea) =>
+                    {
+                        if (ea.Data != null) BeginInvoke(new Action(() => AppendDlLog("[ERR] " + ea.Data, Color.Orange)));
+                    };
+                    _dlProc.BeginErrorReadLine();
+
+                    // stdout → 에포크 진행 파싱
+                    string line;
+                    while ((line = _dlProc.StandardOutput.ReadLine()) != null)
+                    {
+                        string captured = line;
+                        BeginInvoke(new Action(() =>
+                        {
+                            AppendDlLog(captured);
+                            // {"epoch": N, "loss": ..., "val_acc": ...} 파싱해 진행률 갱신
+                            try
+                            {
+                                using (var doc = JsonDocument.Parse(captured))
+                                {
+                                    if (doc.RootElement.TryGetProperty("epoch", out var ep))
+                                    {
+                                        int pct = Math.Min(100, (int)(ep.GetInt32() * 100.0 / totalEpochs));
+                                        _dlProgress.Value = pct;
+                                        if (doc.RootElement.TryGetProperty("val_acc", out var va))
+                                            _dlStatus.Text = $"에포크 {ep.GetInt32()}/{totalEpochs}  val_acc={va.GetDouble():F3}";
+                                    }
+                                    // 최종 결과 행
+                                    if (doc.RootElement.TryGetProperty("accuracy", out var acc))
+                                        _dlStatus.Text = $"완료  최종 정확도={acc.GetDouble():F3}";
+                                }
+                            }
+                            catch { /* JSON 아닌 행 무시 */ }
+                        }));
+                    }
+
+                    _dlProc.WaitForExit();
+                    int exitCode = _dlProc.ExitCode;
+
+                    BeginInvoke(new Action(() =>
+                    {
+                        _dlProgress.Value   = exitCode == 0 ? 100 : _dlProgress.Value;
+                        _dlBtnTrain.Enabled = true;
+                        _dlBtnStop.Enabled  = false;
+                        _dlProc = null;
+
+                        if (exitCode == 0)
+                        {
+                            _dlStatus.Text = "완료 ✓";
+                            AppendDlLog($"\n모델 저장: {outputPath}", Color.Cyan);
+                            MessageBox.Show($"DL 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX 분류 모델로 로드하세요.",
+                                "학습 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                        else
+                        {
+                            _dlStatus.Text = $"오류 (exitcode={exitCode})";
+                            AppendDlLog($"학습 실패 — exitcode={exitCode}", Color.Red);
+                        }
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        _dlBtnTrain.Enabled = true;
+                        _dlBtnStop.Enabled  = false;
+                        _dlStatus.Text = "실행 오류";
+                        AppendDlLog("실행 오류: " + ex.Message, Color.Red);
+                    }));
+                }
+            });
+        }
+
+        private void StopDlTraining()
+        {
+            try { _dlProc?.Kill(); } catch { }
+            _dlBtnTrain.Enabled = true;
+            _dlBtnStop.Enabled  = false;
+            _dlStatus.Text = "중단됨";
+            AppendDlLog("사용자에 의해 중단됨", Color.Yellow);
+        }
+
+        private void AppendDlLog(string text, Color? color = null)
+        {
+            if (_dlLog == null) return;
+            _dlLog.SelectionStart  = _dlLog.TextLength;
+            _dlLog.SelectionLength = 0;
+            _dlLog.SelectionColor  = color ?? Color.LightGreen;
+            _dlLog.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + text + "\n");
+            _dlLog.ScrollToCaret();
         }
     }
 }
