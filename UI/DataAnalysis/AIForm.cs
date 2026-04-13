@@ -122,7 +122,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private ListBox          _dlClassList;
         private TextBox          _dlNewClassName;
         private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
-        private Button           _dlBtnTrain, _dlBtnStop;
+        private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv;
         private RichTextBox      _dlLog;
         private ProgressBar      _dlProgress;
         private Label            _dlStatus;
@@ -1248,10 +1248,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             var btnRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
             _dlBtnTrain = new Button { Text = "▶ DL 학습 시작", Width = 130, Height = 24, BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
             _dlBtnStop  = new Button { Text = "■ 중지",          Width = 80,  Height = 24, Enabled = false };
+            _dlBtnVenv  = new Button { Text = "🐍 가상환경 설정", Width = 120, Height = 24 };
             _dlBtnTrain.Click += (s, e) => StartDlTrainingAsync();
             _dlBtnStop.Click  += (s, e) => StopDlTraining();
+            _dlBtnVenv.Click  += (s, e) => RunSetupVenv();
             btnRow.Controls.Add(_dlBtnTrain);
             btnRow.Controls.Add(_dlBtnStop);
+            btnRow.Controls.Add(_dlBtnVenv);
 
             // 로그
             _dlLog = new RichTextBox
@@ -1436,9 +1439,23 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             { MessageBox.Show("학습률 형식이 잘못됐습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
             // ── Python 및 스크립트 확인 ──────────────────────────────────────
-            string python = FindPythonExe(txtPythonPath?.Text?.Trim() ?? "");
+            // .venv 가상환경을 우선 사용 (setup_venv.bat 으로 생성된 경우)
+            string scriptsDir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
+            string venvPython = System.IO.Path.Combine(scriptsDir, ".venv", "Scripts", "python.exe");
+            string python = System.IO.File.Exists(venvPython)
+                ? venvPython
+                : FindPythonExe(txtPythonPath?.Text?.Trim() ?? "");
             if (python == null)
-            { MessageBox.Show("Python을 찾을 수 없습니다.\n학습 탭의 Python 경로를 설정하세요.", "Python 없음", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+            {
+                MessageBox.Show(
+                    "Python을 찾을 수 없습니다.\n\n" +
+                    "• [🐍 가상환경 설정] 버튼을 클릭하여 .venv 생성\n" +
+                    "• 또는 학습 탭의 Python 경로를 설정하세요.",
+                    "Python 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            AppendDlLog($"[Python] {python}");
 
             string scriptPath = System.IO.Path.Combine(
                 System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".",
@@ -1569,6 +1586,34 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     }));
                 }
             });
+        }
+
+        private void RunSetupVenv()
+        {
+            string scriptsDir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
+            string batPath = System.IO.Path.Combine(scriptsDir, "setup_venv.bat");
+            if (!System.IO.File.Exists(batPath))
+            {
+                MessageBox.Show("setup_venv.bat 를 찾을 수 없습니다:\n" + batPath,
+                    "파일 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName         = batPath,
+                    WorkingDirectory = scriptsDir,
+                    UseShellExecute  = true,
+                });
+                AppendDlLog("[가상환경] setup_venv.bat 실행 중 — 완료 후 학습 시작 가능합니다.", Color.Cyan);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("setup_venv.bat 실행 실패:\n" + ex.Message,
+                    "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void StopDlTraining()

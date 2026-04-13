@@ -1,0 +1,15 @@
+# PHM-Motion-Studio DL 학습 의존성
+# 설치: pip install -r requirements_dl.txt
+# 또는 setup_venv.bat 실행
+
+numpy
+scikit-learn
+skl2onnx
+onnx
+onnxscript
+
+# PyTorch CPU (수동 설치 권장)
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# 선택: 실험 추적
+# mlflow

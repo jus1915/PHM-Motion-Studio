@@ -43,9 +43,10 @@ def _ensure_packages() -> None:
     """
     # (import_name, pip_name, extra_args)
     REQUIRED = [
-        ("numpy", "numpy", []),
-        ("sklearn", "scikit-learn", []),
-        ("onnx", "onnx", []),
+        ("numpy",      "numpy",       []),
+        ("sklearn",    "scikit-learn",[]),
+        ("onnx",       "onnx",        []),
+        ("onnxscript", "onnxscript",  []),  # PyTorch 2.6+ ONNX exporter 의존성
     ]
     missing_general = []
     for import_name, pip_name, _ in REQUIRED:
