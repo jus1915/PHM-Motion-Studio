@@ -31,6 +31,11 @@ namespace PHM_Project_DockPanel.Services
         public static void RaiseInfluxLabelChanged(string label)
             => InfluxLabelChanged?.Invoke(label ?? "");
 
+        /// <summary>InfluxDB URL/Token 변경 (UI에서 편집 후 저장 시 발생)</summary>
+        public static event Action<string, string> InfluxConfigChanged;
+        public static void RaiseInfluxConfigChanged(string url, string token)
+            => InfluxConfigChanged?.Invoke(url ?? "", token ?? "");
+
         public enum LogDataKind { Torque, Accel }
 
         public static event Action<LogDataKind, string> ShowLogGraphRequestedEx;

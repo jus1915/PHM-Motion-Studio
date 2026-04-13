@@ -255,6 +255,28 @@ namespace PHM_Project_DockPanel
                 AppState.CurrentLabel = label;  // 로컬 CSV 저장 경로에도 반영
             };
 
+            // InfluxDB URL/Token 변경 (DashboardForm 저장 버튼)
+            AppEvents.InfluxConfigChanged += (url, token) =>
+            {
+                if (_influxPublisher == null) return;
+                _influxPublisher.Config.Url   = url;
+                _influxPublisher.Config.Token = token;
+
+                // JSON 파일에도 반영
+                var candidatePaths = new[]
+                {
+                    Path.Combine(ResolveCfgDir(), "influx_config.json"),
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
+                };
+                string savePath = null;
+                foreach (var p in candidatePaths)
+                    if (File.Exists(p)) { savePath = p; break; }
+                if (savePath == null) savePath = candidatePaths[0];
+
+                _influxPublisher.Config.Save(savePath);
+                AppEvents.RaiseLog($"[InfluxDB] 설정 변경 적용: {url}");
+            };
+
             // Simulator 창 닫기 요청
             AppEvents.RequestCloseSimulator += () =>
             {
