@@ -370,39 +370,52 @@ class CNN1DClassifier(nn.Module):
     입력 포맷: (B, T, C) — channels last (C# 대시보드와 동일).
     내부적으로 (B, C, T)로 변환 후 Conv1d 블록을 통과합니다.
 
-    아키텍처:
-        Conv1d(C→32,  k=7, pad=3) → BN → ReLU → MaxPool(2)
-        Conv1d(32→64, k=5, pad=2) → BN → ReLU → MaxPool(2)
-        Conv1d(64→128,k=3, pad=1) → BN → ReLU → MaxPool(2)
-        Conv1d(128→256,k=3,pad=1) → BN → ReLU
-        AdaptiveAvgPool1d(1) → Flatten → Linear(256 → n_classes)
+    아키텍처 (n_windows에 따라 자동 선택):
+        tiny  (<300)  : Conv(C→32) → Conv(32→64)  → GAP → FC
+        small (<1000) : Conv(C→32) → Conv(32→64)  → Conv(64→128) → GAP → FC
+        full  (≥1000) : Conv(C→32) → ... → Conv(128→256) → GAP → FC
     """
 
-    def __init__(self, n_channels: int, n_classes: int) -> None:
+    def __init__(self, n_channels: int, n_classes: int, n_windows: int = 9999) -> None:
         super().__init__()
-        self.conv_blocks = nn.Sequential(
-            # Block 1
-            nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-            nn.BatchNorm1d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=2),
-            # Block 2
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=2),
-            # Block 3
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=2),
-            # Block 4
-            nn.Conv1d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-        )
+
+        if n_windows < 300:
+            # tiny: 2블록 — 소규모 데이터셋용
+            layers = [
+                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
+                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+                nn.Conv1d(32, 64, kernel_size=5, padding=2),
+                nn.BatchNorm1d(64), nn.ReLU(inplace=True),
+            ]
+            fc_in = 64
+        elif n_windows < 1000:
+            # small: 3블록 — 중규모 데이터셋용
+            layers = [
+                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
+                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+                nn.Conv1d(32, 64, kernel_size=5, padding=2),
+                nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+                nn.Conv1d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm1d(128), nn.ReLU(inplace=True),
+            ]
+            fc_in = 128
+        else:
+            # full: 4블록 — 대규모 데이터셋용
+            layers = [
+                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
+                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+                nn.Conv1d(32, 64, kernel_size=5, padding=2),
+                nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+                nn.Conv1d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm1d(128), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+                nn.Conv1d(128, 256, kernel_size=3, padding=1),
+                nn.BatchNorm1d(256), nn.ReLU(inplace=True),
+            ]
+            fc_in = 256
+
+        self.conv_blocks = nn.Sequential(*layers)
         self.pool = nn.AdaptiveAvgPool1d(1)
-        self.classifier = nn.Linear(256, n_classes)
+        self.classifier = nn.Linear(fc_in, n_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """순전파.
@@ -451,7 +464,8 @@ def train(
     batch_size = int(params.get("batch_size", 32))
     lr = float(params.get("lr", 0.001))
     val_split = float(params.get("val_split", 0.2))
-    patience = 10
+    # 데이터 크기에 따라 patience 동적 조정 (최소 5, 최대 10)
+    patience = max(5, min(10, epochs // 8))
 
     dataset = WindowDataset(windows)
     labels_arr = np.array([w[1] for w in windows])
@@ -476,14 +490,29 @@ def train(
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[train] 디바이스: {device}", file=sys.stderr)
+    n_windows = len(windows)
+
+    # 모델 크기 결정 로그
+    if n_windows < 300:
+        arch = "tiny(2블록)"
+    elif n_windows < 1000:
+        arch = "small(3블록)"
+    else:
+        arch = "full(4블록)"
+    print(
+        f"[train] 디바이스: {device} | 아키텍처: {arch} | patience: {patience}",
+        file=sys.stderr,
+    )
     print(
         f"[train] 학습={len(train_idx)} 샘플, 검증={len(val_idx)} 샘플",
         file=sys.stderr,
     )
 
-    model = CNN1DClassifier(n_channels=n_channels, n_classes=n_classes).to(device)
+    model = CNN1DClassifier(n_channels=n_channels, n_classes=n_classes, n_windows=n_windows).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-6
+    )
     criterion = nn.CrossEntropyLoss()
 
     best_val_acc = 0.0
@@ -524,6 +553,9 @@ def train(
 
         val_acc = correct / total if total > 0 else 0.0
         epochs_trained = epoch
+
+        # LR 스케줄러 업데이트 (val_acc 기준)
+        scheduler.step(val_acc)
 
         # stdout JSON 로그 (C# 대시보드 파싱 용도)
         log_line = json.dumps({"epoch": epoch, "loss": round(avg_loss, 6), "val_acc": round(val_acc, 6)})

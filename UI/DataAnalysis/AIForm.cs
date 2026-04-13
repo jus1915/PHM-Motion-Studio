@@ -1358,15 +1358,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // 윈도우 크기
             tl.Controls.Add(Lbl("윈도우(샘플):"), 0, row);
-            _dlWindowSize = Nud(64, 65536, 1024); tl.Controls.Add(_dlWindowSize, 1, row++);
+            _dlWindowSize = Nud(64, 65536, 256); tl.Controls.Add(_dlWindowSize, 1, row++);
 
             // 스트라이드
             tl.Controls.Add(Lbl("스트라이드:"), 0, row);
-            _dlStride = Nud(1, 65536, 512); tl.Controls.Add(_dlStride, 1, row++);
+            _dlStride = Nud(1, 65536, 128); tl.Controls.Add(_dlStride, 1, row++);
 
             // 에포크
             tl.Controls.Add(Lbl("에포크:"), 0, row);
-            _dlEpochs = Nud(1, 10000, 50); tl.Controls.Add(_dlEpochs, 1, row++);
+            _dlEpochs = Nud(1, 10000, 30); tl.Controls.Add(_dlEpochs, 1, row++);
 
             // 배치 크기
             tl.Controls.Add(Lbl("배치 크기:"), 0, row);
