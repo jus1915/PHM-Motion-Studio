@@ -167,6 +167,10 @@
     <Compile Include="DebugTools\AxisConfigDebugger.cs" />
     <Compile Include="Services\Core\AppEvents.cs" />
     <Compile Include="Services\Core\AppState.cs" />
+    <Compile Include="Services\Core\ServerSettings.cs" />
+    <Compile Include="UI\DataCollection\ServerSettingsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Services\Core\AxisConfig.cs" />
     <Compile Include="Services\Core\AxisMonitor.cs" />
     <Compile Include="Services\Core\SegmentValidator.cs" />

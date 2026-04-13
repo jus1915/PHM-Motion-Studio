@@ -66,6 +66,7 @@ namespace PHM_Project_DockPanel
             InitMotion();
             _daqCfg = DaqSensorConfig.LoadOrDefault(DaqSensorConfigPath);
             InitDaq();
+            ServerSettings.Load(ServerSettingsPath);  // InfluxDB/MLflow/Airflow URL 로드
             InitInfluxPublisher();
 
             // 3. WinForms 초기화
@@ -198,31 +199,9 @@ namespace PHM_Project_DockPanel
 
         private void InitInfluxPublisher()
         {
-            // 우선순위 순으로 탐색: 로그 폴더 → DAQ_Test infra 폴더 → 실행 파일 폴더
-            var candidatePaths = new[]
-            {
-                Path.Combine(ResolveCfgDir(), "influx_config.json"),
-                @"D:\Dev\hvs\WorkingSource\DAQ_Test\infra\influx_config.json",
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
-            };
-
-            string foundPath = null;
-            foreach (var p in candidatePaths)
-                if (File.Exists(p)) { foundPath = p; break; }
-
-            // 어디에도 없으면 기본 위치에 샘플 파일 생성
-            string savePath = foundPath ?? candidatePaths[0];
-            var cfg = InfluxConfig.LoadOrDefault(savePath);
-
-            if (foundPath == null)
-            {
-                cfg.Save(savePath);
-                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 생성: {savePath}  (기본값 — URL/Token 수정 후 재시작)");
-            }
-            else
-            {
-                AppEvents.RaiseLog($"[InfluxDB] 설정 파일 로드: {foundPath}");
-            }
+            // ServerSettings.Current에서 InfluxConfig 변환 (Load는 생성자에서 이미 호출됨)
+            var cfg = ServerSettings.Current.ToInfluxConfig();
+            AppEvents.RaiseLog($"[InfluxDB] 연결 설정 로드: {cfg.Url}");
 
             _influxPublisher = new AccelInfluxPublisher(cfg, AppEvents.RaiseLog);
 
@@ -231,6 +210,9 @@ namespace PHM_Project_DockPanel
 
             _motion.SetAccelInfluxPublisher(_influxPublisher);
         }
+
+        private static string ServerSettingsPath =>
+            Path.Combine(ResolveCfgDir(), "server_settings.json");
 
         /// <summary>E:\Data\PHM_Logs → C:\Data\PHM_Logs → C:\PHM_Logs 순으로 존재하는 루트 사용.</summary>
         private static string ResolveCfgDir()
@@ -255,26 +237,29 @@ namespace PHM_Project_DockPanel
                 AppState.CurrentLabel = label;  // 로컬 CSV 저장 경로에도 반영
             };
 
-            // InfluxDB URL/Token 변경 (DashboardForm 저장 버튼)
+            // InfluxDB URL/Token 변경 (DashboardForm 저장 버튼 — 하위 호환)
             AppEvents.InfluxConfigChanged += (url, token) =>
             {
                 if (_influxPublisher == null) return;
                 _influxPublisher.Config.Url   = url;
                 _influxPublisher.Config.Token = token;
-
-                // JSON 파일에도 반영
-                var candidatePaths = new[]
-                {
-                    Path.Combine(ResolveCfgDir(), "influx_config.json"),
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
-                };
-                string savePath = null;
-                foreach (var p in candidatePaths)
-                    if (File.Exists(p)) { savePath = p; break; }
-                if (savePath == null) savePath = candidatePaths[0];
-
-                _influxPublisher.Config.Save(savePath);
+                ServerSettings.Current.InfluxUrl   = url;
+                ServerSettings.Current.InfluxToken = token;
+                ServerSettings.Current.Save(ServerSettingsPath);
                 AppEvents.RaiseLog($"[InfluxDB] 설정 변경 적용: {url}");
+            };
+
+            // 서버 연결 설정 전체 변경 (ServerSettingsForm)
+            AppEvents.ServerSettingsChanged += settings =>
+            {
+                if (_influxPublisher != null)
+                {
+                    _influxPublisher.Config.Url    = settings.InfluxUrl;
+                    _influxPublisher.Config.Token  = settings.InfluxToken;
+                    _influxPublisher.Config.Org    = settings.InfluxOrg;
+                    _influxPublisher.Config.Bucket = settings.InfluxBucket;
+                }
+                AppEvents.RaiseLog($"[서버 설정] 변경 적용 — InfluxDB: {settings.InfluxUrl}  MLflow: {settings.MlflowUrl}");
             };
 
             // Simulator 창 닫기 요청
@@ -377,7 +362,11 @@ namespace PHM_Project_DockPanel
 
             var configMenu = new ToolStripMenuItem("환경 설정");
             configMenu.DropDownItems.Add(new ToolStripMenuItem("축 설정 관리", null, (s, e) => { }));
-            configMenu.DropDownItems.Add(new ToolStripMenuItem("연결 설정",    null, (s, e) => { }));
+            configMenu.DropDownItems.Add(new ToolStripMenuItem("연결 설정", null, (s, e) =>
+            {
+                using (var form = new PHM_Project_DockPanel.UI.DataCollection.ServerSettingsForm(ServerSettingsPath))
+                    form.ShowDialog(this);
+            }));
             configMenu.DropDownItems.Add(
                 CreateDockMenuItem("DAQ 센서 설정", DockState.DockRight,
                     typeof(DaqSettingsForm),

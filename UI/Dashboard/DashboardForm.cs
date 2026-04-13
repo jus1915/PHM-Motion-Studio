@@ -2944,15 +2944,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         // ── InfluxDB URL/Token UI 헬퍼 ────────────────────────────────────────
 
-        /// <summary>설정 파일을 읽어 URL/Token 텍스트박스를 채웁니다.</summary>
+        /// <summary>ServerSettings.Current(또는 설정 파일)에서 URL/Token 텍스트박스를 채웁니다.</summary>
         private void LoadInfluxFieldsFromConfig(string cfgPath)
         {
-            var cfg = InfluxConfig.LoadOrDefault(cfgPath ?? "");
-            if (txtInfluxUrl   != null) txtInfluxUrl.Text   = cfg.Url   ?? "";
-            if (txtInfluxToken != null) txtInfluxToken.Text = cfg.Token ?? "";
+            // ServerSettings.Current 우선 사용 (이미 로드된 통합 설정)
+            var s = Services.ServerSettings.Current;
+            if (txtInfluxUrl   != null) txtInfluxUrl.Text   = s.InfluxUrl   ?? "";
+            if (txtInfluxToken != null) txtInfluxToken.Text = s.InfluxToken ?? "";
         }
 
-        /// <summary>UI의 URL/Token을 설정 파일에 저장하고 AppEvents로 publisher에 즉시 반영합니다.</summary>
+        /// <summary>UI의 URL/Token을 ServerSettings에 반영하고 publisher에 즉시 적용합니다.</summary>
         private void SaveInfluxConfig()
         {
             string url   = txtInfluxUrl?.Text?.Trim()   ?? "";
@@ -2963,18 +2964,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 return;
             }
 
-            // JSON 파일 갱신
-            string cfgPath = txtInfluxCfgPath?.Text?.Trim() ?? FindInfluxConfigPath();
-            var cfg = InfluxConfig.LoadOrDefault(cfgPath);
-            cfg.Url   = url;
-            cfg.Token = token;
-            cfg.Save(cfgPath);
-
-            // publisher에 즉시 반영 (재시작 불필요)
+            // publisher에 즉시 반영 (ServerSettingsChanged 이벤트로 처리됨)
             AppEvents.RaiseInfluxConfigChanged(url, token);
 
             MessageBox.Show(
-                $"저장 완료!\nURL: {url}\n\n변경사항이 즉시 적용되었습니다.",
+                $"저장 완료!\nURL: {url}\n\n변경사항이 즉시 적용되었습니다.\n\n※ MLflow·Airflow URL은 메뉴 → 환경 설정 → 연결 설정에서 통합 관리하세요.",
                 "InfluxDB 설정", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 

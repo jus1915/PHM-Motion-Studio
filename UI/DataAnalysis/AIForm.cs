@@ -1315,7 +1315,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // MLflow URI
             tl.Controls.Add(Lbl("MLflow URI:"), 0, row);
-            _dlMlflowUri = new TextBox { Dock = DockStyle.Fill, Text = "http://localhost:5000" };
+            _dlMlflowUri = new TextBox { Dock = DockStyle.Fill, Text = Services.ServerSettings.Current.MlflowUrl };
             tl.Controls.Add(_dlMlflowUri, 1, row++);
 
             // 클래스 관리 헤더

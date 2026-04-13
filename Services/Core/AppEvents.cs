@@ -36,6 +36,11 @@ namespace PHM_Project_DockPanel.Services
         public static void RaiseInfluxConfigChanged(string url, string token)
             => InfluxConfigChanged?.Invoke(url ?? "", token ?? "");
 
+        /// <summary>서버 연결 설정 전체 변경 (ServerSettingsForm 저장 시 발생)</summary>
+        public static event Action<ServerSettings> ServerSettingsChanged;
+        public static void RaiseServerSettingsChanged(ServerSettings settings)
+            => ServerSettingsChanged?.Invoke(settings);
+
         public enum LogDataKind { Torque, Accel }
 
         public static event Action<LogDataKind, string> ShowLogGraphRequestedEx;
