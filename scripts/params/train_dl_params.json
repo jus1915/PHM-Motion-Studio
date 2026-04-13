@@ -1,0 +1,32 @@
+{
+  "_comment": "딥러닝 결함 분류 모델 (1D-CNN) — raw 신호에서 직접 학습",
+  "_usage": "python scripts/train_dl_model.py --params scripts/params/train_dl_params.json",
+  "_data_structure": "data_dir 아래 각 클래스별 서브폴더(폴더명=레이블) 또는 CSV의 Label 컬럼 사용",
+
+  "data_dir": "C:/Data/PHM_Logs/Signals",
+  "output":   "C:/Data/PHM_Logs/models/cnn1d_fd.onnx",
+
+  "channels": ["x", "y", "z"],
+  "label_column": "Label",
+
+  "class_names": [
+    "normal",
+    "fault",
+    "bearing_fault",
+    "gear_fault",
+    "imbalance",
+    "looseness"
+  ],
+
+  "window_size": 1024,
+  "stride":      512,
+
+  "epochs":     50,
+  "batch_size": 32,
+  "lr":         0.001,
+  "val_split":  0.2,
+  "seed":       42,
+
+  "mlflow_tracking_uri": "http://localhost:5000",
+  "mlflow_experiment":   "PHM-DL"
+}

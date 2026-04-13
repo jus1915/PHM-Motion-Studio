@@ -301,10 +301,54 @@ def main():
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
+    # ── MLflow 로깅 (선택적 — mlflow 미설치 또는 URI 미설정이면 건너뜀) ──────
+    _try_log_mlflow(params, model_key, session, feature_keys, class_names,
+                    n_features, accuracy, score_threshold, output_path, meta_path)
+
     result = {"info": info}
     if accuracy is not None:
         result["accuracy"] = accuracy
     print(json.dumps(result, ensure_ascii=False))
+
+
+def _try_log_mlflow(params, model_key, session, feature_keys, class_names,
+                    n_features, accuracy, score_threshold, output_path, meta_path):
+    """MLflow 실험 로깅. mlflow 미설치 또는 tracking URI 미설정이면 조용히 건너뜁니다."""
+    tracking_uri = params.get("mlflow_tracking_uri", "") or os.environ.get("MLFLOW_TRACKING_URI", "")
+    if not tracking_uri:
+        return
+    try:
+        import mlflow
+
+        mlflow.set_tracking_uri(tracking_uri)
+        experiment_name = params.get("mlflow_experiment", "PHM-SKL")
+        mlflow.set_experiment(experiment_name)
+
+        with mlflow.start_run(run_name=f"{session}-{model_key}"):
+            # 파라미터
+            mlflow.log_params({
+                "session":      session,
+                "model":        model_key,
+                "n_features":   n_features,
+                "standardize":  params.get("standardize", True),
+                "k":            params.get("k", 5),
+                "class_names":  ",".join(class_names),
+                "features":     ",".join(feature_keys),
+            })
+            # 메트릭
+            if accuracy is not None:
+                mlflow.log_metric("train_accuracy", float(accuracy))
+            if score_threshold is not None:
+                mlflow.log_metric("score_threshold", float(score_threshold))
+
+            # 아티팩트
+            mlflow.log_artifact(output_path, artifact_path="model")
+            if os.path.exists(meta_path):
+                mlflow.log_artifact(meta_path, artifact_path="model")
+
+            print(f"[MLflow] run logged → {tracking_uri} / {experiment_name}", file=sys.stderr)
+    except Exception as e:
+        print(f"[MLflow] 로깅 건너뜀: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

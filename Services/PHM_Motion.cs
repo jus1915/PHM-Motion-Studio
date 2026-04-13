@@ -220,7 +220,9 @@ namespace PHM_Project_DockPanel.Services
                         : $"Axes{string.Join("-", active)}";
                     string folderName = $"{DateTime.Now:yyyyMMdd}_{axisTag}";
                     string baseRoot = @"C:\Data\PHM_Logs\Signals";
-                    string rootDir = Path.Combine(baseRoot, folderName);
+                    // 레이블이 있으면 서브폴더로 분류 — DL 학습 시 폴더명 = 레이블로 자동 인식
+                    string labelTag = string.IsNullOrEmpty(AppState.CurrentLabel) ? "unlabeled" : AppState.CurrentLabel;
+                    string rootDir = Path.Combine(baseRoot, folderName, labelTag);
                     string torqueDir = Path.Combine(rootDir, "Torque");
                     string accelDir = Path.Combine(rootDir, "Accel");
                     Directory.CreateDirectory(torqueDir);
@@ -262,6 +264,7 @@ namespace PHM_Project_DockPanel.Services
                         AppEvents.RaisePassiveMonitorSuspend();
                         await Task.Delay(300); // DAQmx 리소스 해제 대기
 
+                        _accelLogger.Label = AppState.CurrentLabel;
                         try { startedAccelCsvRun = _accelLogger.Start(active.ToArray(), accelDir, baseName, 0); }
                         catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (DAQ CSV) {ex.Message}"); }
                     }

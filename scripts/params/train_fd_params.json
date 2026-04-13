@@ -1,0 +1,33 @@
+{
+  "_comment": "결함 분류 모델 (FD) — sklearn Random Forest",
+  "_usage": "python scripts/train_model.py --params scripts/params/train_fd_params.json",
+
+  "csv":     "C:/Data/PHM_Logs/features/features_axis0.csv",
+  "output":  "C:/Data/PHM_Logs/models/rf_fd_axis0.onnx",
+  "session": "FD",
+  "model":   "rf",
+  "y_column": "x",
+
+  "class_names": [
+    "normal",
+    "fault",
+    "bearing_fault",
+    "gear_fault",
+    "imbalance",
+    "looseness"
+  ],
+
+  "features": [
+    "RMS", "AbsMean", "AbsMax", "P2P",
+    "Skewness", "Kurtosis", "Crest", "Shape", "Impulse",
+    "Peak1Freq", "Peak1Amp",
+    "Peak2Freq", "Peak2Amp",
+    "Peak3Freq", "Peak3Amp",
+    "Peak4Freq", "Peak4Amp"
+  ],
+
+  "standardize": true,
+
+  "mlflow_tracking_uri": "http://localhost:5000",
+  "mlflow_experiment":   "PHM-SKL"
+}

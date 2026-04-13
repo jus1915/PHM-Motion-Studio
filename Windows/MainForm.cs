@@ -252,6 +252,7 @@ namespace PHM_Project_DockPanel
             {
                 if (_influxPublisher != null)
                     _influxPublisher.Label = label;
+                AppState.CurrentLabel = label;  // 로컬 CSV 저장 경로에도 반영
             };
 
             // Simulator 창 닫기 요청

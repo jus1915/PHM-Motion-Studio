@@ -365,10 +365,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private bool _isDbMode = false;
         private InfluxDbDataSource _influxSource;
         private CancellationTokenSource _influxPollCts;
-        private DateTime _influxLastQueried = DateTime.MinValue;
-        private readonly HashSet<DateTime> _processedSegTimes = new HashSet<DateTime>();
-        private readonly HashSet<DateTime> _processedTorqueSegTimes = new HashSet<DateTime>();
-        private readonly object _influxSync = new object();
 
         // 통계
         private int cntDanger, cntWarning, cycles;
@@ -391,8 +387,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private RadioButton rbtnCsvMode, rbtnDbMode;
         private Panel pnlCsvSource, pnlDbSource;
         private ComboBox cmbDbDevice, cmbDbLabel;
-        private NumericUpDown numPollInterval;
-        private Button btnDbRefresh;
+        private DateTimePicker dtpDbFrom, dtpDbTo;
+        private Button btnDbRefresh, btnDbFullRange;
         private TextBox txtInfluxCfgPath;
 
         // Preprocessing과 동일한 시간 컬럼 후보
@@ -701,9 +697,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
             dbY += dbH + dbGap;
 
-            // 폴링 간격
-            var lblPoll = new Label { Text = "폴링(초):", AutoSize = false, Width = lblW + 4, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            numPollInterval = new NumericUpDown { Left = lblW + 6, Top = dbY, Width = 56, Height = dbH, Minimum = 1, Maximum = 60, Value = 2, DecimalPlaces = 0 };
+            // 시작 날짜
+            var lblFrom = new Label { Text = "시작:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbFrom = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 28, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm:ss", Value = DateTime.Now.AddHours(-1) };
+            btnDbFullRange = new Button { Text = "↔", Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH };
+            btnDbFullRange.Click += async (s, e) => await FillDbFullRangeAsync();
+            dbY += dbH + dbGap;
+
+            // 종료 날짜
+            var lblTo = new Label { Text = "종료:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbTo = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm:ss", Value = DateTime.Now };
             dbY += dbH + dbGap;
 
             // 설정 파일
@@ -722,7 +725,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             pnlDbSource.Controls.AddRange(new Control[] {
                 lblDevice, cmbDbDevice, btnDbRefresh,
                 lblLabelDb, cmbDbLabel,
-                lblPoll, numPollInterval,
+                lblFrom, dtpDbFrom, btnDbFullRange,
+                lblTo, dtpDbTo,
                 lblCfg, txtInfluxCfgPath, btnBrowseCfg
             });
 
@@ -1190,8 +1194,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     int lw = 52;
                     if (cmbDbDevice  != null) { cmbDbDevice.Width  = w - lw - 28; btnDbRefresh.Left  = w - 24; }
                     if (cmbDbLabel   != null)   cmbDbLabel.Width   = w - lw - 2;
+                    if (dtpDbFrom    != null) { dtpDbFrom.Width    = w - lw - 28; btnDbFullRange.Left = w - 24; }
+                    if (dtpDbTo      != null)   dtpDbTo.Width      = w - lw - 2;
                     if (txtInfluxCfgPath != null) { txtInfluxCfgPath.Width = w - 26; }
-                    // btnBrowseCfg는 txtInfluxCfgPath 오른쪽에 고정
                     foreach (Control c in pnlDbSource.Controls)
                     {
                         if (c is Button b && b.Text == "…") b.Left = w - 24;
@@ -2963,28 +2968,43 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _influxSource = new InfluxDbDataSource(cfg);
         }
 
-        // ── DB 감시 시작/중지 ────────────────────────────────────────────────
+        // ── DB 진단 시작/중지 ────────────────────────────────────────────────
         private void StartDbWatch()
         {
-            StopDbWatch(); // 기존 폴링 정리
+            StopDbWatch();
             EnsureInfluxSource();
-
-            _influxLastQueried = DateTime.UtcNow; // 지금부터 새 데이터만 처리
-            lock (_influxSync) _processedSegTimes.Clear();
 
             string device = cmbDbDevice.Text?.Trim() ?? "";
             string label  = cmbDbLabel.Text?.Trim()  ?? "";
-            int pollSec   = (int)(numPollInterval?.Value ?? 2);
+            var    from   = dtpDbFrom.Value.ToUniversalTime();
+            var    to     = dtpDbTo.Value.ToUniversalTime();
+
+            if (from >= to)
+            {
+                AppendEventLog("[DB] 오류: 시작 시각이 종료 시각보다 뒤입니다.");
+                return;
+            }
 
             _influxPollCts = new CancellationTokenSource();
             var token = _influxPollCts.Token;
 
-            Task.Run(() => PollInfluxAsync(device, label, pollSec, token), token);
-
             btnStart.Enabled = false;
             btnStop.Enabled  = true;
-            lblStatus.Text   = $"상태: DB 수집 중... (장치={device}, 폴링={pollSec}s)";
-            AppendEventLog($"[DB] 모니터링 시작 — 장치='{device}' 레이블='{label}' 폴링={pollSec}s");
+            lblStatus.Text   = $"상태: DB 진단 중...";
+            AppendEventLog($"[DB] 진단 시작 — 장치='{device}' 레이블='{label}' 기간={dtpDbFrom.Value:yyyy-MM-dd HH:mm:ss} ~ {dtpDbTo.Value:yyyy-MM-dd HH:mm:ss}");
+
+            Task.Run(() => RunDbDiagnosisAsync(device, label, from, to, token), token)
+                .ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                        BeginInvoke(new Action(() => AppendEventLog($"[DB] 진단 오류: {t.Exception?.GetBaseException().Message}")));
+                    BeginInvoke(new Action(() =>
+                    {
+                        btnStart.Enabled = true;
+                        btnStop.Enabled  = false;
+                        lblStatus.Text   = "상태: 대기";
+                    }));
+                });
         }
 
         private void StopDbWatch()
@@ -2997,7 +3017,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
         }
 
-        // ── DB 폴링 루프 ─────────────────────────────────────────────────────
+        // ── DB 단발성 진단 ────────────────────────────────────────────────────
         private static readonly HashSet<string> TorqueYColumns =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "torque", "fbtrq", "trq" };
 
@@ -3011,81 +3031,64 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             return false;
         }
 
-        private async Task PollInfluxAsync(string device, string label, int pollSeconds, CancellationToken ct)
+        /// <summary>
+        /// 지정 기간의 InfluxDB 데이터를 조회하여 진단합니다. (단발성, 폴링 없음)
+        /// 전체 기간을 하나의 세그먼트로 병합하여 진단 1회 수행합니다.
+        /// </summary>
+        private async Task RunDbDiagnosisAsync(string device, string label, DateTime from, DateTime to, CancellationToken ct)
         {
             string devArg = string.IsNullOrEmpty(device) ? null : device;
             string lblArg = string.IsNullOrEmpty(label)  ? null : label;
 
-            while (!ct.IsCancellationRequested)
+            // 전체 기간을 하나의 세그먼트로 취급 — 기간 길이를 segmentSeconds 로 설정
+            double winSecs = (to - from).TotalSeconds + 1.0;
+            int totalSegs = 0;
+
+            // ── (A) accel 세그먼트 ────────────────────────────────────────────
+            var accelSegs = await _influxSource.QuerySegmentsAsync(
+                devArg, lblArg, from, to, segmentSeconds: winSecs, ct: ct);
+
+            if (accelSegs.Count > 0)
             {
-                try
+                BeginInvoke(new Action(() => ProcessInfluxSegment(MergeSegments(accelSegs))));
+                totalSegs += accelSegs.Count;
+            }
+
+            // ── (B) torque 세그먼트 (토크 모델이 있을 때만) ───────────────────
+            if (HasTorqueModels())
+            {
+                var torqueSegs = await _influxSource.QueryTorqueSegmentsAsync(
+                    devArg, lblArg, from, to, segmentSeconds: winSecs, ct: ct);
+
+                if (torqueSegs.Count > 0)
                 {
-                    await Task.Delay(pollSeconds * 1000, ct);
-                    var now = DateTime.UtcNow;
-                    var from = _influxLastQueried;
-                    _influxLastQueried = now;
-
-                    int totalSegs = 0;
-
-                    // ── (A) accel 세그먼트 ───────────────────────────────────
-                    // segmentSeconds 를 폴 창보다 크게 설정 → 창 내 모든 데이터가
-                    // 하나의 세그먼트로 묶임. 폴 1 회 = 진단 1 회.
-                    double winSecs = Math.Max(pollSeconds * 1.5, 10.0);
-                    var accelSegs = await _influxSource.QuerySegmentsAsync(
-                        devArg, lblArg, from, now, segmentSeconds: winSecs, ct: ct);
-
-                    var newAccelSegs = new List<SignalSegment>();
-                    foreach (var seg in accelSegs)
-                    {
-                        lock (_influxSync)
-                        {
-                            if (_processedSegTimes.Contains(seg.StartTime)) continue;
-                            _processedSegTimes.Add(seg.StartTime);
-                            if (_processedSegTimes.Count > 10000) _processedSegTimes.Clear();
-                        }
-                        newAccelSegs.Add(seg);
-                    }
-                    if (newAccelSegs.Count > 0)
-                    {
-                        // 동일 창에서 나온 세그먼트는 병합 → 진단 1 회
-                        ProcessInfluxSegment(MergeSegments(newAccelSegs));
-                        totalSegs += newAccelSegs.Count;
-                    }
-
-                    // ── (B) torque 세그먼트 (토크 모델이 있을 때만) ──────────
-                    if (HasTorqueModels())
-                    {
-                        var torqueSegs = await _influxSource.QueryTorqueSegmentsAsync(
-                            devArg, lblArg, from, now, segmentSeconds: winSecs, ct: ct);
-
-                        var newTorqueSegs = new List<SignalSegment>();
-                        foreach (var seg in torqueSegs)
-                        {
-                            lock (_influxSync)
-                            {
-                                if (_processedTorqueSegTimes.Contains(seg.StartTime)) continue;
-                                _processedTorqueSegTimes.Add(seg.StartTime);
-                                if (_processedTorqueSegTimes.Count > 10000) _processedTorqueSegTimes.Clear();
-                            }
-                            newTorqueSegs.Add(seg);
-                        }
-                        if (newTorqueSegs.Count > 0)
-                        {
-                            ProcessInfluxSegment(MergeSegments(newTorqueSegs));
-                            totalSegs += newTorqueSegs.Count;
-                        }
-                    }
-
-                    if (totalSegs > 0)
-                        BeginInvoke(new Action(() =>
-                            lblStatus.Text = $"상태: DB 수집 중... 마지막={DateTime.Now:HH:mm:ss} ({totalSegs}세그)"));
+                    BeginInvoke(new Action(() => ProcessInfluxSegment(MergeSegments(torqueSegs))));
+                    totalSegs += torqueSegs.Count;
                 }
-                catch (OperationCanceledException) { break; }
-                catch (Exception ex)
-                {
-                    BeginInvoke(new Action(() => AppendEventLog($"[DB] 폴링 오류: {ex.Message}")));
-                    await Task.Delay(Math.Max(pollSeconds, 5) * 1000, ct).ContinueWith(_ => { });
-                }
+            }
+
+            if (totalSegs == 0)
+                BeginInvoke(new Action(() => AppendEventLog("[DB] 해당 기간에 데이터가 없습니다.")));
+        }
+
+        /// <summary>DB 장치/레이블 전체 기간을 dtpDbFrom/dtpDbTo 에 자동 채웁니다.</summary>
+        private async Task FillDbFullRangeAsync()
+        {
+            EnsureInfluxSource();
+            string device = cmbDbDevice.Text?.Trim() ?? "";
+            string label  = cmbDbLabel.Text?.Trim()  ?? "";
+            try
+            {
+                var (first, last) = await _influxSource.GetTimeRangeAsync(
+                    string.IsNullOrEmpty(device) ? null : device,
+                    string.IsNullOrEmpty(label)  ? null : label);
+                dtpDbFrom.Value = first.ToLocalTime();
+                dtpDbTo.Value   = last.ToLocalTime();
+                AppendEventLog($"[DB] 전체 기간: {dtpDbFrom.Value:yyyy-MM-dd HH:mm:ss} ~ {dtpDbTo.Value:yyyy-MM-dd HH:mm:ss}");
+            }
+            catch (Exception ex)
+            {
+                AppendEventLog($"[DB] 기간 조회 오류: {ex.Message}");
             }
         }
 
