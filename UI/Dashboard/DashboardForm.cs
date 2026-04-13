@@ -390,7 +390,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private DateTimePicker dtpDbFrom, dtpDbTo;
         private Button btnDbRefresh, btnDbFullRange;
         private TextBox txtInfluxCfgPath;
-        private TextBox txtInfluxUrl, txtInfluxToken;
 
         // Preprocessing과 동일한 시간 컬럼 후보
         private static readonly string[] TimeColumnCandidates = { "time_s", "cycle" };
@@ -719,36 +718,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 using (var ofd = new OpenFileDialog { Filter = "JSON|*.json|All|*.*", Title = "InfluxDB 설정 파일" })
                     if (ofd.ShowDialog() == DialogResult.OK)
-                    {
                         txtInfluxCfgPath.Text = ofd.FileName;
-                        LoadInfluxFieldsFromConfig(ofd.FileName);
-                    }
             };
             dbY += dbH + dbGap;
-
-            // ── URL ────────────────────────────────────────────────────────────
-            var lblUrl = new Label { Text = "URL:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            txtInfluxUrl = new TextBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH };
-            dbY += dbH + dbGap;
-
-            // ── Token ──────────────────────────────────────────────────────────
-            var lblToken = new Label { Text = "Token:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            txtInfluxToken = new TextBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH, UseSystemPasswordChar = true };
-            dbY += dbH + dbGap;
-
-            // ── 저장 버튼 ───────────────────────────────────────────────────────
-            var btnInfluxSave = new Button
-            {
-                Text = "💾 저장 & 적용", Left = 0, Top = dbY,
-                Width = ctrlWidth, Height = dbH + 2,
-                BackColor = System.Drawing.Color.FromArgb(0, 120, 212),
-                ForeColor = System.Drawing.Color.White, FlatStyle = FlatStyle.Flat
-            };
-            btnInfluxSave.Click += (s, e) => SaveInfluxConfig();
-            dbY += dbH + 6;
-
-            // 초기값 채우기
-            LoadInfluxFieldsFromConfig(txtInfluxCfgPath.Text);
 
             pnlDbSource.Height = dbY + 2;
             pnlDbSource.Controls.AddRange(new Control[] {
@@ -756,10 +728,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 lblLabelDb, cmbDbLabel,
                 lblFrom, dtpDbFrom, btnDbFullRange,
                 lblTo, dtpDbTo,
-                lblCfg, txtInfluxCfgPath, btnBrowseCfg,
-                lblUrl, txtInfluxUrl,
-                lblToken, txtInfluxToken,
-                btnInfluxSave
+                lblCfg, txtInfluxCfgPath, btnBrowseCfg
             });
 
             btnStart = new Button { Text = "시작", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
@@ -1229,8 +1198,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     if (dtpDbFrom    != null) { dtpDbFrom.Width    = w - lw - 28; btnDbFullRange.Left = w - 24; }
                     if (dtpDbTo      != null)   dtpDbTo.Width      = w - lw - 2;
                     if (txtInfluxCfgPath != null) { txtInfluxCfgPath.Width = w - 26; }
-                    if (txtInfluxUrl    != null)   txtInfluxUrl.Width    = w - lw - 2;
-                    if (txtInfluxToken  != null)   txtInfluxToken.Width  = w - lw - 2;
                     foreach (Control c in pnlDbSource.Controls)
                     {
                         if (c is Button b && b.Text == "…") b.Left = w - 24;
@@ -2940,36 +2907,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _isDbMode = dbMode;
             if (pnlCsvSource != null) pnlCsvSource.Visible = !dbMode;
             if (pnlDbSource != null)  pnlDbSource.Visible  =  dbMode;
-        }
-
-        // ── InfluxDB URL/Token UI 헬퍼 ────────────────────────────────────────
-
-        /// <summary>ServerSettings.Current(또는 설정 파일)에서 URL/Token 텍스트박스를 채웁니다.</summary>
-        private void LoadInfluxFieldsFromConfig(string cfgPath)
-        {
-            // ServerSettings.Current 우선 사용 (이미 로드된 통합 설정)
-            var s = Services.ServerSettings.Current;
-            if (txtInfluxUrl   != null) txtInfluxUrl.Text   = s.InfluxUrl   ?? "";
-            if (txtInfluxToken != null) txtInfluxToken.Text = s.InfluxToken ?? "";
-        }
-
-        /// <summary>UI의 URL/Token을 ServerSettings에 반영하고 publisher에 즉시 적용합니다.</summary>
-        private void SaveInfluxConfig()
-        {
-            string url   = txtInfluxUrl?.Text?.Trim()   ?? "";
-            string token = txtInfluxToken?.Text?.Trim() ?? "";
-            if (string.IsNullOrEmpty(url))
-            {
-                MessageBox.Show("URL을 입력하세요.", "입력 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            // publisher에 즉시 반영 (ServerSettingsChanged 이벤트로 처리됨)
-            AppEvents.RaiseInfluxConfigChanged(url, token);
-
-            MessageBox.Show(
-                $"저장 완료!\nURL: {url}\n\n변경사항이 즉시 적용되었습니다.\n\n※ MLflow·Airflow URL은 메뉴 → 환경 설정 → 연결 설정에서 통합 관리하세요.",
-                "InfluxDB 설정", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         // ── InfluxDB 설정 파일 자동 탐색 ─────────────────────────────────────

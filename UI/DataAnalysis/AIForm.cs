@@ -117,7 +117,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private bool _updatingThreshold = false;
 
         // ── DL 학습 탭 ───────────────────────────────────────────────────────
-        private TextBox          _dlDataDir, _dlOutputPath, _dlLabelColumn, _dlLr, _dlMlflowUri;
+        private TextBox          _dlDataDir, _dlOutputPath, _dlLabelColumn, _dlLr;
         private CheckBox         _dlChX, _dlChY, _dlChZ;
         private ListBox          _dlClassList;
         private TextBox          _dlNewClassName;
@@ -1277,10 +1277,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private GroupBox BuildDlLeftPanel()
         {
             var grp = new GroupBox { Text = "데이터 소스 / 클래스", Dock = DockStyle.Fill, Padding = new Padding(8) };
-            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6 };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 5 };
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 5; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            for (int i = 0; i < 4; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 클래스 리스트
 
             int row = 0;
@@ -1313,10 +1313,6 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _dlLabelColumn = new TextBox { Dock = DockStyle.Fill, Text = "Label" };
             tl.Controls.Add(_dlLabelColumn, 1, row++);
 
-            // MLflow URI
-            tl.Controls.Add(Lbl("MLflow URI:"), 0, row);
-            _dlMlflowUri = new TextBox { Dock = DockStyle.Fill, Text = Services.ServerSettings.Current.MlflowUrl };
-            tl.Controls.Add(_dlMlflowUri, 1, row++);
 
             // 클래스 관리 헤더
             tl.Controls.Add(Lbl("결함 클래스:"), 0, row);
@@ -1468,7 +1464,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // ── params JSON 작성 ─────────────────────────────────────────────
             int totalEpochs = (int)_dlEpochs.Value;
-            string mlflowUri = _dlMlflowUri?.Text?.Trim() ?? "";
+            string mlflowUri = Services.ServerSettings.Current.MlflowUrl ?? "";
             var paramsObj = new Dictionary<string, object>
             {
                 ["data_dir"]            = dataDir,
