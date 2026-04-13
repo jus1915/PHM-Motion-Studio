@@ -744,19 +744,35 @@ def _try_end_mlflow(
     try:
         mlflow_mod.log_metric("best_val_accuracy", best_val_acc)
         mlflow_mod.log_metric("epochs_trained", epochs_trained)
-        mlflow_mod.log_artifact(output_path)
-        mlflow_mod.log_artifact(meta_path)
-        mlflow_mod.pytorch.log_model(model, artifact_path="pytorch_model")
+    except Exception as e:
+        print(f"[mlflow] 메트릭 로깅 실패 (건너뜀): {e}", file=sys.stderr)
+
+    # ONNX / meta 파일 아티팩트 업로드 (실패해도 계속)
+    for path in [output_path, meta_path]:
+        try:
+            mlflow_mod.log_artifact(path)
+        except Exception as e:
+            print(f"[mlflow] 아티팩트 업로드 실패 (건너뜀): {os.path.basename(path)} — {e}", file=sys.stderr)
+
+    # PyTorch 모델 로깅 — 구버전 MLflow 서버(2.x < 2.13) 에서 /logged-models API 없을 수 있음
+    try:
+        import importlib
+        if importlib.util.find_spec("mlflow.pytorch") is not None:
+            # artifact_path 대신 name 사용 (MLflow 2.13+), 구버전에서는 artifact_path fallback
+            try:
+                mlflow_mod.pytorch.log_model(model, name="pytorch_model")
+            except TypeError:
+                mlflow_mod.pytorch.log_model(model, artifact_path="pytorch_model")
+    except Exception as e:
+        print(f"[mlflow] pytorch 모델 로깅 실패 (건너뜀): {e}", file=sys.stderr)
+
+    try:
         mlflow_mod.end_run()
         run_id = mlflow_run.info.run_id
         print(f"[mlflow] run 종료: {run_id}", file=sys.stderr)
         return run_id
     except Exception as e:
-        print(f"[mlflow] 아티팩트 업로드 실패 (건너뜀): {e}", file=sys.stderr)
-        try:
-            mlflow_mod.end_run()
-        except Exception:
-            pass
+        print(f"[mlflow] run 종료 실패: {e}", file=sys.stderr)
         return None
 
 
