@@ -625,19 +625,22 @@ def export_onnx(
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
+    # dynamo=False: PyTorch 2.6+ 기본값(dynamo=True)에서 dynamic_axes 충돌 방지
+    # 레거시 TorchScript 기반 exporter를 명시적으로 사용
     torch.onnx.export(
         model,
         dummy,
         output_path,
         export_params=True,
-        opset_version=15,
+        opset_version=17,
         do_constant_folding=True,
         input_names=["input"],
         output_names=["logits"],
         dynamic_axes={
-            "input": {0: "batch", 1: "time"},
+            "input":  {0: "batch", 1: "time"},
             "logits": {0: "batch"},
         },
+        dynamo=False,
     )
 
     # 모델 유효성 검사
