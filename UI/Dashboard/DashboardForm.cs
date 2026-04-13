@@ -336,7 +336,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         // UI
         private KpiCard cardDanger, cardWarning, cardCycles;
-        private Chart chartLine, chartDonut;
+        private Chart chartLine;
         private DataGridView grid;
         private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
@@ -389,7 +389,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private ComboBox cmbDbDevice, cmbDbLabel;
         private DateTimePicker dtpDbFrom, dtpDbTo;
         private Button btnDbRefresh, btnDbFullRange;
-        private TextBox txtInfluxCfgPath;
 
         // Preprocessing과 동일한 시간 컬럼 후보
         private static readonly string[] TimeColumnCandidates = { "time_s", "cycle" };
@@ -647,79 +646,98 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int ctrlWidth = leftWrap.Width - 12;
             int btnH = 28;
 
-            btnLoadSklModel = new Button { Text = "SKL ONNX 추가 (AI폼)", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), BackColor = Color.FromArgb(220, 235, 255) };
-            btnLoadSklModel.Click += (s, e) => LoadSklOnnxModel();
+            // ── [A] 모델 로드 GroupBox ──────────────────────────────────────────
+            var gbModels = new GroupBox
+            {
+                Text = "모델 로드", Width = ctrlWidth,
+                Padding = new Padding(6, 4, 6, 6),
+                Margin = new Padding(2, 2, 2, 4),
+                AutoSize = true
+            };
+            var tlModels = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3,
+                AutoSize = true, Margin = Padding.Empty
+            };
+            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            for (int i = 0; i < 2; i++) tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
+            tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
 
-            btnLoadModelFolder = new Button { Text = "모델 폴더 일괄", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnLoadModelFolder.Click += (s, e) => LoadAxisModelsFromFolder();
+            btnLoadSklModel        = new Button { Text = "SKL ONNX",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 235, 255) };
+            btnLoadOnnxModelSingle = new Button { Text = "DL ONNX",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
+            btnLoadModelFolder     = new Button { Text = "폴더 일괄",  Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
+            var btnGlobalKnn       = new Button { Text = "전역 KNN",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
+            var btnGlobalAe        = new Button { Text = "전역 AE",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
 
-            btnLoadOnnxModelSingle = new Button { Text = "딥러닝 ONNX 추가 (AE/CLS)", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
+            btnLoadSklModel.Click        += (s, e) => LoadSklOnnxModel();
             btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
+            btnLoadModelFolder.Click     += (s, e) => LoadAxisModelsFromFolder();
+            btnGlobalKnn.Click           += (s, e) => LoadGlobalKnnModel();
+            btnGlobalAe.Click            += (s, e) => LoadGlobalOnnxAeModel();
 
-            var btnGlobalKnn = new Button { Text = "전역 KNN 로드", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), BackColor = Color.FromArgb(220, 255, 220) };
-            btnGlobalKnn.Click += (s, e) => LoadGlobalKnnModel();
+            tlModels.Controls.Add(btnLoadSklModel,        0, 0);
+            tlModels.Controls.Add(btnLoadOnnxModelSingle, 1, 0);
+            tlModels.Controls.Add(btnLoadModelFolder,     0, 1);
+            tlModels.Controls.Add(btnGlobalKnn,           1, 1);
+            tlModels.SetColumnSpan(btnGlobalAe, 2);
+            tlModels.Controls.Add(btnGlobalAe,            0, 2);
+            gbModels.Controls.Add(tlModels);
 
-            var btnGlobalAe = new Button { Text = "전역 AE(ONNX) 로드", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), BackColor = Color.FromArgb(220, 255, 220) };
-            btnGlobalAe.Click += (s, e) => LoadGlobalOnnxAeModel();
+            // ── [B] 데이터 소스 GroupBox ────────────────────────────────────────
+            var gbSource = new GroupBox
+            {
+                Text = "데이터 소스", Width = ctrlWidth,
+                Padding = new Padding(6, 4, 6, 6),
+                Margin = new Padding(2, 4, 2, 4),
+                AutoSize = true
+            };
+            var tlSource = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1,
+                AutoSize = true, Margin = Padding.Empty
+            };
+            tlSource.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-            // ===== 소스 모드 선택 =====
+            // 모드 선택 행
             int rbW = ctrlWidth / 2 - 2;
-            rbtnCsvMode = new RadioButton { Text = "폴더 감시",   Checked = true, Width = rbW, Height = 22, Left = 0,        Top = 2, AutoSize = false };
-            rbtnDbMode  = new RadioButton { Text = "DB 모니터링", Checked = false, Width = rbW, Height = 22, Left = rbW + 4, Top = 2, AutoSize = false };
-            var pnlMode = new Panel { Width = ctrlWidth, Height = 28, Margin = new Padding(2, 4, 2, 2) };
+            rbtnCsvMode = new RadioButton { Text = "CSV 폴더 감시",  Checked = true,  Width = rbW, Height = 22, Left = 0,        Top = 2, AutoSize = false };
+            rbtnDbMode  = new RadioButton { Text = "DB 모니터링",    Checked = false, Width = rbW, Height = 22, Left = rbW + 4,  Top = 2, AutoSize = false };
+            var pnlMode = new Panel { Height = 26, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
             pnlMode.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode });
-
             rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourceMode(false); };
             rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourceMode(true);  };
 
-            // ===== CSV 소스 패널 =====
-            pnlCsvSource = new Panel { Width = ctrlWidth, Height = btnH + 30, Margin = new Padding(2) };
-            btnSelectFolder = new Button { Text = "CSV 폴더", Width = ctrlWidth, Height = btnH, Left = 0, Top = 0 };
+            // CSV 소스
+            pnlCsvSource = new Panel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
+            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = ctrlWidth - 12, Height = btnH, Left = 0, Top = 0 };
             btnSelectFolder.Click += (s, e) => SelectFolder();
-            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Top = btnH + 4, Left = 0 };
+            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth - 12, 0), Top = btnH + 4, Left = 0, ForeColor = Color.Gray };
+            pnlCsvSource.Height = btnH + 24;
             pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, lblFolder });
 
-            // ===== DB 소스 패널 (TableLayoutPanel으로 정렬) =====
-            int lblW = 52, dbH = 24, dbGap = 4;
-            int dbY = 0;
+            // DB 소스
+            int lblW = 52, dbH = 24, dbGap = 4, dbY = 0;
+            pnlDbSource = new Panel { Width = ctrlWidth - 12, Margin = Padding.Empty, Visible = false };
 
-            pnlDbSource = new Panel { Width = ctrlWidth, Margin = new Padding(2), Visible = false };
-
-            // 장치
-            var lblDevice = new Label  { Text = "장치:",  AutoSize = false, Width = lblW, Height = dbH, Left = 0,        Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            cmbDbDevice   = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
-            btnDbRefresh  = new Button { Text = "↺", Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH };
+            var lblDevice = new Label  { Text = "장치:",  AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbDevice   = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
+            btnDbRefresh  = new Button { Text = "↺", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
             btnDbRefresh.Click += (s, e) => RefreshDbDevices();
             dbY += dbH + dbGap;
 
-            // 레이블
             var lblLabelDb = new Label { Text = "레이블:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
+            cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
             dbY += dbH + dbGap;
 
-            // 시작 날짜
             var lblFrom = new Label { Text = "시작:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            dtpDbFrom = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 28, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm:ss", Value = DateTime.Now.AddHours(-1) };
-            btnDbFullRange = new Button { Text = "↔", Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH };
+            dtpDbFrom = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now.AddHours(-1) };
+            btnDbFullRange = new Button { Text = "↔", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
             btnDbFullRange.Click += async (s, e) => await FillDbFullRangeAsync();
             dbY += dbH + dbGap;
 
-            // 종료 날짜
             var lblTo = new Label { Text = "종료:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            dtpDbTo = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - lblW - 2, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm:ss", Value = DateTime.Now };
-            dbY += dbH + dbGap;
-
-            // 설정 파일
-            var lblCfg = new Label { Text = "설정 파일:", AutoSize = false, Width = ctrlWidth, Height = 18, Left = 0, Top = dbY, TextAlign = ContentAlignment.MiddleLeft };
-            dbY += 20;
-            txtInfluxCfgPath = new TextBox { Left = 0, Top = dbY, Width = ctrlWidth - 26, Height = dbH, Text = FindInfluxConfigPath() };
-            var btnBrowseCfg = new Button { Left = ctrlWidth - 24, Top = dbY, Width = 24, Height = dbH, Text = "…" };
-            btnBrowseCfg.Click += (s, e) =>
-            {
-                using (var ofd = new OpenFileDialog { Filter = "JSON|*.json|All|*.*", Title = "InfluxDB 설정 파일" })
-                    if (ofd.ShowDialog() == DialogResult.OK)
-                        txtInfluxCfgPath.Text = ofd.FileName;
-            };
+            dtpDbTo = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now };
             dbY += dbH + dbGap;
 
             pnlDbSource.Height = dbY + 2;
@@ -728,77 +746,64 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 lblLabelDb, cmbDbLabel,
                 lblFrom, dtpDbFrom, btnDbFullRange,
                 lblTo, dtpDbTo,
-                lblCfg, txtInfluxCfgPath, btnBrowseCfg
             });
 
-            btnStart = new Button { Text = "시작", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnStart.Click += (s, e) => StartWatch();
+            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 모드 선택
+            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 소스 패널
+            tlSource.Controls.Add(pnlMode,      0, 0);
+            tlSource.Controls.Add(pnlCsvSource, 0, 1);
+            tlSource.Controls.Add(pnlDbSource,  0, 1);
+            gbSource.Controls.Add(tlSource);
 
-            btnStop = new Button { Text = "중지", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), Enabled = false };
-            btnStop.Click += (s, e) => StopWatch();
-
-            lblStatus = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Margin = new Padding(2, 4, 2, 0) };
-
-            var gbAging = new GroupBox
+            // ── [C] 시작/중지 ───────────────────────────────────────────────────
+            btnStart = new Button
             {
-                Text = "설비 노후도 분포",
-                AutoSize = false,
-                MinimumSize = new Size(120, 100),
-                Margin = new Padding(2, 6, 2, 6),
-                Padding = new Padding(6)
+                Text = "▶  진단 시작", Width = ctrlWidth, Height = btnH + 2,
+                Margin = new Padding(2, 6, 2, 2),
+                BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
+                Font = new Font(this.Font, FontStyle.Bold)
             };
-            gbAging.Width = ctrlWidth;
+            btnStop = new Button
+            {
+                Text = "■  중지", Width = ctrlWidth, Height = btnH,
+                Margin = new Padding(2, 0, 2, 2), Enabled = false,
+                BackColor = Color.FromArgb(196, 43, 28), ForeColor = Color.White, FlatStyle = FlatStyle.Flat
+            };
+            btnStart.Click += (s, e) => StartWatch();
+            btnStop.Click  += (s, e) => StopWatch();
 
-            chartDonut = new Chart { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            lblStatus = new Label
+            {
+                AutoSize = true, MaximumSize = new Size(ctrlWidth, 0),
+                Margin = new Padding(2, 2, 2, 6), ForeColor = Color.Gray
+            };
 
-            var ca2 = new ChartArea("d");
-            chartDonut.ChartAreas.Add(ca2);
-            var donut = new Series("Aging") { ChartType = SeriesChartType.Doughnut };
-            donut.Points.AddXY("양호", 75);
-            donut.Points.AddXY("주의", 15);
-            donut.Points.AddXY("위험", 10);
-            chartDonut.Series.Add(donut);
-            gbAging.Controls.Add(chartDonut);
-
-            left.Controls.AddRange(new Control[] {
-                btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
-                btnGlobalKnn, btnGlobalAe,
-                pnlMode, pnlCsvSource, pnlDbSource,
-                btnStart, btnStop, lblStatus, gbAging
-            });
-            left.ResumeLayout(false);
-            // === 축별 모델 경로 표 ===
+            // ── [D] 축별 모델 경로 ─────────────────────────────────────────────
             var gbModelPaths = new GroupBox
             {
-                Text = "축별 모델 경로",
-                Width = ctrlWidth,
-                Height = 160,
-                Padding = new Padding(6),
-                Margin = new Padding(2, 6, 2, 50) // ← Bottom 12px
+                Text = "로드된 모델", Width = ctrlWidth,
+                Padding = new Padding(6), Margin = new Padding(2, 4, 2, 4),
+                MinimumSize = new Size(120, 80)
             };
-            gbModelPaths.Width = ctrlWidth;
             gridModelPaths = new DataGridView
             {
-                Dock = DockStyle.Fill,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
+                Dock = DockStyle.Fill, ReadOnly = true,
+                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                RowHeadersVisible = false
+                RowHeadersVisible = false, BorderStyle = BorderStyle.None,
+                ColumnHeadersHeight = 22, RowTemplate = { Height = 20 }
             };
-            var colAxis = new DataGridViewTextBoxColumn { Name = "Axis", HeaderText = "Axis", FillWeight = 25, ReadOnly = true };
-            var colPath = new DataGridViewTextBoxColumn { Name = "Path", HeaderText = "Model File", FillWeight = 75, ReadOnly = true };
+            var colAxis = new DataGridViewTextBoxColumn { Name = "Axis", HeaderText = "축", FillWeight = 20, ReadOnly = true };
+            var colPath = new DataGridViewTextBoxColumn { Name = "Path", HeaderText = "모델 파일", FillWeight = 80, ReadOnly = true };
             gridModelPaths.Columns.AddRange(new DataGridViewColumn[] { colAxis, colPath });
-
             gbModelPaths.Controls.Add(gridModelPaths);
-            left.Controls.Add(gbModelPaths);
 
-            // 사이드바 리사이즈 시 그룹박스 폭을 자동 맞춤
-            leftWrap.Resize += (s, e2) =>
-            {
-                gbModelPaths.Width = leftWrap.ClientSize.Width - 16; // 좌우 패딩 감안
-                gbAging.Width = leftWrap.ClientSize.Width - 16;
-            };
+            left.Controls.AddRange(new Control[] {
+                gbModels, gbSource,
+                btnStart, btnStop, lblStatus,
+                gbModelPaths
+            });
+            left.ResumeLayout(false);
 
             // 초기 표시
             RefreshModelPathList();
@@ -1127,43 +1132,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 if (leftWrap == null || left == null) return;
 
-                // 1) 버튼/라벨 고정 높이 합
+                // 고정 높이 컨트롤 합산
                 int fixedH = 0;
-                Control[] fixedControls = new Control[] {
-        btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
-        pnlMode, pnlCsvSource, pnlDbSource,
-        btnStart, btnStop, lblStatus
-    };
+                Control[] fixedControls = { gbModels, gbSource, btnStart, btnStop, lblStatus };
                 foreach (var c in fixedControls)
                 {
                     if (c == null || !c.Visible) continue;
                     fixedH += c.Height + c.Margin.Vertical;
                 }
-                fixedH += left.Padding.Vertical; // 패딩도 포함
+                fixedH += left.Padding.Vertical;
 
-                // 2) 사용 가능한 높이
-                int availH = Math.Max(0, leftWrap.ClientSize.Height - fixedH);
+                // 남은 공간을 gbModelPaths에 할당
+                int availH = Math.Max(gbModelPaths.MinimumSize.Height,
+                                      leftWrap.ClientSize.Height - fixedH);
+                gbModelPaths.Height = availH;
 
-                // 3) 두 그룹박스에 분배 (6:4 예시, 최소값 보장)
-                int hAging = Math.Max(gbAging.MinimumSize.Height, (int)(availH * 0.6));
-                int hGrid = Math.Max(gbModelPaths.MinimumSize.Height, availH - hAging);
-
-                // 너무 커서 잘리면 균등 분배로 보정
-                int used = hAging + hGrid;
-                if (used > availH && availH > 0)
-                {
-                    hAging = availH / 2;
-                    hGrid = availH - hAging;
-                    hAging = Math.Max(gbAging.MinimumSize.Height, hAging);
-                    hGrid = Math.Max(gbModelPaths.MinimumSize.Height, hGrid);
-                }
-
-                gbAging.Height = hAging;
-                gbModelPaths.Height = hGrid;
-
-                // 폭도 보정
                 int w = Math.Max(160, leftWrap.ClientSize.Width - left.Padding.Horizontal);
-                gbAging.Width = w;
                 gbModelPaths.Width = w;
 
                 left.PerformLayout();
@@ -1173,35 +1157,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 int w = Math.Max(180, leftWrap.ClientSize.Width - 12);
 
-                Control[] toResize = new Control[]
-                {
-                    btnLoadSklModel, btnLoadModelFolder, btnLoadOnnxModelSingle,
-                    pnlMode, pnlCsvSource, pnlDbSource,
-                    btnStart, btnStop
-                };
-                foreach (Control c in toResize)
+                // 최상위 컨트롤 폭 조정
+                foreach (Control c in new Control[] { gbModels, gbSource, btnStart, btnStop, gbModelPaths })
                     if (c != null) c.Width = w;
 
-                gbAging.Width = w;
-                gbModelPaths.Width = w;
-
                 // pnlCsvSource 내부
-                if (btnSelectFolder != null) btnSelectFolder.Width = w;
-                if (lblFolder != null) lblFolder.MaximumSize = new Size(w, 0);
+                if (btnSelectFolder != null) { btnSelectFolder.Width = w - 12; lblFolder.MaximumSize = new Size(w - 12, 0); }
 
                 // pnlDbSource 내부 너비 조정
                 if (pnlDbSource != null)
                 {
-                    int lw = 52;
-                    if (cmbDbDevice  != null) { cmbDbDevice.Width  = w - lw - 28; btnDbRefresh.Left  = w - 24; }
-                    if (cmbDbLabel   != null)   cmbDbLabel.Width   = w - lw - 2;
-                    if (dtpDbFrom    != null) { dtpDbFrom.Width    = w - lw - 28; btnDbFullRange.Left = w - 24; }
-                    if (dtpDbTo      != null)   dtpDbTo.Width      = w - lw - 2;
-                    if (txtInfluxCfgPath != null) { txtInfluxCfgPath.Width = w - 26; }
-                    foreach (Control c in pnlDbSource.Controls)
-                    {
-                        if (c is Button b && b.Text == "…") b.Left = w - 24;
-                    }
+                    int lw = 52, inner = w - 12;
+                    if (cmbDbDevice  != null) { cmbDbDevice.Width  = inner - lw - 28; btnDbRefresh.Left  = inner - 24; }
+                    if (cmbDbLabel   != null)   cmbDbLabel.Width   = inner - lw - 2;
+                    if (dtpDbFrom    != null) { dtpDbFrom.Width    = inner - lw - 28; btnDbFullRange.Left = inner - 24; }
+                    if (dtpDbTo      != null)   dtpDbTo.Width      = inner - lw - 2;
                 }
 
                 LayoutLeftAuto();
@@ -2962,9 +2932,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         private void EnsureInfluxSource()
         {
-            string cfgPath = txtInfluxCfgPath?.Text?.Trim() ?? "";
-            if (string.IsNullOrEmpty(cfgPath)) cfgPath = FindInfluxConfigPath();
-            var cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            // ServerSettings.Current 우선 사용, 없으면 파일에서 로드
+            var cfg = Services.ServerSettings.Current.ToInfluxConfig();
+            if (string.IsNullOrEmpty(cfg.Url) || cfg.Url == "http://localhost:8086")
+            {
+                string cfgPath = FindInfluxConfigPath();
+                cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            }
             if (_influxSource == null)
                 _influxSource = new InfluxDbDataSource(cfg);
         }
