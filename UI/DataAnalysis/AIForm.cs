@@ -1323,7 +1323,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // Torque 채널 패널
             var trqFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Name = "trqFlow", Visible = false };
-            var trqCols = new[] { "Ax0_Pos(mm)", "Ax0_Vel(mm/s)", "Ax0_Trq(%)", "Ax0_CmdPos(mm)", "Ax0_CmdVel(mm/s)" };
+            var trqCols = new[] { "Pos(mm)", "Vel(mm/s)", "Trq(%)", "CmdPos(mm)", "CmdVel(mm/s)" };
             _dlChTrq = new CheckBox[trqCols.Length];
             for (int i = 0; i < trqCols.Length; i++)
             {

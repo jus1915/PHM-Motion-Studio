@@ -158,6 +158,25 @@ def _extract_windows(
     return results
 
 
+def _resolve_channels(headers: List[str], channels: List[str]) -> List[str]:
+    """축 번호 없는 토크 채널명(e.g. 'Trq(%)')을 실제 헤더 컬럼명으로 매핑합니다.
+
+    채널명에 'Ax'가 없으면 'Ax\\d+_{channel}' 패턴으로 첫 번째 매칭 컬럼을 사용합니다.
+    직접 매칭되는 컬럼이 있으면 그대로 사용합니다.
+    """
+    import re as _re
+    resolved = []
+    for ch in channels:
+        if ch in headers:
+            resolved.append(ch)
+        else:
+            # Ax0_Trq(%) 형태 검색 (괄호를 escape 처리)
+            pat = _re.compile(r"^Ax\d+_" + _re.escape(ch) + r"$", _re.IGNORECASE)
+            match = next((h for h in headers if pat.match(h)), None)
+            resolved.append(match if match else ch)  # 못 찾으면 원래 이름 유지 (오류로 처리됨)
+    return resolved
+
+
 def _read_signal_csv(
     path: str,
     channels: List[str],
@@ -184,11 +203,13 @@ def _read_signal_csv(
         if reader.fieldnames is None:
             return np.empty((0, len(channels)), dtype=np.float32), None
 
+        # 축 번호 없는 채널명(e.g. "Trq(%)") → 실제 컬럼명(e.g. "Ax0_Trq(%)") 해석
+        actual_channels = _resolve_channels(list(reader.fieldnames), channels)
         has_label = label_column in (reader.fieldnames or [])
 
         for row in reader:
             try:
-                vals = [float(row[c]) for c in channels]
+                vals = [float(row[c]) for c in actual_channels]
             except (KeyError, ValueError, TypeError):
                 continue
             if any(math.isnan(v) or math.isinf(v) for v in vals):
