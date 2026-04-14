@@ -125,7 +125,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private ListBox          _dlClassList;
         private TextBox          _dlNewClassName;
         private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
-        private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv;
+        private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv, _dlBtnBatch;
         private RichTextBox      _dlLog;
         private ProgressBar      _dlProgress;
         private Label            _dlStatus;
@@ -1249,13 +1249,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // 버튼 행
             var btnRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-            _dlBtnTrain = new Button { Text = "▶ DL 학습 시작", Width = 130, Height = 24, BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-            _dlBtnStop  = new Button { Text = "■ 중지",          Width = 80,  Height = 24, Enabled = false };
-            _dlBtnVenv  = new Button { Text = "🐍 가상환경 설정", Width = 120, Height = 24 };
+            _dlBtnTrain = new Button { Text = "▶ 학습 시작", Width = 110, Height = 24, BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            _dlBtnBatch = new Button { Text = "⚡ 전체 축 일괄", Width = 115, Height = 24, BackColor = Color.FromArgb(16, 110, 60), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            _dlBtnStop  = new Button { Text = "■ 중지",          Width = 70,  Height = 24, Enabled = false };
+            _dlBtnVenv  = new Button { Text = "🐍 가상환경",     Width = 100, Height = 24 };
             _dlBtnTrain.Click += (s, e) => StartDlTrainingAsync();
+            _dlBtnBatch.Click += (s, e) => StartBatchTrainingAsync();
             _dlBtnStop.Click  += (s, e) => StopDlTraining();
             _dlBtnVenv.Click  += (s, e) => RunSetupVenv();
             btnRow.Controls.Add(_dlBtnTrain);
+            btnRow.Controls.Add(_dlBtnBatch);
             btnRow.Controls.Add(_dlBtnStop);
             btnRow.Controls.Add(_dlBtnVenv);
 
@@ -1576,6 +1579,191 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         // ── DL 학습 실행 ─────────────────────────────────────────────────────
 
+        /// <summary>현재 UI 설정을 기반으로 학습 params를 빌드합니다. 실패 시 null 반환.</summary>
+        private Dictionary<string, object> BuildDlParams(string dataDir, string outputPath)
+        {
+            var channels = new List<string>();
+            bool isTorque = _dlRdoTorque?.Checked == true;
+            if (isTorque) { if (_dlChTrq != null) foreach (var cb in _dlChTrq) if (cb.Checked) channels.Add(cb.Text); }
+            else { if (_dlChX.Checked) channels.Add("x"); if (_dlChY.Checked) channels.Add("y"); if (_dlChZ.Checked) channels.Add("z"); }
+            if (channels.Count == 0) return null;
+
+            var classNames = _dlClassList.Items.Cast<string>().ToList();
+            if (classNames.Count < 2) return null;
+
+            if (!double.TryParse(_dlLr.Text.Trim(), System.Globalization.NumberStyles.Float,
+                CultureInfo.InvariantCulture, out double lr) || lr <= 0) return null;
+
+            return new Dictionary<string, object>
+            {
+                ["data_dir"]            = dataDir,
+                ["output"]              = outputPath,
+                ["channels"]            = channels.ToArray(),
+                ["sensor_type"]         = isTorque ? "torque" : "accel",
+                ["label_column"]        = _dlLabelColumn?.Text?.Trim() ?? "Label",
+                ["class_names"]         = classNames.ToArray(),
+                ["window_size"]         = (int)_dlWindowSize.Value,
+                ["stride"]              = (int)_dlStride.Value,
+                ["epochs"]              = (int)_dlEpochs.Value,
+                ["batch_size"]          = (int)_dlBatch.Value,
+                ["lr"]                  = lr,
+                ["val_split"]           = (double)_dlValSplit.Value / 100.0,
+                ["seed"]                = 42,
+                ["mlflow_tracking_uri"] = Services.ServerSettings.Current.MlflowUrl ?? "",
+                ["mlflow_experiment"]   = "PHM-DL",
+            };
+        }
+
+        /// <summary>현재 데이터 폴더 부모에서 {date_Axis*} 폴더를 스캔해 일괄 학습합니다.</summary>
+        private async void StartBatchTrainingAsync()
+        {
+            // 현재 폴더의 부모(Signals 루트) 탐색
+            string currentDir = _dlDataDir?.Text?.Trim() ?? "";
+            string signalsRoot = System.IO.Directory.Exists(currentDir)
+                ? (System.IO.Path.GetDirectoryName(currentDir) ?? currentDir)
+                : currentDir;
+            if (!System.IO.Directory.Exists(signalsRoot))
+            { MessageBox.Show("데이터 폴더가 없습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            // Axis 폴더 탐색
+            var axisDirs = System.IO.Directory.GetDirectories(signalsRoot)
+                .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
+                    System.IO.Path.GetFileName(d), @"[Aa]xis\d+"))
+                .OrderBy(d => d)
+                .ToList();
+
+            if (axisDirs.Count == 0)
+            {
+                // 현재 폴더 자체에 Axis 폴더가 있을 수도 있음 (예: Signals 루트에서 직접 실행)
+                axisDirs = System.IO.Directory.GetDirectories(currentDir)
+                    .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
+                        System.IO.Path.GetFileName(d), @"[Aa]xis\d+"))
+                    .OrderBy(d => d)
+                    .ToList();
+                if (axisDirs.Count == 0)
+                    axisDirs = new List<string> { currentDir }; // 단일 폴더로 fallback
+            }
+
+            var dlg = MessageBox.Show(
+                $"다음 {axisDirs.Count}개 축을 순차 학습합니다:\n\n" +
+                string.Join("\n", axisDirs.Select(d => "  • " + System.IO.Path.GetFileName(d))) +
+                "\n\n계속할까요?",
+                "일괄 학습 확인", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+            if (dlg != DialogResult.OK) return;
+
+            // Python + 스크립트 확인 (공통)
+            string scriptsDir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
+            string venvPython = System.IO.Path.Combine(scriptsDir, ".venv", "Scripts", "python.exe");
+            string python = System.IO.File.Exists(venvPython) ? venvPython : FindPythonExe(txtPythonPath?.Text?.Trim() ?? "");
+            if (python == null) { MessageBox.Show("Python을 찾을 수 없습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+            string scriptPath = System.IO.Path.Combine(scriptsDir, "train_dl_model.py");
+            if (!System.IO.File.Exists(scriptPath)) { MessageBox.Show("train_dl_model.py 없음.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            string modelsDir = System.IO.Path.GetDirectoryName(_dlOutputPath?.Text ?? "") ?? @"C:\Data\PHM_Logs\models";
+            bool isTorque = _dlRdoTorque?.Checked == true;
+            string sigTag = isTorque ? "torque" : "accel";
+
+            _dlBtnTrain.Enabled = false; _dlBtnBatch.Enabled = false; _dlBtnStop.Enabled = true;
+            _dlLog.Clear();
+
+            int total = axisDirs.Count, done = 0;
+            foreach (var axisDir in axisDirs)
+            {
+                if (_dlProc != null) break; // 중지 체크
+
+                string axisName = System.IO.Path.GetFileName(axisDir);
+                var axisMatch = System.Text.RegularExpressions.Regex.Match(axisName, @"[Aa]xis(\d+)");
+                int axisNum = axisMatch.Success ? int.Parse(axisMatch.Groups[1].Value) : done;
+                string outputPath = System.IO.Path.Combine(modelsDir, $"cnn1d_axis{axisNum}_{sigTag}.onnx");
+                try { System.IO.Directory.CreateDirectory(modelsDir); } catch { }
+
+                var paramsObj = BuildDlParams(axisDir, outputPath);
+                if (paramsObj == null)
+                {
+                    AppendDlLog($"[SKIP] {axisName} — params 빌드 실패 (채널/클래스 미설정)", Color.Yellow);
+                    done++; continue;
+                }
+
+                AppendDlLog($"\n━━━ [{done + 1}/{total}] {axisName} ━━━", Color.Cyan);
+                _dlStatus.Text = $"일괄 [{done + 1}/{total}] {axisName}";
+
+                string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"phm_dl_batch_{axisNum}.json");
+                System.IO.File.WriteAllText(paramsPath,
+                    JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = true }),
+                    new System.Text.UTF8Encoding(false));
+
+                int totalEpochs = (int)_dlEpochs.Value;
+                bool success = await System.Threading.Tasks.Task.Run(() => RunTrainingProcess(python, scriptPath, paramsPath, totalEpochs));
+
+                done++;
+                _dlProgress.Value = (int)(done * 100.0 / total);
+                if (!success) AppendDlLog($"[FAIL] {axisName}", Color.Red);
+                else          AppendDlLog($"[OK]   모델 저장: {outputPath}", Color.LightGreen);
+            }
+
+            _dlBtnTrain.Enabled = true; _dlBtnBatch.Enabled = true; _dlBtnStop.Enabled = false;
+            _dlStatus.Text = $"일괄 완료 ({done}/{total})";
+            MessageBox.Show($"일괄 학습 완료: {done}/{total}개 축\n모델 폴더: {modelsDir}",
+                "완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        /// <summary>학습 프로세스를 실행하고 완료 여부를 반환합니다. 동기 블로킹 — Task.Run에서 호출.</summary>
+        /// <param name="onProgress">에포크 진행률(0-100)을 받는 콜백 (선택적)</param>
+        private bool RunTrainingProcess(string python, string scriptPath, string paramsPath, int totalEpochs, Action<int> onProgress = null)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(python, $"\"{scriptPath}\" --params \"{paramsPath}\"")
+                {
+                    UseShellExecute = false, RedirectStandardOutput = true,
+                    RedirectStandardError = true, CreateNoWindow = true,
+                };
+                _dlProc = System.Diagnostics.Process.Start(psi);
+                _dlProc.ErrorDataReceived += (s2, ea) =>
+                {
+                    if (ea.Data != null) BeginInvoke(new Action(() => AppendDlLog("[ERR] " + ea.Data, Color.Orange)));
+                };
+                _dlProc.BeginErrorReadLine();
+
+                string line;
+                while ((line = _dlProc.StandardOutput.ReadLine()) != null)
+                {
+                    string captured = line;
+                    BeginInvoke(new Action(() =>
+                    {
+                        AppendDlLog(captured);
+                        try
+                        {
+                            using (var doc = JsonDocument.Parse(captured))
+                            {
+                                if (doc.RootElement.TryGetProperty("epoch", out var ep))
+                                {
+                                    int pct = Math.Min(100, (int)(ep.GetInt32() * 100.0 / totalEpochs));
+                                    onProgress?.Invoke(pct);
+                                    if (doc.RootElement.TryGetProperty("val_acc", out var va))
+                                        _dlStatus.Text = $"에포크 {ep.GetInt32()}/{totalEpochs}  val_acc={va.GetDouble():F3}";
+                                }
+                                if (doc.RootElement.TryGetProperty("accuracy", out var acc))
+                                    _dlStatus.Text = $"완료  최종={acc.GetDouble():F3}";
+                            }
+                        }
+                        catch { }
+                    }));
+                }
+                _dlProc.WaitForExit();
+                int exitCode = _dlProc.ExitCode;
+                _dlProc = null;
+                return exitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new Action(() => AppendDlLog("프로세스 오류: " + ex.Message, Color.Red)));
+                _dlProc = null;
+                return false;
+            }
+        }
+
         private async void StartDlTrainingAsync()
         {
             // ── 유효성 검사 ──────────────────────────────────────────────────
@@ -1587,33 +1775,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (string.IsNullOrEmpty(outputPath))
             { MessageBox.Show("출력 모델 경로를 입력하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
-            var channels = new List<string>();
-            bool isTorque = _dlRdoTorque?.Checked == true;
-            if (isTorque)
-            {
-                if (_dlChTrq != null)
-                    foreach (var cb in _dlChTrq)
-                        if (cb.Checked) channels.Add(cb.Text);
-            }
-            else
-            {
-                if (_dlChX.Checked) channels.Add("x");
-                if (_dlChY.Checked) channels.Add("y");
-                if (_dlChZ.Checked) channels.Add("z");
-            }
-            if (channels.Count == 0)
-            { MessageBox.Show("입력 채널을 하나 이상 선택하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
-
-            var classNames = _dlClassList.Items.Cast<string>().ToList();
-            if (classNames.Count < 2)
-            { MessageBox.Show("결함 클래스를 2개 이상 입력하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
-
-            if (!double.TryParse(_dlLr.Text.Trim(), System.Globalization.NumberStyles.Float,
-                CultureInfo.InvariantCulture, out double lr) || lr <= 0)
-            { MessageBox.Show("학습률 형식이 잘못됐습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+            // ── params 빌드 ─────────────────────────────────────────────────
+            var paramsObj = BuildDlParams(dataDir, outputPath);
+            if (paramsObj == null)
+            { MessageBox.Show("입력 채널(1개 이상), 결함 클래스(2개 이상), 학습률을 확인하세요.", "설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
             // ── Python 및 스크립트 확인 ──────────────────────────────────────
-            // .venv 가상환경을 우선 사용 (setup_venv.bat 으로 생성된 경우)
             string scriptsDir = System.IO.Path.Combine(
                 System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
             string venvPython = System.IO.Path.Combine(scriptsDir, ".venv", "Scripts", "python.exe");
@@ -1631,36 +1798,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             AppendDlLog($"[Python] {python}");
 
-            string scriptPath = System.IO.Path.Combine(
-                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".",
-                "scripts", "train_dl_model.py");
+            string scriptPath = System.IO.Path.Combine(scriptsDir, "train_dl_model.py");
             if (!System.IO.File.Exists(scriptPath))
             { MessageBox.Show("train_dl_model.py 를 찾을 수 없습니다:\n" + scriptPath, "스크립트 없음", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
-            // ── 출력 폴더 생성 ────────────────────────────────────────────────
+            // ── 출력 폴더 생성 + params JSON 저장 ─────────────────────────────
             try { System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(outputPath)); } catch { }
-
-            // ── params JSON 작성 ─────────────────────────────────────────────
             int totalEpochs = (int)_dlEpochs.Value;
-            string mlflowUri = Services.ServerSettings.Current.MlflowUrl ?? "";
-            var paramsObj = new Dictionary<string, object>
-            {
-                ["data_dir"]            = dataDir,
-                ["output"]              = outputPath,
-                ["channels"]            = channels.ToArray(),
-                ["sensor_type"]         = isTorque ? "torque" : "accel",
-                ["label_column"]        = _dlLabelColumn?.Text?.Trim() ?? "Label",
-                ["class_names"]         = classNames.ToArray(),
-                ["window_size"]         = (int)_dlWindowSize.Value,
-                ["stride"]              = (int)_dlStride.Value,
-                ["epochs"]              = totalEpochs,
-                ["batch_size"]          = (int)_dlBatch.Value,
-                ["lr"]                  = lr,
-                ["val_split"]           = (double)_dlValSplit.Value / 100.0,
-                ["seed"]                = 42,
-                ["mlflow_tracking_uri"] = mlflowUri,
-                ["mlflow_experiment"]   = "PHM-DL",
-            };
             string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_dl_params.json");
             System.IO.File.WriteAllText(paramsPath,
                 JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = true }),
@@ -1668,8 +1812,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // ── UI 상태 전환 ─────────────────────────────────────────────────
             _dlLog.Clear();
-            _dlProgress.Value = 0;
+            _dlProgress.Value   = 0;
             _dlBtnTrain.Enabled = false;
+            _dlBtnBatch.Enabled = false;
             _dlBtnStop.Enabled  = true;
             _dlStatus.Text = "학습 중...";
             AppendDlLog($"[시작] python \"{scriptPath}\"");
@@ -1677,90 +1822,27 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             AppendDlLog("");
 
             // ── 비동기 프로세스 실행 ─────────────────────────────────────────
-            await System.Threading.Tasks.Task.Run(() =>
+            bool success = await System.Threading.Tasks.Task.Run(() =>
+                RunTrainingProcess(python, scriptPath, paramsPath, totalEpochs,
+                    pct => BeginInvoke(new Action(() => _dlProgress.Value = pct))));
+
+            _dlProgress.Value   = success ? 100 : _dlProgress.Value;
+            _dlBtnTrain.Enabled = true;
+            _dlBtnBatch.Enabled = true;
+            _dlBtnStop.Enabled  = false;
+
+            if (success)
             {
-                try
-                {
-                    var psi = new System.Diagnostics.ProcessStartInfo(python, $"\"{scriptPath}\" --params \"{paramsPath}\"")
-                    {
-                        UseShellExecute        = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError  = true,
-                        CreateNoWindow         = true,
-                    };
-                    _dlProc = System.Diagnostics.Process.Start(psi);
-
-                    // stderr → 로그 (별도 스레드)
-                    _dlProc.ErrorDataReceived += (s2, ea) =>
-                    {
-                        if (ea.Data != null) BeginInvoke(new Action(() => AppendDlLog("[ERR] " + ea.Data, Color.Orange)));
-                    };
-                    _dlProc.BeginErrorReadLine();
-
-                    // stdout → 에포크 진행 파싱
-                    string line;
-                    while ((line = _dlProc.StandardOutput.ReadLine()) != null)
-                    {
-                        string captured = line;
-                        BeginInvoke(new Action(() =>
-                        {
-                            AppendDlLog(captured);
-                            // {"epoch": N, "loss": ..., "val_acc": ...} 파싱해 진행률 갱신
-                            try
-                            {
-                                using (var doc = JsonDocument.Parse(captured))
-                                {
-                                    if (doc.RootElement.TryGetProperty("epoch", out var ep))
-                                    {
-                                        int pct = Math.Min(100, (int)(ep.GetInt32() * 100.0 / totalEpochs));
-                                        _dlProgress.Value = pct;
-                                        if (doc.RootElement.TryGetProperty("val_acc", out var va))
-                                            _dlStatus.Text = $"에포크 {ep.GetInt32()}/{totalEpochs}  val_acc={va.GetDouble():F3}";
-                                    }
-                                    // 최종 결과 행
-                                    if (doc.RootElement.TryGetProperty("accuracy", out var acc))
-                                        _dlStatus.Text = $"완료  최종 정확도={acc.GetDouble():F3}";
-                                }
-                            }
-                            catch { /* JSON 아닌 행 무시 */ }
-                        }));
-                    }
-
-                    _dlProc.WaitForExit();
-                    int exitCode = _dlProc.ExitCode;
-
-                    BeginInvoke(new Action(() =>
-                    {
-                        _dlProgress.Value   = exitCode == 0 ? 100 : _dlProgress.Value;
-                        _dlBtnTrain.Enabled = true;
-                        _dlBtnStop.Enabled  = false;
-                        _dlProc = null;
-
-                        if (exitCode == 0)
-                        {
-                            _dlStatus.Text = "완료 ✓";
-                            AppendDlLog($"\n모델 저장: {outputPath}", Color.Cyan);
-                            MessageBox.Show($"DL 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX 분류 모델로 로드하세요.",
-                                "학습 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }
-                        else
-                        {
-                            _dlStatus.Text = $"오류 (exitcode={exitCode})";
-                            AppendDlLog($"학습 실패 — exitcode={exitCode}", Color.Red);
-                        }
-                    }));
-                }
-                catch (Exception ex)
-                {
-                    BeginInvoke(new Action(() =>
-                    {
-                        _dlBtnTrain.Enabled = true;
-                        _dlBtnStop.Enabled  = false;
-                        _dlStatus.Text = "실행 오류";
-                        AppendDlLog("실행 오류: " + ex.Message, Color.Red);
-                    }));
-                }
-            });
+                _dlStatus.Text = "완료 ✓";
+                AppendDlLog($"\n모델 저장: {outputPath}", Color.Cyan);
+                MessageBox.Show($"DL 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX 분류 모델로 로드하세요.",
+                    "학습 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                _dlStatus.Text = "오류";
+                AppendDlLog("학습 실패", Color.Red);
+            }
         }
 
         private void RunSetupVenv()
