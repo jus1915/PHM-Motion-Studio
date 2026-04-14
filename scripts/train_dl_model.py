@@ -158,6 +158,30 @@ def _extract_windows(
     return results
 
 
+def _detect_sensor_type_from_headers(csv_path: str) -> str:
+    """CSV 헤더를 읽어 센서 타입을 추론합니다.
+
+    Returns:
+        "torque" — Trq 관련 컬럼이 있고 x/y/z 가속도 컬럼이 없는 경우
+        "accel"  — x, y, z 컬럼이 있는 경우
+        ""       — 판별 불가
+    """
+    import csv as _csv
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as f:
+            reader = _csv.reader(f)
+            headers = [h.strip().lower() for h in (next(reader, []))]
+        has_trq  = any("trq" in h or "vel(mm" in h or "pos(mm" in h for h in headers)
+        has_xyz  = any(h in ("x", "y", "z") for h in headers)
+        if has_trq and not has_xyz:
+            return "torque"
+        if has_xyz:
+            return "accel"
+    except Exception:
+        pass
+    return ""
+
+
 def _resolve_channels(headers: List[str], channels: List[str]) -> List[str]:
     """축 번호 없는 토크 채널명(e.g. 'Trq(%)')을 실제 헤더 컬럼명으로 매핑합니다.
 
@@ -263,12 +287,20 @@ def load_windows_from_dir(
         print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
         return []
 
-    # sensor_type 필터 — 경로 컴포넌트에 "Accel" 또는 "Torque" 가 있는 파일만
+    # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 없으면 헤더 기반 fallback
     filter_kw = sensor_type.strip().lower()
     if filter_kw in ("accel", "torque"):
-        csv_files = [f for f in csv_files
-                     if any(p.lower() == filter_kw for p in f.parts)]
-        print(f"[data] sensor_type={filter_kw} 필터 적용 → {len(csv_files)}개 파일", file=sys.stderr)
+        # 1차: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
+        path_filtered = [f for f in csv_files
+                         if any(p.lower() == filter_kw for p in f.parts)]
+        if path_filtered:
+            csv_files = path_filtered
+            print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
+        else:
+            # 2차 fallback: CSV 헤더를 읽어 센서 타입 추론 (평탄한 폴더 구조 대응)
+            csv_files = [f for f in csv_files
+                         if _detect_sensor_type_from_headers(str(f)) == filter_kw]
+            print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
         signal, label_str = _read_signal_csv(str(csv_path), channels, label_column)
