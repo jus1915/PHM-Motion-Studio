@@ -2916,13 +2916,14 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             else
             {
-                // 체크 해제 → 차트에서 시리즈 제거
+                // 체크 해제 → Time domain + Frequency 차트에서 시리즈 제거
                 lock (chartSync)
                 {
                     var s = chart.Series.FindByName(seriesName);
                     if (s != null) chart.Series.Remove(s);
                 }
                 AutoAdjustYAxis();
+                ScheduleFreqUpdate();   // 주파수 차트도 동기화
             }
         }
 
