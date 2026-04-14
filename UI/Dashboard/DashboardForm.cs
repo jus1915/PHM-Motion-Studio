@@ -2914,40 +2914,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _watcher.Renamed += OnFileRenamed;
             _watcher.Error   += OnWatcherError;
 
-            // 6) 상태 초기화 (베이스라인 길이는 기록하지 않음 — 기존 파일도 즉시 처리)
+            // 6) 기존 파일 길이를 베이스라인으로 기록 — 진단 시작 이후 새로 생기는 파일만 처리
             var option = WatchSubdirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-            string[] existingFiles;
             lock (_sync)
             {
                 _processing.Clear();
                 foreach (var kv in _debouncers) { try { kv.Value.Cancel(); } catch { } try { kv.Value.Dispose(); } catch { } }
                 _debouncers.Clear();
                 _lastProcessedLen.Clear();
+                foreach (string f in Directory.EnumerateFiles(_watchFolder, "*.csv", option))
+                {
+                    try { _lastProcessedLen[f] = new FileInfo(f).Length; } catch { }
+                }
             }
-            existingFiles = Directory.GetFiles(_watchFolder, "*.csv",
-                WatchSubdirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
 
             // 7) 이벤트 시작
             _watcher.EnableRaisingEvents = true;
-
-            // 8) 기존 CSV 파일 즉시 처리 (진단 시작 시점의 최신 파일 1개씩)
-            if (existingFiles.Length > 0)
-            {
-                // 수정시간 기준 최신 파일부터 처리 (같은 축 파일이 여러 개면 최신 것만)
-                var toProcess = existingFiles
-                    .OrderByDescending(f => { try { return new FileInfo(f).LastWriteTime; } catch { return DateTime.MinValue; } })
-                    .ToArray();
-                Task.Run(() =>
-                {
-                    foreach (var f in toProcess)
-                    {
-                        if (_watcher == null) break;  // 중지됐으면 취단
-                        try { ProcessCsvSafe(f); } catch { }
-                    }
-                });
-                BeginInvoke(new Action(() =>
-                    AppendEventLog($"[FSW] 기존 CSV {existingFiles.Length}개 처리 예약")));
-            }
 
             foreach (var kv in _axisOnnxCls)
             {
