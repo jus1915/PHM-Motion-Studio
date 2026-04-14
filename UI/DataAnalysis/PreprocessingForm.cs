@@ -1162,7 +1162,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action(() => RebuildChartFromCheckedFiles(forceReload)));
+                SafeBeginInvoke(new Action(() => RebuildChartFromCheckedFiles(forceReload)));
                 return;
             }
 
@@ -1315,7 +1315,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     double[] dx, dy;
                     DownsampleMinMax(xs, ys, MaxDisplayPointsPerSeries, out dx, out dy);
 
-                    this.BeginInvoke(new Action(() =>
+                    SafeBeginInvoke(new Action(() =>
                     {
                         chart.BeginInit();
                         try
@@ -1397,7 +1397,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     results.Add((t.Name, freq, spec));
                 }
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     chartFreq.BeginInit();
                     try
@@ -1608,7 +1608,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     _featureTable.Add(row);
                 }
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     gridFeatures.DataSource = null;
                     gridFeatures.DataSource = _featureTable;
@@ -2233,45 +2233,90 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));  // 레이블 열
             tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // 컨트롤 열
 
+            // ── 연결 상태 행 (InfluxDB URL + 연결 인디케이터) ───────────────
+            tbl.RowCount++;
+            tbl.RowStyles.Insert(0, new RowStyle(SizeType.AutoSize));
+            var connRow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill, AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 2, 0, 4)
+            };
+            _lblConnDot = new Label
+            {
+                Text = "●", ForeColor = Color.LightGray,
+                AutoSize = true, Font = new Font(Font.FontFamily, 10f, FontStyle.Bold),
+                Margin = new Padding(0, 1, 4, 0)
+            };
+            var lblConnUrl = new Label
+            {
+                AutoSize = true, ForeColor = Color.DimGray,
+                Font = new Font(Font.FontFamily, 8f),
+                Margin = new Padding(0, 3, 6, 0)
+            };
+            // URL 표시 (ServerSettings에서)
+            lblConnUrl.Text = ServerSettings.Current?.InfluxUrl ?? "localhost:8086";
+            AppEvents.ServerSettingsChanged += ss =>
+            {
+                SafeBeginInvoke(() =>
+                {
+                    lblConnUrl.Text = ss?.InfluxUrl ?? "?";
+                    _influxSource = null; // 설정 바뀌면 재연결
+                    SetConnectionIndicator(ConnectionState.Connecting);
+                    LoadInfluxMetadataAsync();
+                });
+            };
+            var btnRefresh = new Button
+            {
+                Text = "↺", Width = 24, Height = 22,
+                Margin = new Padding(0, 1, 0, 0), FlatStyle = FlatStyle.Flat,
+                Font = new Font(Font.FontFamily, 9f)
+            };
+            btnRefresh.FlatAppearance.BorderSize = 0;
+            btnRefresh.Click += (s, e) => { _influxSource = null; LoadInfluxMetadataAsync(); };
+            connRow.Controls.AddRange(new Control[] { _lblConnDot, lblConnUrl, btnRefresh });
+            tbl.Controls.Add(new Label { Text = "상태:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 0);
+            tbl.Controls.Add(connRow, 1, 0);
+
             // Device
-            tbl.Controls.Add(new Label { Text = "Device:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 0);
+            tbl.Controls.Add(new Label { Text = "Device:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 1);
             _cmbInfluxDevice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
-            tbl.Controls.Add(_cmbInfluxDevice, 1, 0);
+            tbl.Controls.Add(_cmbInfluxDevice, 1, 1);
 
             // 레이블
-            tbl.Controls.Add(new Label { Text = "레이블:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 1);
+            tbl.Controls.Add(new Label { Text = "레이블:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 2);
             _cmbInfluxLabel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
             _cmbInfluxLabel.Items.Add("(전체)");
             _cmbInfluxLabel.SelectedIndex = 0;
-            tbl.Controls.Add(_cmbInfluxLabel, 1, 1);
+            tbl.Controls.Add(_cmbInfluxLabel, 1, 2);
 
             // 채널
-            tbl.Controls.Add(new Label { Text = "채널:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 2);
+            tbl.Controls.Add(new Label { Text = "채널:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 3);
             _cmbInfluxChannel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
             _cmbInfluxChannel.Items.AddRange(new object[] { "x", "y", "z", "torque" });
             _cmbInfluxChannel.SelectedIndex = 0;
-            tbl.Controls.Add(_cmbInfluxChannel, 1, 2);
+            tbl.Controls.Add(_cmbInfluxChannel, 1, 3);
 
             // 시작
-            tbl.Controls.Add(new Label { Text = "시작:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 3);
+            tbl.Controls.Add(new Label { Text = "시작:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 4);
             _dtpFrom = new DateTimePicker
             {
                 Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
                 Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now.AddDays(-1)
             };
-            tbl.Controls.Add(_dtpFrom, 1, 3);
+            tbl.Controls.Add(_dtpFrom, 1, 4);
 
             // 종료
-            tbl.Controls.Add(new Label { Text = "종료:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 4);
+            tbl.Controls.Add(new Label { Text = "종료:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 5);
             _dtpTo = new DateTimePicker
             {
                 Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
                 Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now
             };
-            tbl.Controls.Add(_dtpTo, 1, 4);
+            tbl.Controls.Add(_dtpTo, 1, 5);
 
             // 세그(초) + 조회 버튼 — 같은 셀에 FlowLayout
-            tbl.Controls.Add(new Label { Text = "세그(초):", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 5);
+            tbl.Controls.Add(new Label { Text = "세그(초):", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 6);
             var segRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0, 1, 0, 2) };
             _nudSegSeconds = new NumericUpDown
             {
@@ -2285,7 +2330,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             segRow.Controls.Add(_nudSegSeconds);
             segRow.Controls.Add(_btnInfluxQuery);
             segRow.Controls.Add(_btnInfluxFullRange);
-            tbl.Controls.Add(segRow, 1, 5);
+            tbl.Controls.Add(segRow, 1, 6);
 
             // ── 상태 레이블 ───────────────────────────────────────────────────
             _lblInfluxStatus = new Label
@@ -2428,11 +2473,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     DateTime baseTime = File.GetLastWriteTimeUtc(path);
                     await _influxSource.WriteCsvAsync(path, device, label,
                         AppState.Accel, baseTime, progress).ConfigureAwait(false);
-                    this.BeginInvoke(new Action(() =>
+                    SafeBeginInvoke(new Action(() =>
                         _lblInfluxStatus.Text = $"업로드 완료: {i + 1}/{csvFiles.Length}"));
                 }
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.DarkGreen;
                     _lblInfluxStatus.Text = $"업로드 완료 ({csvFiles.Length}개 파일)";
@@ -2441,7 +2486,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             catch (Exception ex)
             {
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.Red;
                     _lblInfluxStatus.Text = $"업로드 오류: {ex.Message}";
@@ -2449,7 +2494,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             finally
             {
-                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
             }
         }
 
@@ -2489,7 +2534,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                                        .ConfigureAwait(false);
                 }
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.DarkGreen;
                     _lblInfluxStatus.Text = $"삭제 완료 ({selected.Count}개 세그먼트)";
@@ -2504,7 +2549,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             catch (Exception ex)
             {
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.Red;
                     _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
@@ -2512,7 +2557,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             finally
             {
-                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
             }
         }
 
@@ -2570,7 +2615,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 EnsureInfluxSource();
                 await _influxSource.DeleteAsync(device, chosenLabel).ConfigureAwait(false);
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.DarkGreen;
                     _lblInfluxStatus.Text = $"삭제 완료: label={chosenLabel}";
@@ -2589,7 +2634,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             catch (Exception ex)
             {
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.Red;
                     _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
@@ -2597,7 +2642,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             finally
             {
-                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
             }
         }
 
@@ -2622,7 +2667,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 EnsureInfluxSource();
                 await _influxSource.DeleteAsync(device, null).ConfigureAwait(false);
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.DarkGreen;
                     _lblInfluxStatus.Text = "전체 삭제 완료";
@@ -2633,7 +2678,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             catch (Exception ex)
             {
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.Red;
                     _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
@@ -2641,7 +2686,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             finally
             {
-                this.BeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
             }
         }
 
@@ -2677,19 +2722,23 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private async void LoadInfluxMetadataAsync()
         {
-            _lblInfluxStatus.ForeColor = Color.Gray;
-            _lblInfluxStatus.Text = "메타데이터 로드 중...";
+            SafeBeginInvoke(() =>
+            {
+                _lblInfluxStatus.ForeColor = Color.Gray;
+                _lblInfluxStatus.Text = "메타데이터 로드 중...";
+                SetConnectionIndicator(ConnectionState.Connecting);
+            });
             try
             {
                 EnsureInfluxSource();
-                var devTask    = _influxSource.GetDevicesAsync();
-                var labelTask  = _influxSource.GetLabelsAsync();
+                var devTask   = _influxSource.GetDevicesAsync();
+                var labelTask = _influxSource.GetLabelsAsync();
                 await Task.WhenAll(devTask, labelTask).ConfigureAwait(false);
 
                 var devices = devTask.Result;
                 var labels  = labelTask.Result;
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(() =>
                 {
                     _cmbInfluxDevice.Items.Clear();
                     foreach (var d in devices) _cmbInfluxDevice.Items.Add(d);
@@ -2700,27 +2749,58 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     foreach (var l in labels) _cmbInfluxLabel.Items.Add(l);
                     _cmbInfluxLabel.SelectedIndex = 0;
 
-                    _lblInfluxStatus.Text = $"Device {devices.Count}개, 레이블 {labels.Count}개 조회됨";
-                }));
+                    string url = ServerSettings.Current?.InfluxUrl ?? "?";
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"연결됨 ({url})  Device {devices.Count}개, 레이블 {labels.Count}개";
+                    SetConnectionIndicator(ConnectionState.Connected);
+                });
 
                 // 시간 범위 자동 설정
                 if (devices.Count > 0)
                 {
                     var (first, last) = await _influxSource.GetTimeRangeAsync().ConfigureAwait(false);
-                    this.BeginInvoke(new Action(() =>
+                    SafeBeginInvoke(() =>
                     {
                         _dtpFrom.Value = first.ToLocalTime();
                         _dtpTo.Value   = last.ToLocalTime();
-                    }));
+                    });
                 }
             }
             catch (Exception ex)
             {
-                this.BeginInvoke(new Action(() =>
+                string url = ServerSettings.Current?.InfluxUrl ?? "?";
+                string msg = ex.InnerException?.Message ?? ex.Message;
+                // 연결 오류와 데이터 없음 구분
+                bool isConnErr = msg.Contains("connect") || msg.Contains("refused")
+                              || msg.Contains("timeout") || msg.Contains("reach")
+                              || msg.Contains("연결") || msg.Contains("호스트");
+                SafeBeginInvoke(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.Red;
-                    _lblInfluxStatus.Text = $"오류: {ex.Message}";
-                }));
+                    _lblInfluxStatus.Text = isConnErr
+                        ? $"연결 실패 ({url}) — {msg}"
+                        : $"오류: {msg}";
+                    SetConnectionIndicator(isConnErr ? ConnectionState.Failed : ConnectionState.Error);
+                });
+            }
+        }
+
+        private enum ConnectionState { Connecting, Connected, Failed, Error }
+        private Label _lblConnDot;   // ● 색상 인디케이터
+
+        private void SetConnectionIndicator(ConnectionState state)
+        {
+            if (_lblConnDot == null) return;
+            switch (state)
+            {
+                case ConnectionState.Connecting:
+                    _lblConnDot.ForeColor = Color.Goldenrod; _lblConnDot.Text = "●"; break;
+                case ConnectionState.Connected:
+                    _lblConnDot.ForeColor = Color.LimeGreen;  _lblConnDot.Text = "●"; break;
+                case ConnectionState.Failed:
+                    _lblConnDot.ForeColor = Color.Red;         _lblConnDot.Text = "●"; break;
+                case ConnectionState.Error:
+                    _lblConnDot.ForeColor = Color.OrangeRed;   _lblConnDot.Text = "●"; break;
             }
         }
 
@@ -2737,7 +2817,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                                 ? _cmbInfluxLabel.SelectedItem?.ToString()
                                 : null;
                 var (first, last) = await _influxSource.GetTimeRangeAsync(device, label).ConfigureAwait(false);
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _dtpFrom.Value = first.ToLocalTime();
                     _dtpTo.Value   = last.ToLocalTime();
@@ -2747,7 +2827,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             catch (Exception ex)
             {
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.Red;
                     _lblInfluxStatus.Text = $"기간 조회 오류: {ex.Message}";
@@ -2755,7 +2835,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             finally
             {
-                this.BeginInvoke(new Action(() => _btnInfluxFullRange.Enabled = true));
+                SafeBeginInvoke(new Action(() => _btnInfluxFullRange.Enabled = true));
             }
         }
 
@@ -2795,7 +2875,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     ? await _influxSource.QueryTorqueSegmentsAsync(device, label, from, to, segSecs, progress).ConfigureAwait(false)
                     : await _influxSource.QuerySegmentsAsync(device, label, from, to, segSecs, progress).ConfigureAwait(false);
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _influxSegments = segs;
                     foreach (var seg in segs)
@@ -2810,7 +2890,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             catch (Exception ex)
             {
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     _lblInfluxStatus.ForeColor = Color.Red;
                     _lblInfluxStatus.Text = $"오류: {ex.Message}";
@@ -2818,7 +2898,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
             finally
             {
-                this.BeginInvoke(new Action(() => _btnInfluxQuery.Enabled = true));
+                SafeBeginInvoke(new Action(() => _btnInfluxQuery.Enabled = true));
             }
         }
 
@@ -2870,7 +2950,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     double[] dx, dy;
                     DownsampleMinMax(time, arr, MaxDisplayPointsPerSeries, out dx, out dy);
 
-                    this.BeginInvoke(new Action(() =>
+                    SafeBeginInvoke(new Action(() =>
                     {
                         chart.BeginInit();
                         try
@@ -2952,7 +3032,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     _featureTable.Add(row);
                 }
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     gridFeatures.DataSource = null;
                     gridFeatures.DataSource = _featureTable;
@@ -2969,9 +3049,25 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void EnsureInfluxSource()
         {
             if (_influxSource != null) return;
-            string cfgPath = FindInfluxConfig();
-            var cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            // ServerSettings.Current 우선 → 없으면 파일 폴백
+            var ss = ServerSettings.Current;
+            InfluxConfig cfg;
+            if (!string.IsNullOrWhiteSpace(ss?.InfluxUrl) && ss.InfluxUrl != "http://localhost:8086")
+                cfg = ss.ToInfluxConfig();
+            else
+            {
+                string cfgPath = FindInfluxConfig();
+                cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            }
             _influxSource = new InfluxDbDataSource(cfg);
+        }
+
+        /// <summary>핸들 생성 전/Dispose 후 BeginInvoke 크래시 방지</summary>
+        private void SafeBeginInvoke(Action action)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try { BeginInvoke(action); }
+            catch (InvalidOperationException) { /* 핸들 소멸 타이밍 */ }
         }
 
         private static string FindInfluxConfig()
