@@ -1400,142 +1400,245 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             ReflowGaugeHeights(); // ★ 추가
         }
 
-        private void LoadOnnxModelSingle()
+        // ── DL ONNX 단일 등록 ────────────────────────────────────────────────────
+        // _meta.json 자동 파싱 → 단일 확인 폼 → 등록 (기존 7단계 InputBox 대체)
+
+        private sealed class OnnxMeta
         {
+            public string   Kind;
+            public string   YColumn;
+            public string[] Channels;
+            public int      NChannels  = 1;
+            public string[] ClassNames;
+            public bool     IsAe;
+        }
+
+        private static OnnxMeta TryParseOnnxMeta(string onnxPath)
+        {
+            string metaPath = Path.Combine(
+                Path.GetDirectoryName(onnxPath) ?? ".",
+                Path.GetFileNameWithoutExtension(onnxPath) + "_meta.json");
+            if (!File.Exists(metaPath)) return null;
             try
             {
-                // 1) 축 번호
-                int axis;
-                using (var ibAxis = new InputBox("축 번호 입력", "이 ONNX를 연결할 축 번호(0,1,2,...)를 입력하세요:"))
+                using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(metaPath)))
                 {
-                    if (ibAxis.ShowDialog() != DialogResult.OK) return;
-                    if (!int.TryParse(ibAxis.InputText, out axis) || axis < 0)
-                    { MessageBox.Show("유효한 축 번호가 아닙니다."); return; }
-                }
-
-                // 2) 역할(AE/CLS)
-                string role = "AE"; // 기본 AE
-                using (var ibRole = new InputBox("모델 역할", "AE(오토인코더) 또는 CLS(분류) 중 입력하세요. (기본 AE)"))
-                {
-                    if (ibRole.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(ibRole.InputText))
-                        role = ibRole.InputText.Trim().ToUpperInvariant();
-                }
-                bool isAe = role != "CLS";
-
-                // 3) Y 컬럼 (기본: FBTRQ{axis})
-                string yColDefault = "FBTRQ" + axis;
-                string yCol = yColDefault;
-                using (var ibY = new InputBox("Y 컬럼명", $"CSV의 Y 컬럼명을 입력하세요. (예: {yColDefault})"))
-                {
-                    if (ibY.ShowDialog() != DialogResult.OK) return;
-                    if (string.IsNullOrWhiteSpace(ibY.InputText))
-                    { MessageBox.Show("Y 컬럼명이 비었습니다."); return; }
-                    yCol = ibY.InputText.Trim();
-                }
-
-                // 4) 입력 채널 수 C (기본 1)
-                int C = 1;
-                using (var ibC = new InputBox("입력 채널 수(C)", "모델 입력 채널 수를 입력하세요. (예: 1 또는 3)"))
-                {
-                    if (ibC.ShowDialog() != DialogResult.OK) return;
-                    if (!int.TryParse(ibC.InputText, out C) || C <= 0)
-                    { MessageBox.Show("유효한 채널 수가 아닙니다."); return; }
-                }
-
-                // 5) ONNX 파일 선택
-                string filePath;
-                using (var ofd = new OpenFileDialog { Filter = "ONNX Model (*.onnx)|*.onnx|All files (*.*)|*.*" })
-                {
-                    if (ofd.ShowDialog() != DialogResult.OK) return;
-                    filePath = ofd.FileName;
-                }
-
-                // 6) (CLS 전용) 표시용 Kind 라벨
-                string kind = isAe ? "AE-CNN1D" : "LSTM";
-                if (!isAe)
-                {
-                    using (var ibKind = new InputBox("모델 종류 라벨", "표시용 라벨(LSTM/CNN1D 등)을 입력하세요. (기본 LSTM)"))
+                    var root = doc.RootElement;
+                    var m = new OnnxMeta();
+                    if (root.TryGetProperty("kind",      out var kp)) m.Kind    = kp.GetString();
+                    if (root.TryGetProperty("y_column",  out var yp)) m.YColumn = yp.GetString();
+                    if (root.TryGetProperty("n_channels",out var nc)) m.NChannels = nc.GetInt32();
+                    if (root.TryGetProperty("channels",  out var cp) &&
+                        cp.ValueKind == System.Text.Json.JsonValueKind.Array)
                     {
-                        if (ibKind.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(ibKind.InputText))
-                            kind = ibKind.InputText.Trim();
+                        var list = new System.Collections.Generic.List<string>();
+                        foreach (var c in cp.EnumerateArray()) list.Add(c.GetString() ?? "");
+                        m.Channels  = list.ToArray();
+                        m.NChannels = list.Count;
                     }
+                    if (root.TryGetProperty("class_names", out var cn) &&
+                        cn.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var list = new System.Collections.Generic.List<string>();
+                        foreach (var n in cn.EnumerateArray()) list.Add(n.GetString() ?? "");
+                        m.ClassNames = list.ToArray();
+                    }
+                    string session = "";
+                    if (root.TryGetProperty("session", out var sp)) session = sp.GetString() ?? "";
+                    m.IsAe = session.ToUpper() == "AD"
+                          || (m.Kind?.ToUpper().Contains("AD") ?? false)
+                          || (m.ClassNames == null || m.ClassNames.Length == 0);
+                    return m;
                 }
+            }
+            catch { return null; }
+        }
 
-                // 7) 세션 생성
+        private void LoadOnnxModelSingle()
+        {
+            // 1) ONNX 파일 선택
+            string onnxPath;
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "DL ONNX 모델 선택",
+                Filter = "ONNX 모델 (*.onnx)|*.onnx|모든 파일 (*.*)|*.*",
+            })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+                onnxPath = ofd.FileName;
+            }
+
+            // 2) _meta.json 자동 파싱
+            var meta = TryParseOnnxMeta(onnxPath);
+
+            // 3) 파일명에서 축 번호 추론 (axis0, axis1, ...)
+            int inferAxis = 0;
+            var axisMatch = System.Text.RegularExpressions.Regex.Match(
+                Path.GetFileNameWithoutExtension(onnxPath), @"(?i)axis(\d+)");
+            if (axisMatch.Success) int.TryParse(axisMatch.Groups[1].Value, out inferAxis);
+
+            // 4) 파일명에서 AE 추론 (meta 없는 경우)
+            bool inferAe = meta != null ? meta.IsAe
+                : Path.GetFileNameWithoutExtension(onnxPath).IndexOf("ae", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            // ── 단일 등록 폼 ─────────────────────────────────────────────────
+            NumericUpDown numAxis, numC, numThr;
+            ComboBox      cmbRole;
+            TextBox       txtYCol;
+            Label         lblThrLabel;
+
+            var form = new Form
+            {
+                Text = "DL ONNX 모델 등록",
+                Size = new Size(420, 310),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition   = FormStartPosition.CenterParent,
+                MaximizeBox = false, MinimizeBox = false,
+            };
+            var tl = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7,
+                Padding = new Padding(14, 10, 14, 8),
+            };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 6; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            int r = 0;
+
+            // 파일명 (읽기 전용 표시)
+            tl.Controls.Add(Lbl("파일:"), 0, r);
+            tl.Controls.Add(new Label { Text = Path.GetFileName(onnxPath), Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.Gray }, 1, r++);
+
+            // 축 번호
+            tl.Controls.Add(Lbl("축 번호:"), 0, r);
+            numAxis = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 7, Value = inferAxis };
+            tl.Controls.Add(numAxis, 1, r++);
+
+            // 역할
+            tl.Controls.Add(Lbl("역할:"), 0, r);
+            cmbRole = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbRole.Items.AddRange(new object[] { "분류 (CLS)", "오토인코더 (AE)" });
+            cmbRole.SelectedIndex = inferAe ? 1 : 0;
+            tl.Controls.Add(cmbRole, 1, r++);
+
+            // Y 컬럼
+            tl.Controls.Add(Lbl("Y 컬럼:"), 0, r);
+            txtYCol = new TextBox { Dock = DockStyle.Fill, Text = meta?.YColumn ?? "x" };
+            tl.Controls.Add(txtYCol, 1, r++);
+
+            // 채널 수 (meta 있으면 읽기 전용)
+            tl.Controls.Add(Lbl("채널 수(C):"), 0, r);
+            numC = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 1, Maximum = 16,
+                Value = meta?.NChannels ?? 1, ReadOnly = meta != null };
+            tl.Controls.Add(numC, 1, r++);
+
+            // AE 임계값 (분류 시 숨김)
+            lblThrLabel = Lbl("임계값(AE):");
+            tl.Controls.Add(lblThrLabel, 0, r);
+            numThr = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 1000,
+                DecimalPlaces = 4, Value = (decimal)DefaultThreshold, Increment = 0.01m };
+            tl.Controls.Add(numThr, 1, r++);
+            lblThrLabel.Visible = inferAe;
+            numThr.Visible      = inferAe;
+            cmbRole.SelectedIndexChanged += (s2, e2) =>
+            {
+                bool ae = cmbRole.SelectedIndex == 1;
+                lblThrLabel.Visible = ae;
+                numThr.Visible      = ae;
+            };
+
+            // meta 정보 + 버튼
+            string metaText = meta != null
+                ? $"✔ _meta.json 로드 — {(meta.IsAe ? "AE" : "분류")} | 클래스: {string.Join(", ", meta.ClassNames ?? new string[0])} | 채널: {string.Join(",", meta.Channels ?? new string[0])}"
+                : "⚠ _meta.json 없음 — 수동 입력";
+            var lblMeta = new Label { Text = metaText, AutoSize = false, Dock = DockStyle.Fill,
+                ForeColor = meta != null ? Color.DarkGreen : Color.DarkOrange,
+                TextAlign = ContentAlignment.TopLeft };
+
+            var btnOk     = new Button { Text = "등록", Width = 80, Height = 26, DialogResult = DialogResult.OK };
+            var btnCancel = new Button { Text = "취소", Width = 80, Height = 26, DialogResult = DialogResult.Cancel };
+            var btnFlow   = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 30, FlowDirection = FlowDirection.RightToLeft };
+            btnFlow.Controls.Add(btnCancel);
+            btnFlow.Controls.Add(btnOk);
+            var bottomPanel = new Panel { Dock = DockStyle.Fill };
+            bottomPanel.Controls.Add(btnFlow);
+            bottomPanel.Controls.Add(lblMeta);
+            tl.SetColumnSpan(bottomPanel, 2);
+            tl.Controls.Add(bottomPanel, 0, r);
+
+            form.Controls.Add(tl);
+            form.AcceptButton = btnOk;
+            form.CancelButton = btnCancel;
+
+            if (form.ShowDialog(this) != DialogResult.OK) return;
+
+            // 5) 등록
+            int    axis      = (int)numAxis.Value;
+            bool   isAe      = cmbRole.SelectedIndex == 1;
+            string yCol      = txtYCol.Text.Trim();
+            int    C         = (int)numC.Value;
+            string kind      = meta?.Kind ?? (isAe ? "AE-CNN1D" : "CNN1D-CLS");
+            double threshold = isAe ? (double)numThr.Value : DefaultThreshold;
+
+            try
+            {
                 InferenceSession session;
-                try
-                {
-                    session = new InferenceSession(filePath);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show("ONNX 로드 실패: " + ex.Message);
-                    return;
-                }
+                try { session = new InferenceSession(onnxPath); }
+                catch (Exception ex) { MessageBox.Show("ONNX 로드 실패: " + ex.Message); return; }
 
-                // 8) 모델 객체 구성
                 var om = new OnnxAxisModel
                 {
-                    AxisId = axis,
-                    ModelPath = filePath,
-                    YColumn = yCol,
-                    C = C,
-                    Kind = kind,
-                    InputName = "input",
-                    OutputName = isAe ? null : "logits",   // 분류 기본 출력 이름
-                    ReconOutputName = isAe ? "recon" : null, // AE 기본 출력 이름
-                    IsAutoencoder = isAe,
+                    AxisId              = axis,
+                    ModelPath           = onnxPath,
+                    YColumn             = yCol,
+                    C                   = C,
+                    Kind                = kind,
+                    InputName           = "input",
+                    OutputName          = isAe ? null    : "logits",
+                    ReconOutputName     = isAe ? "recon" : null,
+                    IsAutoencoder       = isAe,
                     StandardizePerSample = true,
-                    Session = session
+                    Threshold           = threshold,
+                    Session             = session,
                 };
 
-                // 9) AE 임계값(옵션)
-                if (isAe)
-                {
-                    using (var ibThr = new InputBox("AE 임계값", $"AE 임계값을 입력하세요. (기본 {DefaultThreshold:0.###})"))
-                    {
-                        double thr;
-                        if (ibThr.ShowDialog() == DialogResult.OK &&
-                            double.TryParse(ibThr.InputText, NumberStyles.Float, CultureInfo.InvariantCulture, out thr) &&
-                            thr > 0)
-                            om.Threshold = thr;
-                        else
-                            om.Threshold = DefaultThreshold;
-                    }
-                }
-
-                // 10) 기존 세션 정리 후 등록
                 if (isAe)
                 {
                     OnnxAxisModel old;
-                    if (_axisOnnx.TryGetValue(axis, out old) && old != null && old.Session != null)
-                    { try { old.Session.Dispose(); } catch { } }
+                    if (_axisOnnx.TryGetValue(axis, out old) && old?.Session != null)
+                        try { old.Session.Dispose(); } catch { }
                     _axisOnnx[axis] = om;
-
-                    AppendEventLog($"[ONNX-AE] 축 {axis} 연결: {Path.GetFileName(filePath)} (Y={yCol}, C={C}, thr={om.Threshold:0.###})");
+                    AppendEventLog($"[ONNX-AE] 축 {axis}: {Path.GetFileName(onnxPath)}  Y={yCol}  C={C}  thr={threshold:0.###}");
                 }
                 else
                 {
                     OnnxAxisModel oldCls;
-                    if (_axisOnnxCls.TryGetValue(axis, out oldCls) && oldCls != null && oldCls.Session != null)
-                    { try { oldCls.Session.Dispose(); } catch { } }
+                    if (_axisOnnxCls.TryGetValue(axis, out oldCls) && oldCls?.Session != null)
+                        try { oldCls.Session.Dispose(); } catch { }
                     _axisOnnxCls[axis] = om;
 
-                    // 분류 클래스 수에 맞춰 게이지 시드
-                    int k = GetNumClassesFromOnnx(session, om.OutputName ?? "logits", (_clsLabels?.Length ?? 4));
+                    int k = GetNumClassesFromOnnx(session, om.OutputName ?? "logits",
+                        meta?.ClassNames?.Length ?? _clsLabels?.Length ?? 4);
+                    if (meta?.ClassNames != null && meta.ClassNames.Length == k)
+                        _clsLabels = meta.ClassNames;
                     SeedAxisGauge(axis, k);
-
-                    AppendEventLog($"[ONNX-CLS] 축 {axis} 연결: {Path.GetFileName(filePath)} (Y={yCol}, C={C}, Kind={kind})");
+                    AppendEventLog($"[ONNX-CLS] 축 {axis}: {Path.GetFileName(onnxPath)}  클래스=[{string.Join(",", meta?.ClassNames ?? new[] { "?" })}]  C={C}");
                 }
 
-                // 11) 좌측 표 갱신
                 RefreshModelPathList();
             }
             catch (Exception ex)
             {
-                MessageBox.Show("LoadOnnxModelSingle 오류: " + ex.Message);
+                MessageBox.Show("모델 등록 오류: " + ex.Message);
             }
         }
+
+        private static Label Lbl(string text) =>
+            new Label { Text = text, AutoSize = false, Dock = DockStyle.Fill,
+                        TextAlign = ContentAlignment.MiddleLeft };
 
         private void DisposeOnnxSessions()
         {
