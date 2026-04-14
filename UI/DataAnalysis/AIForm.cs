@@ -1292,14 +1292,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tl.Controls.Add(Lbl("데이터 폴더:"), 0, row);
             _dlDataDir = new TextBox { Dock = DockStyle.Fill, Text = @"C:\Data\PHM_Logs\Signals" };
             var dirRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlDataDir.Width = 160;
             dirRow.Controls.Add(_dlDataDir);
-            _dlDataDir.Width = 200;
-            var btnBrowseDir = new Button { Text = "…", Width = 28, Height = 22 };
+            var btnBrowseDir = new Button { Text = "…", Width = 26, Height = 22 };
             btnBrowseDir.Click += (s, e) => {
                 using (var fbd = new FolderBrowserDialog { SelectedPath = _dlDataDir.Text })
-                    if (fbd.ShowDialog() == DialogResult.OK) _dlDataDir.Text = fbd.SelectedPath;
+                    if (fbd.ShowDialog() == DialogResult.OK) { _dlDataDir.Text = fbd.SelectedPath; ScanDataFolder(); }
             };
-            dirRow.Controls.Add(btnBrowseDir);
+            var btnScan = new Button { Text = "🔍", Width = 30, Height = 22, Font = new Font(Font.FontFamily, 8.5f) };
+            btnScan.Click += (s, e) => ScanDataFolder();
+            dirRow.Controls.AddRange(new Control[] { btnBrowseDir, btnScan });
             tl.Controls.Add(dirRow, 1, row++);
 
             // 신호 타입 (Accel / Torque)
@@ -1385,6 +1387,127 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             grp.Controls.Add(tl);
             return grp;
+        }
+
+        /// <summary>
+        /// 데이터 폴더를 스캔하여 클래스 목록·신호 타입·채널·축 번호·출력 경로를 자동 설정합니다.
+        /// 기대 구조: {root}/{클래스명}/{Accel|Torque}/[{device}/]*.csv
+        /// </summary>
+        private void ScanDataFolder()
+        {
+            string root = _dlDataDir?.Text?.Trim() ?? "";
+            if (!System.IO.Directory.Exists(root))
+            {
+                MessageBox.Show("폴더가 존재하지 않습니다:\n" + root, "스캔 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // ── 1. 클래스 디렉터리 탐색 (첫 번째 레벨 서브폴더 중 Accel/Torque를 포함한 것) ──
+            var classDirs = System.IO.Directory.GetDirectories(root)
+                .Where(d =>
+                    System.IO.Directory.GetDirectories(d, "Accel", System.IO.SearchOption.TopDirectoryOnly).Any() ||
+                    System.IO.Directory.GetDirectories(d, "Torque", System.IO.SearchOption.TopDirectoryOnly).Any())
+                .Select(d => System.IO.Path.GetFileName(d))
+                .OrderBy(n => n)
+                .ToList();
+
+            if (classDirs.Count == 0)
+            {
+                MessageBox.Show(
+                    "클래스 폴더를 찾지 못했습니다.\n\n" +
+                    "기대 구조:\n  {루트}/{클래스명}/Accel/*.csv\n  {루트}/{클래스명}/Torque/*.csv",
+                    "스캔 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // ── 2. 신호 타입 감지 ────────────────────────────────────────────────────
+            bool hasAccel  = System.IO.Directory.GetDirectories(root, "Accel",  System.IO.SearchOption.AllDirectories).Any();
+            bool hasTorque = System.IO.Directory.GetDirectories(root, "Torque", System.IO.SearchOption.AllDirectories).Any();
+            bool useAccel  = hasAccel; // Accel 우선
+
+            // ── 3. 대표 CSV 헤더 읽기 ───────────────────────────────────────────────
+            string sampleCsv = System.IO.Directory
+                .EnumerateFiles(root, "*.csv", System.IO.SearchOption.AllDirectories)
+                .FirstOrDefault(f =>
+                {
+                    string seg = System.IO.Path.GetDirectoryName(f) ?? "";
+                    return useAccel
+                        ? seg.IndexOf(System.IO.Path.DirectorySeparatorChar + "Accel", StringComparison.OrdinalIgnoreCase) >= 0
+                        : seg.IndexOf(System.IO.Path.DirectorySeparatorChar + "Torque", StringComparison.OrdinalIgnoreCase) >= 0;
+                });
+
+            string[] headers = new string[0];
+            if (sampleCsv != null)
+            {
+                try
+                {
+                    string headerLine = System.IO.File.ReadLines(sampleCsv).FirstOrDefault() ?? "";
+                    headers = headerLine.Split(new[] { ',', ';', '\t' }, StringSplitOptions.None)
+                                        .Select(h => h.Trim()).ToArray();
+                }
+                catch { }
+            }
+
+            // ── 4. 축 번호 추출 (폴더명 "Axis0" → 0) ────────────────────────────────
+            var axisMatch = System.Text.RegularExpressions.Regex.Match(
+                System.IO.Path.GetFileName(root), @"[Aa]xis(\d+)");
+            int axisNum = axisMatch.Success ? int.Parse(axisMatch.Groups[1].Value) : 0;
+
+            // ── 5. UI 적용 ────────────────────────────────────────────────────────────
+            // 클래스 리스트
+            _dlClassList.Items.Clear();
+            foreach (var c in classDirs) _dlClassList.Items.Add(c);
+
+            // 신호 타입 + 채널
+            if (useAccel)
+            {
+                _dlRdoAccel.Checked = true;
+                if (_dlChX != null) _dlChX.Checked = headers.Any(h => string.Equals(h, "x", StringComparison.OrdinalIgnoreCase));
+                if (_dlChY != null) _dlChY.Checked = headers.Any(h => string.Equals(h, "y", StringComparison.OrdinalIgnoreCase));
+                if (_dlChZ != null) _dlChZ.Checked = headers.Any(h => string.Equals(h, "z", StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                _dlRdoTorque.Checked = true;
+                if (_dlChTrq != null)
+                {
+                    var trqSuffixes = new[] { "Pos(mm)", "Vel(mm/s)", "Trq(%)", "CmdPos(mm)", "CmdVel(mm/s)" };
+                    for (int i = 0; i < _dlChTrq.Length && i < trqSuffixes.Length; i++)
+                    {
+                        string sfx = trqSuffixes[i];
+                        _dlChTrq[i].Checked = headers.Any(h =>
+                            System.Text.RegularExpressions.Regex.IsMatch(
+                                h, @"^Ax\d+_" + System.Text.RegularExpressions.Regex.Escape(sfx) + @"$",
+                                System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+                    }
+                }
+            }
+
+            // Label 컬럼
+            bool hasLabelCol = headers.Any(h => string.Equals(h, "Label", StringComparison.OrdinalIgnoreCase));
+            if (_dlLabelColumn != null)
+                _dlLabelColumn.Text = hasLabelCol ? "Label" : "";
+
+            // 출력 경로 자동 생성
+            if (_dlOutputPath != null)
+            {
+                string modelsDir = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(_dlOutputPath.Text)
+                    ?? @"C:\Data\PHM_Logs\models");
+                string sigTag = useAccel ? "accel" : "torque";
+                _dlOutputPath.Text = System.IO.Path.Combine(modelsDir, $"cnn1d_axis{axisNum}_{sigTag}.onnx");
+            }
+
+            string sigTypeText = useAccel ? "가속도계(Accel)" : "토크(Torque)";
+            string bothText    = (hasAccel && hasTorque) ? " (Accel + Torque 모두 존재, Accel 우선)" : "";
+            MessageBox.Show(
+                $"스캔 완료{bothText}\n\n" +
+                $"  신호 타입  : {sigTypeText}\n" +
+                $"  클래스 수  : {classDirs.Count}개\n" +
+                $"  클래스    : {string.Join(", ", classDirs)}\n" +
+                $"  헤더 채널  : {string.Join(", ", headers)}\n" +
+                $"  축 번호   : {axisNum}",
+                "데이터셋 스캔 결과", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private GroupBox BuildDlRightPanel()

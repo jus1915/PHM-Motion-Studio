@@ -233,20 +233,23 @@ def load_windows_from_dir(
     class_names: List[str],
     window_size: int,
     stride: int,
+    sensor_type: str = "",
 ) -> List[Tuple[np.ndarray, int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
     레이블 우선순위:
         1. CSV 내 label_column 값
-        2. CSV 파일의 부모 디렉터리명
+        2. 경로 컴포넌트 중 class_names와 일치하는 것 (예: .../normal/Accel/...)
+        3. CSV 부모 디렉터리명
 
     Args:
-        data_dir: 루트 디렉터리
-        channels: 채널 컬럼명 목록
+        data_dir    : 루트 디렉터리
+        channels    : 채널 컬럼명 목록
         label_column: CSV 내 레이블 컬럼명
-        class_names: 클래스명 → 정수 인덱스 매핑 기준
-        window_size: 윈도우 크기
-        stride: 슬라이딩 스트라이드
+        class_names : 클래스명 → 정수 인덱스 매핑 기준
+        window_size : 윈도우 크기
+        stride      : 슬라이딩 스트라이드
+        sensor_type : "accel" 이면 경로에 /Accel/ 포함 파일만, "torque" 이면 /Torque/ 만 처리
 
     Returns:
         [(window_np, label_int), ...]
@@ -260,10 +263,22 @@ def load_windows_from_dir(
         print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
         return []
 
+    # sensor_type 필터 — 경로 컴포넌트에 "Accel" 또는 "Torque" 가 있는 파일만
+    filter_kw = sensor_type.strip().lower()
+    if filter_kw in ("accel", "torque"):
+        csv_files = [f for f in csv_files
+                     if any(p.lower() == filter_kw for p in f.parts)]
+        print(f"[data] sensor_type={filter_kw} 필터 적용 → {len(csv_files)}개 파일", file=sys.stderr)
+
     for csv_path in csv_files:
         signal, label_str = _read_signal_csv(str(csv_path), channels, label_column)
 
-        # 레이블 결정
+        # 레이블 결정: CSV 컬럼 → 경로 컴포넌트 → 부모 폴더명
+        if label_str is None:
+            for part in csv_path.parts:
+                if part.lower() in name_to_id:
+                    label_str = part
+                    break
         if label_str is None:
             label_str = csv_path.parent.name
 
@@ -862,6 +877,7 @@ def main() -> None:
             class_names=class_names,
             window_size=window_size,
             stride=stride,
+            sensor_type=params.get("sensor_type", ""),
         )
     else:
         print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
