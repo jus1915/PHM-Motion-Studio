@@ -666,9 +666,11 @@ def save_meta(
     Returns:
         저장된 _meta.json 경로
     """
+    sensor_type = params.get("sensor_type", "accel")  # "accel" or "torque"
     meta = {
         "kind": "CNN1D",
         "session": "FD",
+        "sensor_type": sensor_type,
         "y_column": channels[0] if channels else "",
         "channels": channels,
         "n_channels": len(channels),

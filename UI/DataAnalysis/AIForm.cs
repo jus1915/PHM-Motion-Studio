@@ -118,7 +118,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         // ── DL 학습 탭 ───────────────────────────────────────────────────────
         private TextBox          _dlDataDir, _dlOutputPath, _dlLabelColumn, _dlLr;
-        private CheckBox         _dlChX, _dlChY, _dlChZ;
+        private RadioButton      _dlRdoAccel, _dlRdoTorque;
+        private CheckBox         _dlChX, _dlChY, _dlChZ;         // Accel 채널
+        private CheckBox[]       _dlChTrq;                        // Torque 채널 (Pos/Vel/Trq/CmdPos/CmdVel)
+        private Panel            _dlChPanel;                      // 채널 선택 컨테이너
         private ListBox          _dlClassList;
         private TextBox          _dlNewClassName;
         private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
@@ -1277,10 +1280,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private GroupBox BuildDlLeftPanel()
         {
             var grp = new GroupBox { Text = "데이터 소스 / 클래스", Dock = DockStyle.Fill, Padding = new Padding(8) };
-            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 5 };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7 };
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 4; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            for (int i = 0; i < 6; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 클래스 리스트
 
             int row = 0;
@@ -1299,14 +1302,56 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             dirRow.Controls.Add(btnBrowseDir);
             tl.Controls.Add(dirRow, 1, row++);
 
-            // 입력 채널
+            // 신호 타입 (Accel / Torque)
+            tl.Controls.Add(Lbl("신호 타입:"), 0, row);
+            var sensorRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+            _dlRdoAccel  = new RadioButton { Text = "가속도계",  Checked = true, AutoSize = true };
+            _dlRdoTorque = new RadioButton { Text = "토크",      Checked = false, AutoSize = true, Margin = new Padding(8,0,0,0) };
+            sensorRow.Controls.AddRange(new Control[] { _dlRdoAccel, _dlRdoTorque });
+            tl.Controls.Add(sensorRow, 1, row++);
+
+            // 입력 채널 (동적 패널)
             tl.Controls.Add(Lbl("입력 채널:"), 0, row);
-            var chRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+            _dlChPanel = new Panel { Dock = DockStyle.Fill };
+
+            // Accel 채널 패널
+            var accelFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Name = "accelFlow" };
             _dlChX = new CheckBox { Text = "x", Checked = true, AutoSize = true };
             _dlChY = new CheckBox { Text = "y", Checked = true, AutoSize = true };
             _dlChZ = new CheckBox { Text = "z", Checked = true, AutoSize = true };
-            chRow.Controls.AddRange(new Control[] { _dlChX, _dlChY, _dlChZ });
-            tl.Controls.Add(chRow, 1, row++);
+            accelFlow.Controls.AddRange(new Control[] { _dlChX, _dlChY, _dlChZ });
+
+            // Torque 채널 패널
+            var trqFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Name = "trqFlow", Visible = false };
+            var trqCols = new[] { "Ax0_Pos(mm)", "Ax0_Vel(mm/s)", "Ax0_Trq(%)", "Ax0_CmdPos(mm)", "Ax0_CmdVel(mm/s)" };
+            _dlChTrq = new CheckBox[trqCols.Length];
+            for (int i = 0; i < trqCols.Length; i++)
+            {
+                _dlChTrq[i] = new CheckBox { Text = trqCols[i], Checked = (i == 2), AutoSize = true, Margin = new Padding(0,2,6,0) };
+                trqFlow.Controls.Add(_dlChTrq[i]);
+            }
+
+            _dlChPanel.Controls.AddRange(new Control[] { accelFlow, trqFlow });
+            tl.Controls.Add(_dlChPanel, 1, row++);
+
+            // 신호 타입 전환 이벤트
+            _dlRdoAccel.CheckedChanged += (s, e) =>
+            {
+                if (!_dlRdoAccel.Checked) return;
+                accelFlow.Visible = true; trqFlow.Visible = false;
+                // 출력 파일명 힌트 업데이트
+                if (_dlOutputPath != null && _dlOutputPath.Text.Contains("torque"))
+                    _dlOutputPath.Text = _dlOutputPath.Text.Replace("torque", "accel");
+            };
+            _dlRdoTorque.CheckedChanged += (s, e) =>
+            {
+                if (!_dlRdoTorque.Checked) return;
+                accelFlow.Visible = false; trqFlow.Visible = true;
+                if (_dlOutputPath != null && !_dlOutputPath.Text.Contains("torque"))
+                    _dlOutputPath.Text = System.IO.Path.Combine(
+                        System.IO.Path.GetDirectoryName(_dlOutputPath.Text) ?? "",
+                        "cnn1d_torque.onnx");
+            };
 
             // Label 컬럼
             tl.Controls.Add(Lbl("Label 컬럼:"), 0, row);
@@ -1420,9 +1465,19 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             { MessageBox.Show("출력 모델 경로를 입력하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
             var channels = new List<string>();
-            if (_dlChX.Checked) channels.Add("x");
-            if (_dlChY.Checked) channels.Add("y");
-            if (_dlChZ.Checked) channels.Add("z");
+            bool isTorque = _dlRdoTorque?.Checked == true;
+            if (isTorque)
+            {
+                if (_dlChTrq != null)
+                    foreach (var cb in _dlChTrq)
+                        if (cb.Checked) channels.Add(cb.Text);
+            }
+            else
+            {
+                if (_dlChX.Checked) channels.Add("x");
+                if (_dlChY.Checked) channels.Add("y");
+                if (_dlChZ.Checked) channels.Add("z");
+            }
             if (channels.Count == 0)
             { MessageBox.Show("입력 채널을 하나 이상 선택하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
@@ -1470,6 +1525,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ["data_dir"]            = dataDir,
                 ["output"]              = outputPath,
                 ["channels"]            = channels.ToArray(),
+                ["sensor_type"]         = isTorque ? "torque" : "accel",
                 ["label_column"]        = _dlLabelColumn?.Text?.Trim() ?? "Label",
                 ["class_names"]         = classNames.ToArray(),
                 ["window_size"]         = (int)_dlWindowSize.Value,
