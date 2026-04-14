@@ -338,8 +338,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private KpiCard cardDanger, cardWarning, cardCycles;
         private Chart chartLine;
         private DataGridView grid;
-        private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnStart, btnStop;
+        private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnQuickFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
+        private static readonly string MruFile = Path.Combine(DefaultLogsPath, "recent_watch_folders.txt");
+        private const int MruMaxCount = 5;
         private DataGridView gridModelPaths;
         private TableLayoutPanel sampleGrid;                       // rightBottom 안에서 그리드 역할
         private readonly Dictionary<int, Chart> sampleCharts =     // 축별 Chart 캐시
@@ -710,11 +712,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // CSV 소스
             pnlCsvSource = new Panel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
-            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = ctrlWidth - 12, Height = btnH, Left = 0, Top = 0 };
+            int folderBtnW = ctrlWidth - 38;
+            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = folderBtnW, Height = btnH, Left = 0, Top = 0 };
             btnSelectFolder.Click += (s, e) => SelectFolder();
+            btnQuickFolder = new Button { Text = "▾", Width = 24, Height = btnH, Left = folderBtnW + 2, Top = 0 };
+            btnQuickFolder.Click += (s, e) => ShowFolderQuickMenu();
             lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth - 12, 0), Top = btnH + 4, Left = 0, ForeColor = Color.Gray };
             pnlCsvSource.Height = btnH + 24;
-            pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, lblFolder });
+            pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, btnQuickFolder, lblFolder });
 
             // DB 소스
             int lblW = 52, dbH = 24, dbGap = 4, dbY = 0;
@@ -1162,7 +1167,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     if (c != null) c.Width = w;
 
                 // pnlCsvSource 내부
-                if (btnSelectFolder != null) { btnSelectFolder.Width = w - 12; lblFolder.MaximumSize = new Size(w - 12, 0); }
+                if (btnSelectFolder != null)
+                {
+                    btnSelectFolder.Width = w - 38;
+                    if (btnQuickFolder != null) btnQuickFolder.Left = btnSelectFolder.Right + 2;
+                    lblFolder.MaximumSize = new Size(w - 12, 0);
+                }
 
                 // pnlDbSource 내부 너비 조정
                 if (pnlDbSource != null)
@@ -2845,18 +2855,98 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 if (!string.IsNullOrEmpty(_watchFolder) && Directory.Exists(_watchFolder)) fbd.SelectedPath = _watchFolder;
                 if (fbd.ShowDialog() == DialogResult.OK)
+                    SetWatchFolder(fbd.SelectedPath);
+            }
+        }
+
+        private void SetWatchFolder(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            _watchFolder = path;
+            lblFolder.Text = "폴더: " + _watchFolder;
+            lock (_sync)
+            {
+                _processing.Clear();
+                foreach (KeyValuePair<string, CancellationTokenSource> kv in _debouncers) { try { kv.Value.Cancel(); } catch { } kv.Value.Dispose(); }
+                _debouncers.Clear();
+                _lastProcessedLen.Clear();
+            }
+            AddRecentFolder(path);
+        }
+
+        private void ShowFolderQuickMenu()
+        {
+            var cms = new ContextMenuStrip();
+
+            // ── 고정 폴더 ─────────────────────────────────────────────
+            string signalsRoot = Path.Combine(DefaultLogsPath, "Signals");
+            AddFolderMenuItem(cms, "📂 Signals (기본)", signalsRoot);
+            AddFolderMenuItem(cms, "📂 PHM_Logs", DefaultLogsPath);
+
+            // ── Signals 하위 Axis* 폴더 ──────────────────────────────
+            if (Directory.Exists(signalsRoot))
+            {
+                var axisDirs = Directory.GetDirectories(signalsRoot)
+                    .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
+                        Path.GetFileName(d), @"[Aa]xis\d+"))
+                    .OrderBy(d => d).ToArray();
+                if (axisDirs.Length > 0)
                 {
-                    _watchFolder = fbd.SelectedPath;
-                    lblFolder.Text = "폴더: " + _watchFolder;
-                    lock (_sync)
-                    {
-                        _processing.Clear();
-                        foreach (KeyValuePair<string, CancellationTokenSource> kv in _debouncers) { try { kv.Value.Cancel(); } catch { } kv.Value.Dispose(); }
-                        _debouncers.Clear();
-                        _lastProcessedLen.Clear();
-                    }
+                    cms.Items.Add(new ToolStripSeparator());
+                    foreach (var d in axisDirs)
+                        AddFolderMenuItem(cms, "  📂 " + Path.GetFileName(d), d);
                 }
             }
+
+            // ── 최근 폴더 ─────────────────────────────────────────────
+            var recent = LoadRecentFolders();
+            if (recent.Count > 0)
+            {
+                cms.Items.Add(new ToolStripSeparator());
+                cms.Items.Add(new ToolStripMenuItem("최근 폴더") { Enabled = false });
+                foreach (var r in recent)
+                    AddFolderMenuItem(cms, "  🕐 " + r, r);
+                cms.Items.Add(new ToolStripSeparator());
+                var clearItem = new ToolStripMenuItem("🗑 최근 기록 지우기");
+                clearItem.Click += (s2, e2) => { try { File.Delete(MruFile); } catch { } };
+                cms.Items.Add(clearItem);
+            }
+
+            cms.Show(btnQuickFolder, new System.Drawing.Point(0, btnQuickFolder.Height));
+        }
+
+        private void AddFolderMenuItem(ContextMenuStrip cms, string label, string path)
+        {
+            var item = new ToolStripMenuItem(label) { Enabled = Directory.Exists(path) };
+            item.Click += (s, e) => SetWatchFolder(path);
+            cms.Items.Add(item);
+        }
+
+        private List<string> LoadRecentFolders()
+        {
+            try
+            {
+                if (!File.Exists(MruFile)) return new List<string>();
+                return File.ReadAllLines(MruFile)
+                    .Where(l => !string.IsNullOrWhiteSpace(l) && Directory.Exists(l))
+                    .Distinct()
+                    .Take(MruMaxCount)
+                    .ToList();
+            }
+            catch { return new List<string>(); }
+        }
+
+        private void AddRecentFolder(string path)
+        {
+            try
+            {
+                var list = LoadRecentFolders();
+                list.Remove(path);
+                list.Insert(0, path);
+                try { Directory.CreateDirectory(DefaultLogsPath); } catch { }
+                File.WriteAllLines(MruFile, list.Take(MruMaxCount));
+            }
+            catch { }
         }
 
         private void StartWatch()
