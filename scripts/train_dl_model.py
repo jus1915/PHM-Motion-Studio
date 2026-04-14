@@ -167,18 +167,22 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
         ""       — 판별 불가
     """
     import csv as _csv
-    try:
-        with open(csv_path, newline="", encoding="utf-8-sig") as f:
-            reader = _csv.reader(f)
-            headers = [h.strip().lower() for h in (next(reader, []))]
-        has_trq  = any("trq" in h or "vel(mm" in h or "pos(mm" in h for h in headers)
-        has_xyz  = any(h in ("x", "y", "z") for h in headers)
-        if has_trq and not has_xyz:
-            return "torque"
-        if has_xyz:
-            return "accel"
-    except Exception:
-        pass
+    for enc in ("utf-8-sig", "cp949", "utf-8", "latin-1"):
+        try:
+            with open(csv_path, newline="", encoding=enc, errors="replace") as f:
+                reader = _csv.reader(f)
+                headers = [h.strip().lower() for h in (next(reader, []))]
+            if not headers:
+                continue
+            has_trq = any("trq" in h or "vel(mm" in h or "pos(mm" in h for h in headers)
+            has_xyz = any(h in ("x", "y", "z") for h in headers)
+            if has_trq and not has_xyz:
+                return "torque"
+            if has_xyz:
+                return "accel"
+            return ""  # 헤더 읽기는 성공했지만 판별 불가
+        except Exception:
+            continue
     return ""
 
 
@@ -287,12 +291,16 @@ def load_windows_from_dir(
         print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
         return []
 
+    print(f"[data] rglob 결과: {len(csv_files)}개 CSV  (예: {csv_files[0] if csv_files else 'N/A'})", file=sys.stderr)
+
     # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 없으면 헤더 기반 fallback
     filter_kw = sensor_type.strip().lower()
     if filter_kw in ("accel", "torque"):
         # 1차: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
         path_filtered = [f for f in csv_files
                          if any(p.lower() == filter_kw for p in f.parts)]
+        print(f"[data] 경로필터({filter_kw}): {len(path_filtered)}/{len(csv_files)}  "
+              f"부분목록={[str(f.parts[-2:]) for f in path_filtered[:3]]}", file=sys.stderr)
         if path_filtered:
             csv_files = path_filtered
             print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
