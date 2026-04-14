@@ -3657,6 +3657,44 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     }
                 }
 
+                // ---------- (A2) CLS 단독 — AE 없이 분류만 등록된 축 처리 ----------
+                foreach (var kv in _axisOnnxCls.OrderBy(k => k.Key))
+                {
+                    int axis = kv.Key;
+                    var cls = kv.Value;
+                    if (cls == null || cls.Session == null || cls.IsAutoencoder) continue;
+                    // AE가 이미 커버한 축은 (B)에서 처리됐으므로 skip
+                    if (_axisOnnx.ContainsKey(axis) && _axisOnnx[axis]?.Session != null) continue;
+                    if (axesByName.Count > 0 && !axesByName.Contains(axis)) continue;
+                    if (movedAxes.Count > 0 && !movedAxes.Contains(axis)) continue;
+                    if (string.IsNullOrWhiteSpace(cls.YColumn) || !HasYColumns(headers, cls, axis)) continue;
+
+                    int predCls; float[] probsCls; string infoCls;
+                    if (!TryOnnxInferOnce(axis, path, out predCls, out probsCls, out infoCls)) continue;
+
+                    anyAxisProcessed = true;
+                    var capAxis = axis; var capPred = predCls; var capProbs = probsCls;
+                    var capInfo = infoCls; var capYCol = cls.YColumn;
+                    BeginInvoke(new Action(() =>
+                    {
+                        RenderSampleChartSafe(path, capYCol, capAxis);
+                        Interlocked.Increment(ref cycles);
+                        cardCycles.ValueText = cycles + " 회";
+
+                        // 게이지에서 레이블 조회
+                        ProbGaugeControl gauge;
+                        string[] gaugeLabels = _axisGauges.TryGetValue(capAxis, out gauge) ? gauge.Labels : null;
+                        string predLabel = (gaugeLabels != null && capPred >= 0 && capPred < gaugeLabels.Length)
+                            ? gaugeLabels[capPred] : capPred.ToString();
+                        float p = (capProbs != null && capProbs.Length > 0 && capPred >= 0 && capPred < capProbs.Length)
+                            ? capProbs[capPred] : 0f;
+
+                        AppendEventLog($"[CLS] axis {capAxis}  pred={predLabel} p={p:0.000}  ({capInfo})  ({Path.GetFileName(path)})");
+                        UpdateAxisClassGauge(capAxis, capProbs, capPred);
+                        lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (CLS axis {capAxis}, {Path.GetFileName(path)})";
+                    }));
+                }
+
                 foreach (KeyValuePair<int, AxisModel> kv in _axisModels.OrderBy(k => k.Key))
                 {
                     int axis = kv.Key;
