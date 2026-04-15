@@ -28,8 +28,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private const int DebounceIntervalMs = 300;
 
         // === Bulk/배치 렌더링 제어 ===
-        private bool _bulkToggle = false;     // 전체 체크/해제 등 일괄 토글 중 플래그
-        private const int MaxSeriesOnChart = 300;   // 한 화면에 표시할 최대 시리즈 수(필요시 조정)
+        private const int MaxSeriesOnChart = 300;   // 한 화면에 표시할 최대 시리즈 수
         private const int BulkBatchSize = 40;       // 배치 크기(한 번에 추가할 시리즈 수)
 
         private const int WM_SETREDRAW = 0x000B;
@@ -70,9 +69,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private AIForm _aiForm;          // AI 창 핸들
         private Button btnOpenAI;        // "AI 열기" 버튼
 
-        // 가상화된 파일 리스트
-        private ListView fileList;       // ← CheckedListBox 대체
+#pragma warning disable 0649
+        // 가상화된 파일 리스트 (하위 호환 — 내부 상태용, null-safe)
+        private ListView fileList;
         private TextBox txtFilter;
+#pragma warning restore 0649
 
         // 데이터 분포 분석용 컨트롤
         private Chart chart;
@@ -165,14 +166,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private Panel _pnlSourceSelector;
         private Panel _pnlCsvContent;
         private Panel _pnlInfluxContent;
-        private Panel _pnlDatasetContent;
+#pragma warning disable 0169
+        private Panel _pnlDatasetContent;   // 하위 호환 — 미사용
+#pragma warning restore 0169
         private RadioButton _rdoCsv;
         private RadioButton _rdoInflux;
-        private RadioButton _rdoDataset;
-        private TreeView _tvDataset;
-        private TextBox _txtDatasetRoot;
-        private NumericUpDown _nudDatasetSamples;
-        private ComboBox _cmbDatasetYCol;
+        private TreeView _tvCsv;
+        private TextBox _txtCsvRoot;
         private ComboBox _cmbInfluxDevice;
         private ComboBox _cmbInfluxLabel;
         private ComboBox _cmbInfluxChannel;
@@ -254,167 +254,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // ----- Left -----
             var leftPanel = new Panel { Dock = DockStyle.Fill };
 
-            var buttonPanel = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Top,
-                Height = 35,
-                FlowDirection = FlowDirection.LeftToRight
-            };
-
-            btnSelectFolder = new Button { Text = "폴더 선택", Width = 80 };
-            btnSelectFolder.Click += BtnSelectFolder_Click;
-
-            btnCheckAll = new Button { Text = "전체 체크", Width = 80 };
-            btnCheckAll.Click += (s, e) =>
-            {
-                _bulkToggle = true; // ← ItemCheck에서 차트 갱신 막기
-                try
-                {
-                    int limit = Math.Min(MaxAutoCheckInView, _viewIndex.Count);
-                    for (int i = 0; i < limit; i++) _checked[_viewIndex[i]] = true;
-                    fileList.Invalidate();
-                }
-                finally { _bulkToggle = false; }
-
-                // 한 번만 배치 렌더링
-                StartBulkRenderFromChecked();
-
-                if (_viewIndex.Count > MaxAutoCheckInView)
-                    MessageBox.Show(
-                        $"표시 중인 파일이 많아 현재 뷰 상위 {MaxAutoCheckInView}개만 체크했습니다. (표시 {_viewIndex.Count}개 / 전체 {_allFiles.Count}개)",
-                        "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            };
-
-            btnUncheckAll = new Button { Text = "전체 해제", Width = 80 };
-            btnUncheckAll.Click += (s, e) =>
-            {
-                _bulkToggle = true;
-                try
-                {
-                    for (int i = 0; i < _viewIndex.Count; i++) _checked[_viewIndex[i]] = false;
-                    fileList.Invalidate();
-                }
-                finally { _bulkToggle = false; }
-
-                // 차트 한 번에 정리
-                lock (chartSync) chart.Series.Clear();
-                AutoAdjustYAxis();
-                ClearFrequencyChart();
-            };
-
-            buttonPanel.Controls.AddRange(new Control[] { btnSelectFolder, btnCheckAll, btnUncheckAll });
-
-            cmbYColumn = new ComboBox
-            {
-                Dock = DockStyle.Top,
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Height = 28,
-                Margin = new Padding(3)
-            };
-            cmbYColumn.SelectedIndexChanged += CmbYColumn_SelectedIndexChanged;
-
-            txtFilter = new TextBox { Dock = DockStyle.Top };
-            SetWatermark(txtFilter, "파일명 필터...");
-            txtFilter.TextChanged += (s, e) => ApplyFilter();
-
-            // === ListView 생성/속성 ===
-            fileList = new ListView
-            {
-                Dock = DockStyle.Fill,
-                View = View.Details,                 // Details 필수
-                FullRowSelect = true,
-                HeaderStyle = ColumnHeaderStyle.None,
-                UseCompatibleStateImageBehavior = false,
-                OwnerDraw = false,                   // 반드시 false
-                ShowGroups = false,
-                CheckBoxes = true,                   // VirtualMode=true 이전에!
-                VirtualMode = true,                  // 그 다음
-                VirtualListSize = 0,
-                BorderStyle = BorderStyle.FixedSingle
-            };
-            // 컬럼 반드시 추가 (폭 0 금지)
-            fileList.Columns.Add("File", 100);
-
-            // 체크박스를 덮는 이미지리스트 제거
-            fileList.StateImageList = null;
-            fileList.SmallImageList = null;
-            fileList.LargeImageList = null;
-
-            // 리사이즈 시 컬럼폭 맞춤
-            fileList.Resize += (s, e) => ResizeFileColumn();
-
-            // 가상 아이템 공급
-            fileList.RetrieveVirtualItem += (s, e) =>
-            {
-                int srcIdx = _viewIndex[e.ItemIndex];
-                string name = _allFiles[srcIdx];
-
-                var item = new ListViewItem(name);      // 텍스트 설정 필수
-                item.Checked = _checked[srcIdx];        // 체크 상태 반영
-                e.Item = item;
-            };
-
-            // 체크 토글 시 차트 갱신 (e.Index 사용)
-            fileList.ItemCheck += (s, e) =>
-            {
-                int srcIdx = _viewIndex[e.Index];
-                bool willChecked = (e.NewValue == CheckState.Checked);
-                _checked[srcIdx] = willChecked;
-
-                if (_bulkToggle) return; // ← 전체체크 중엔 끝!
-
-                string name = _allFiles[srcIdx];
-                string path = System.IO.Path.Combine(currentFolder, name);
-                string ycol = (cmbYColumn.SelectedItem != null) ? cmbYColumn.SelectedItem.ToString() : null;
-
-                if (willChecked) { AddCsvSeriesToChart(name, path, ycol); }
-                else
-                {
-                    lock (chartSync)
-                    {
-                        if (chart.Series.IndexOf(name) >= 0)
-                            chart.Series.Remove(chart.Series[name]);
-                    }
-                }
-                AutoAdjustYAxis();
-                ScheduleFreqUpdate();
-            };
-
-            // 더블클릭으로도 토글
-            fileList.Activation = ItemActivation.Standard;
-            fileList.ItemActivate += (s, e) =>
-            {
-                if (fileList.SelectedIndices.Count == 0) return;
-                int viewIdx = fileList.SelectedIndices[0];
-                int srcIdx = _viewIndex[viewIdx];
-
-                bool next = !_checked[srcIdx];
-                _checked[srcIdx] = next;
-                fileList.RedrawItems(viewIdx, viewIdx, true);
-
-                string name = _allFiles[srcIdx];
-                string path = System.IO.Path.Combine(currentFolder, name);
-                string ycol = (cmbYColumn.SelectedItem != null) ? cmbYColumn.SelectedItem.ToString() : null;
-
-                if (next) AddCsvSeriesToChart(name, path, ycol);
-                else
-                {
-                    lock (chartSync)
-                    {
-                        if (chart.Series.IndexOf(name) >= 0)
-                            chart.Series.Remove(chart.Series[name]);
-                    }
-                    AutoAdjustYAxis();
-                    ScheduleFreqUpdate();
-                }
-            };
-
-            // ── CSV 콘텐츠 래퍼 ───────────────────────────────────────────────
-            _pnlCsvContent = new Panel { Dock = DockStyle.Fill };
-            _pnlCsvContent.Controls.Add(fileList);
-            _pnlCsvContent.Controls.Add(txtFilter);
-            _pnlCsvContent.Controls.Add(cmbYColumn);
-            _pnlCsvContent.Controls.Add(buttonPanel);
+            _pnlCsvContent = BuildCsvTreePanel();
 
             // ── InfluxDB 콘텐츠 패널 ─────────────────────────────────────────
             _pnlInfluxContent = BuildInfluxPanel();
@@ -435,40 +275,22 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Margin = new Padding(6, 6, 4, 0),
                 Font = new Font(this.Font, FontStyle.Bold)
             });
-            _rdoCsv     = new RadioButton { Text = "CSV 파일",  AutoSize = true, Checked = true, Margin = new Padding(0, 5, 10, 0) };
-            _rdoInflux  = new RadioButton { Text = "InfluxDB", AutoSize = true, Margin = new Padding(0, 5, 10, 0) };
-            _rdoDataset = new RadioButton { Text = "📂 데이터셋", AutoSize = true, Margin = new Padding(0, 5, 0, 0) };
-            _rdoInflux.CheckedChanged  += RdoInflux_CheckedChanged;
-            _rdoDataset.CheckedChanged += (s, e) =>
-            {
-                if (!_rdoDataset.Checked) return;
-                _pnlCsvContent.Visible     = false;
-                _pnlInfluxContent.Visible  = false;
-                _pnlDatasetContent.Visible = true;
-                lock (chartSync) chart.Series.Clear();
-                AutoAdjustYAxis();
-                ClearFrequencyChart();
-            };
+            _rdoCsv    = new RadioButton { Text = "CSV 파일",  AutoSize = true, Checked = true, Margin = new Padding(0, 5, 10, 0) };
+            _rdoInflux = new RadioButton { Text = "InfluxDB", AutoSize = true, Margin = new Padding(0, 5, 10, 0) };
+            _rdoInflux.CheckedChanged += RdoInflux_CheckedChanged;
             _rdoCsv.CheckedChanged += (s, e) =>
             {
                 if (!_rdoCsv.Checked) return;
-                _pnlCsvContent.Visible     = true;
-                _pnlInfluxContent.Visible  = false;
-                _pnlDatasetContent.Visible = false;
+                _pnlCsvContent.Visible    = true;
+                _pnlInfluxContent.Visible = false;
             };
             srcFlow.Controls.Add(_rdoCsv);
             srcFlow.Controls.Add(_rdoInflux);
-            srcFlow.Controls.Add(_rdoDataset);
             _pnlSourceSelector.Controls.Add(srcFlow);
-
-            // 데이터셋 패널
-            _pnlDatasetContent = BuildDatasetPanel();
-            _pnlDatasetContent.Visible = false;
 
             // DockStyle.Top 은 마지막 추가 순서가 최상단 → 역순 추가
             leftPanel.Controls.Add(_pnlCsvContent);      // Fill  (나중에 Hide/Show)
             leftPanel.Controls.Add(_pnlInfluxContent);   // Fill  (나중에 Hide/Show)
-            leftPanel.Controls.Add(_pnlDatasetContent);  // Fill  (나중에 Hide/Show)
             leftPanel.Controls.Add(_pnlSourceSelector);  // Top   (항상 맨 위)
             split.Panel1.Controls.Add(leftPanel);
 
@@ -760,8 +582,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             this.Shown += (s, e) =>
             {
                 if (_splitterInitialized) return;
-                int leftPanelWidth = btnSelectFolder.Width + btnCheckAll.Width + btnUncheckAll.Width + 20;
-                split.SplitterDistance = leftPanelWidth;
+                split.SplitterDistance = 280;
                 _splitterInitialized = true;
             };
         }
@@ -819,8 +640,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 {
                     foreach (var name in batch)
                     {
-                        string path = System.IO.Path.Combine(currentFolder, name);
-                        AddCsvSeriesToChart(name, path, ycol); // 내부에서 Task.Run + BeginInvoke → OK
+                        // GetCheckedFileNames() 은 전체 경로를 반환
+                        string seriesName = System.IO.Path.GetFileName(name);
+                        AddCsvSeriesToChart(seriesName, name, ycol);
                     }
                 }
 
@@ -894,24 +716,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void LoadCsvFileListInitial_Virtual()
         {
-            _allFiles.Clear();
-            _viewIndex.Clear();
-
-            if (!Directory.Exists(currentFolder)) return;
-
-            _allFiles = Directory.EnumerateFiles(currentFolder, "*.csv", SearchOption.TopDirectoryOnly)
-                                 .Select(Path.GetFileName)
-                                 .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-                                 .ToList();
-
-            _checked = new BitArray(_allFiles.Count, false);
-
-            if (_allFiles.Count > 0)
-            {
-                var headers = GetCachedHeaders(Path.Combine(currentFolder, _allFiles[0]));
-                if (headers != null) LoadYColumnCombo(headers);
-            }
-            ApplyFilter();
+            // 트리 뷰 기반으로 전환됨 — RefreshCsvTree() 로 위임
+            RefreshCsvTree();
         }
 
         private string[] GetCachedHeaders(string filePath)
@@ -936,23 +742,19 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void ApplyFilter()
         {
+            // 트리 뷰로 전환 후 호환성 유지용 — fileList/txtFilter 미사용 시 무시
+            if (fileList == null || txtFilter == null) return;
             string q = (txtFilter.Text ?? string.Empty).Trim();
             _viewIndex.Clear();
-
             if (string.IsNullOrEmpty(q))
-            {
                 for (int i = 0; i < _allFiles.Count; i++) _viewIndex.Add(i);
-            }
             else
-            {
                 for (int i = 0; i < _allFiles.Count; i++)
                     if (_allFiles[i].IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
                         _viewIndex.Add(i);
-            }
-
             fileList.VirtualListSize = _viewIndex.Count;
             fileList.Invalidate();
-            ResizeFileColumn(); // ★ 텍스트/체크박스 보이도록 폭 맞춤
+            ResizeFileColumn();
         }
 
         private void RefreshCsvFileListDiff_Virtual()
@@ -1006,7 +808,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             ScheduleFreqUpdate();
         }
 
-        private void SafeRefreshListPreservingChecks() { RefreshCsvFileListDiff_Virtual(); }
+        private void SafeRefreshListPreservingChecks() { RefreshCsvTree(); }
 
         // ===========================
         // UI Handlers
@@ -1025,8 +827,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
                 string path = Path.GetDirectoryName(dialog.FileName);
                 currentFolder = path;
+                if (_txtCsvRoot != null) _txtCsvRoot.Text = path;
 
-                LoadCsvFileListInitial_Virtual();
+                RefreshCsvTree();
                 if (_allFiles.Count > 30000) StopWatching(); else StartWatching(currentFolder);
             }
         }
@@ -1035,12 +838,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             lock (chartSync) chart.Series.Clear();
 
-            var yColumn = cmbYColumn.SelectedItem != null ? cmbYColumn.SelectedItem.ToString() : null;
-            foreach (var fileName in GetCheckedFileNames())
-            {
-                string filePath = Path.Combine(currentFolder, fileName);
-                AddCsvSeriesToChart(fileName, filePath, yColumn);
-            }
+            var yColumn = cmbYColumn.SelectedItem?.ToString();
+            foreach (var filePath in GetCheckedFileNames())
+                AddCsvSeriesToChart(Path.GetFileName(filePath), filePath, yColumn);
 
             if (cmbYColumn.SelectedItem != null)
                 chart.ChartAreas["MainArea"].AxisY.Title = cmbYColumn.SelectedItem.ToString();
@@ -1184,8 +984,18 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // ---------------------------
         private IEnumerable<string> GetCheckedFileNames()
         {
-            for (int i = 0; i < _allFiles.Count; i++)
-                if (_checked[i]) yield return _allFiles[i];
+            if (_tvCsv == null) yield break;
+            foreach (var p in GetCheckedLeafPaths(_tvCsv.Nodes))
+                yield return p;
+        }
+
+        private static IEnumerable<string> GetCheckedLeafPaths(TreeNodeCollection nodes)
+        {
+            foreach (TreeNode n in nodes)
+            {
+                if (n.Nodes.Count == 0) { if (n.Checked && n.Tag is string p) yield return p; }
+                else foreach (var p in GetCheckedLeafPaths(n.Nodes)) yield return p;
+            }
         }
 
         private void RebuildChartFromCheckedFiles(bool forceReload = false)
@@ -1196,9 +1006,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 return;
             }
 
-            string yColumn = cmbYColumn.SelectedItem != null ? cmbYColumn.SelectedItem.ToString() : null;
+            string yColumn = cmbYColumn.SelectedItem?.ToString();
 
-            var desired = new HashSet<string>(GetCheckedFileNames(), StringComparer.OrdinalIgnoreCase);
+            // GetCheckedFileNames() 는 전체 경로를 반환 — 시리즈 이름은 파일명
+            var desiredPaths = GetCheckedFileNames().ToList();
+            var desiredNames = new HashSet<string>(
+                desiredPaths.Select(Path.GetFileName), StringComparer.OrdinalIgnoreCase);
 
             var current = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (Series s in chart.Series) current.Add(s.Name);
@@ -1206,51 +1019,29 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (forceReload)
             {
                 using (SuspendPainting(chart))
-                {
                     lock (chartSync) chart.Series.Clear();
-                }
-                foreach (var name in desired)
-                {
-                    string path = Path.Combine(currentFolder, name);
-                    AddCsvSeriesToChart(name, path, yColumn);
-                }
+                foreach (var fp in desiredPaths)
+                    AddCsvSeriesToChart(Path.GetFileName(fp), fp, yColumn);
                 AutoAdjustYAxis();
                 ScheduleFreqUpdate();
                 return;
             }
 
-            var toRemove = new List<string>();
-            foreach (var name in current)
-                if (!desired.Contains(name)) toRemove.Add(name);
-
-            var toAdd = new List<string>();
-            foreach (var name in desired)
-                if (!current.Contains(name)) toAdd.Add(name);
+            var toRemove = current.Where(n => !desiredNames.Contains(n)).ToList();
+            var toAdd = desiredPaths.Where(p => !current.Contains(Path.GetFileName(p))).ToList();
 
             if (toRemove.Count == 0 && toAdd.Count == 0) return;
 
             if (toRemove.Count > 0)
             {
                 using (SuspendPainting(chart))
-                {
                     lock (chartSync)
-                    {
-                        for (int i = 0; i < toRemove.Count; i++)
-                        {
-                            string name = toRemove[i];
-                            if (chart.Series.IndexOf(name) >= 0)
-                                chart.Series.Remove(chart.Series[name]);
-                        }
-                    }
-                }
+                        foreach (var n in toRemove)
+                            if (chart.Series.IndexOf(n) >= 0) chart.Series.Remove(chart.Series[n]);
             }
 
-            for (int i = 0; i < toAdd.Count; i++)
-            {
-                string name = toAdd[i];
-                string path = Path.Combine(currentFolder, name);
-                AddCsvSeriesToChart(name, path, yColumn);
-            }
+            foreach (var fp in toAdd)
+                AddCsvSeriesToChart(Path.GetFileName(fp), fp, yColumn);
 
             AutoAdjustYAxis();
             ScheduleFreqUpdate();
@@ -1592,8 +1383,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             {
                 for (int idx = 0; idx < targets.Count; idx++)
                 {
-                    var fileName = targets[idx];
-                    var path = Path.Combine(currentFolder, fileName);
+                    var fileName = targets[idx]; // 전체 경로
+                    var path = fileName;
                     var headers = GetCachedHeaders(path);
                     if (headers == null) continue;
 
@@ -2245,9 +2036,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         }
 
         // =====================================================================
-        // 데이터셋 트리 뷰
+        // CSV 트리 뷰
         // =====================================================================
-        private Panel BuildDatasetPanel()
+        private Panel BuildCsvTreePanel()
         {
             var pnl = new Panel { Dock = DockStyle.Fill };
 
@@ -2258,56 +2049,56 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
                 Padding = new Padding(2, 2, 2, 0)
             };
-            _txtDatasetRoot = new TextBox
+            _txtCsvRoot = new TextBox
             {
-                Text = @"C:\Data\PHM_Logs\Signals",
+                Text = currentFolder,
                 Width = 160, Height = 22, Margin = new Padding(0, 1, 2, 0)
             };
-            var btnDsRoot = new Button { Text = "…", Width = 26, Height = 22, Margin = new Padding(0, 1, 2, 0) };
-            btnDsRoot.Click += (s, e) =>
-            {
-                using (var fbd = new FolderBrowserDialog { SelectedPath = _txtDatasetRoot.Text })
-                    if (fbd.ShowDialog() == DialogResult.OK) { _txtDatasetRoot.Text = fbd.SelectedPath; RefreshDatasetTree(); }
-            };
-            var btnDsRefresh = new Button { Text = "↺", Width = 26, Height = 22, Margin = new Padding(0, 1, 0, 0) };
-            btnDsRefresh.Click += (s, e) => RefreshDatasetTree();
-            toolbar.Controls.AddRange(new Control[] { _txtDatasetRoot, btnDsRoot, btnDsRefresh });
+            btnSelectFolder = new Button { Text = "…", Width = 26, Height = 22, Margin = new Padding(0, 1, 2, 0) };
+            btnSelectFolder.Click += BtnSelectFolder_Click;
+            var btnCsvRefresh = new Button { Text = "↺", Width = 26, Height = 22, Margin = new Padding(0, 1, 0, 0) };
+            btnCsvRefresh.Click += (s, e) => RefreshCsvTree();
+            toolbar.Controls.AddRange(new Control[] { _txtCsvRoot, btnSelectFolder, btnCsvRefresh });
 
-            // ── 하단 툴바: Y컬럼 + 샘플 수 + 로드 버튼 ─────────────────────
+            // ── 하단 툴바: Y컬럼 + 전체 체크/해제 ──────────────────────────
             var bottomBar = new FlowLayoutPanel
             {
                 Dock = DockStyle.Bottom, Height = 28, AutoSize = false,
                 FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
                 Padding = new Padding(2, 2, 2, 0)
             };
-            bottomBar.Controls.Add(new Label { Text = "Y컬럼:", AutoSize = true, Margin = new Padding(0, 5, 2, 0) });
-            _cmbDatasetYCol = new ComboBox
+            cmbYColumn = new ComboBox
             {
-                Width = 70, Height = 22, DropDownStyle = ComboBoxStyle.DropDown,
-                Margin = new Padding(0, 2, 4, 0)
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 80, Height = 22, Margin = new Padding(0, 2, 4, 0)
             };
-            _cmbDatasetYCol.Items.AddRange(new object[] { "x", "y", "z", "Trq(%)" });
-            _cmbDatasetYCol.Text = "x";
-            bottomBar.Controls.Add(_cmbDatasetYCol);
-            bottomBar.Controls.Add(new Label { Text = "샘플:", AutoSize = true, Margin = new Padding(0, 5, 2, 0) });
-            _nudDatasetSamples = new NumericUpDown
+            cmbYColumn.SelectedIndexChanged += CmbYColumn_SelectedIndexChanged;
+
+            btnCheckAll = new Button { Text = "전체 체크", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 2, 0) };
+            btnCheckAll.Click += (s, e) =>
             {
-                Minimum = 1, Maximum = 20, Value = 3,
-                Width = 44, Height = 22, Margin = new Padding(0, 2, 4, 0)
+                if (_tvCsv == null) return;
+                _tvCsv.AfterCheck -= TvCsv_AfterCheck;
+                SetAllTreeChecked(_tvCsv.Nodes, true);
+                _tvCsv.AfterCheck += TvCsv_AfterCheck;
+                ReloadChartFromTree();
             };
-            bottomBar.Controls.Add(_nudDatasetSamples);
-            var btnDsLoad = new Button { Text = "▶ 로드", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 2, 0) };
-            btnDsLoad.Click += (s, e) => LoadDatasetSelection();
-            var btnDsClear = new Button { Text = "✕ 지우기", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
-            btnDsClear.Click += (s, e) =>
+
+            btnUncheckAll = new Button { Text = "전체 해제", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
+            btnUncheckAll.Click += (s, e) =>
             {
+                if (_tvCsv == null) return;
+                _tvCsv.AfterCheck -= TvCsv_AfterCheck;
+                SetAllTreeChecked(_tvCsv.Nodes, false);
+                _tvCsv.AfterCheck += TvCsv_AfterCheck;
                 lock (chartSync) chart.Series.Clear();
-                AutoAdjustYAxis(); ClearFrequencyChart();
+                AutoAdjustYAxis();
+                ClearFrequencyChart();
             };
-            bottomBar.Controls.AddRange(new Control[] { btnDsLoad, btnDsClear });
+            bottomBar.Controls.AddRange(new Control[] { cmbYColumn, btnCheckAll, btnUncheckAll });
 
             // ── 트리 뷰 ──────────────────────────────────────────────────────
-            _tvDataset = new TreeView
+            _tvCsv = new TreeView
             {
                 Dock = DockStyle.Fill,
                 CheckBoxes = true,
@@ -2315,67 +2106,97 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Font = new Font(Font.FontFamily, 8.5f),
                 HideSelection = false
             };
-            _tvDataset.AfterCheck += TvDataset_AfterCheck;
+            _tvCsv.AfterCheck += TvCsv_AfterCheck;
 
-            pnl.Controls.Add(_tvDataset);
+            pnl.Controls.Add(_tvCsv);
             pnl.Controls.Add(bottomBar);
             pnl.Controls.Add(toolbar);
 
             // 초기 스캔
-            RefreshDatasetTree();
+            RefreshCsvTree();
             return pnl;
         }
 
-        private void RefreshDatasetTree()
+        private void RefreshCsvTree()
         {
-            if (_tvDataset == null) return;
-            string root = _txtDatasetRoot?.Text?.Trim() ?? "";
+            if (_tvCsv == null) return;
+            string root = _txtCsvRoot?.Text?.Trim() ?? currentFolder;
             if (!Directory.Exists(root)) return;
 
-            _tvDataset.BeginUpdate();
-            _tvDataset.Nodes.Clear();
+            currentFolder = root;
+            _tvCsv.BeginUpdate();
+            _tvCsv.Nodes.Clear();
+            _allFiles.Clear();
             try
             {
-                // {root}/{date_axis}/{class}/{Accel|Torque} 구조 스캔
-                foreach (string axisDir in Directory.GetDirectories(root).OrderBy(d => d))
+                AddCsvTreeNodes(_tvCsv.Nodes, root);
+                if (_tvCsv.Nodes.Count > 0) _tvCsv.Nodes[0].Expand();
+                if (_allFiles.Count > 0)
                 {
-                    string axisName = Path.GetFileName(axisDir);
-                    var axisNode = new TreeNode(axisName) { Tag = axisDir };
-
-                    foreach (string classDir in Directory.GetDirectories(axisDir).OrderBy(d => d))
-                    {
-                        string className = Path.GetFileName(classDir);
-                        var classNode = new TreeNode(className) { Tag = classDir };
-
-                        foreach (string sigDir in Directory.GetDirectories(classDir).OrderBy(d => d))
-                        {
-                            string sigName = Path.GetFileName(sigDir);
-                            // Accel은 한 단계 더 (cDAQ1Mod2 등) — 실제 CSV가 있는 폴더를 Tag로
-                            string csvDir = sigDir;
-                            var subDirs = Directory.GetDirectories(sigDir);
-                            if (subDirs.Length > 0 && !Directory.GetFiles(sigDir, "*.csv").Any())
-                                csvDir = subDirs[0]; // 장치 폴더 한 단계 더
-                            int cnt = Directory.GetFiles(csvDir, "*.csv", SearchOption.AllDirectories).Length;
-                            var sigNode = new TreeNode($"{sigName}  ({cnt}개)") { Tag = csvDir };
-                            classNode.Nodes.Add(sigNode);
-                        }
-                        if (classNode.Nodes.Count > 0) axisNode.Nodes.Add(classNode);
-                    }
-                    if (axisNode.Nodes.Count > 0) _tvDataset.Nodes.Add(axisNode);
+                    var headers = GetCachedHeaders(_allFiles[0]);
+                    if (headers != null) LoadYColumnCombo(headers);
                 }
-                if (_tvDataset.Nodes.Count > 0) _tvDataset.Nodes[0].Expand();
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
-            finally { _tvDataset.EndUpdate(); }
+            finally
+            {
+                _checked = new BitArray(_allFiles.Count, false);
+                _tvCsv.EndUpdate();
+            }
         }
 
-        private void TvDataset_AfterCheck(object sender, TreeViewEventArgs e)
+        private void AddCsvTreeNodes(TreeNodeCollection nodes, string dir)
         {
-            // 부모 체크 → 자식 일괄 체크/해제
+            foreach (string subDir in Directory.GetDirectories(dir).OrderBy(d => d))
+            {
+                string subName = Path.GetFileName(subDir);
+                var folderNode = new TreeNode(subName) { Tag = subDir };
+                AddCsvTreeNodes(folderNode.Nodes, subDir);
+                if (folderNode.Nodes.Count > 0)
+                    nodes.Add(folderNode);
+            }
+            foreach (string file in Directory.GetFiles(dir, "*.csv").OrderBy(f => f))
+            {
+                _allFiles.Add(file);
+                nodes.Add(new TreeNode(Path.GetFileName(file)) { Tag = file });
+            }
+        }
+
+        private void TvCsv_AfterCheck(object sender, TreeViewEventArgs e)
+        {
             if (e.Action == TreeViewAction.Unknown) return;
-            _tvDataset.AfterCheck -= TvDataset_AfterCheck;
+            _tvCsv.AfterCheck -= TvCsv_AfterCheck;
             SetChildChecked(e.Node, e.Node.Checked);
-            _tvDataset.AfterCheck += TvDataset_AfterCheck;
+            _tvCsv.AfterCheck += TvCsv_AfterCheck;
+
+            string ycol = cmbYColumn?.SelectedItem?.ToString();
+            UpdateChartForTreeNode(e.Node, e.Node.Checked, ycol);
+            AutoAdjustYAxis();
+            ScheduleFreqUpdate();
+        }
+
+        private void UpdateChartForTreeNode(TreeNode node, bool check, string ycol)
+        {
+            if (node.Nodes.Count == 0) // 리프 = CSV 파일
+            {
+                if (node.Tag is string filePath)
+                {
+                    string seriesName = Path.GetFileName(filePath);
+                    if (check)
+                        AddCsvSeriesToChart(seriesName, filePath, ycol);
+                    else
+                    {
+                        lock (chartSync)
+                            if (chart.Series.IndexOf(seriesName) >= 0)
+                                chart.Series.Remove(chart.Series[seriesName]);
+                    }
+                }
+            }
+            else
+            {
+                foreach (TreeNode child in node.Nodes)
+                    UpdateChartForTreeNode(child, check, ycol);
+            }
         }
 
         private static void SetChildChecked(TreeNode node, bool state)
@@ -2387,55 +2208,31 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
         }
 
-        private void LoadDatasetSelection()
-        {
-            // 체크된 리프 노드(Tag = 실제 CSV 폴더) 수집
-            var selectedDirs = new List<(string Dir, string Label)>();
-            CollectCheckedLeaves(_tvDataset.Nodes, selectedDirs);
-
-            if (selectedDirs.Count == 0)
-            {
-                MessageBox.Show("트리에서 로드할 항목을 체크하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            string yCol = _cmbDatasetYCol?.Text?.Trim() ?? "x";
-            int nSamples = (int)(_nudDatasetSamples?.Value ?? 3);
-
-            lock (chartSync) chart.Series.Clear();
-            AutoAdjustYAxis();
-            ClearFrequencyChart();
-
-            var rnd = new Random();
-            foreach (var (dir, label) in selectedDirs)
-            {
-                var csvFiles = Directory.GetFiles(dir, "*.csv", SearchOption.AllDirectories);
-                if (csvFiles.Length == 0) continue;
-
-                // 랜덤으로 nSamples개 선택
-                var picked = csvFiles.OrderBy(_ => rnd.Next()).Take(nSamples).ToArray();
-                foreach (var f in picked)
-                {
-                    string seriesName = $"{label}/{Path.GetFileNameWithoutExtension(f)}";
-                    AddCsvSeriesToChart(seriesName, f, yCol);
-                }
-            }
-        }
-
-        private static void CollectCheckedLeaves(TreeNodeCollection nodes, List<(string, string)> result)
+        private static void SetAllTreeChecked(TreeNodeCollection nodes, bool state)
         {
             foreach (TreeNode n in nodes)
             {
-                if (n.Nodes.Count == 0) // 리프 노드
-                {
-                    if (n.Checked && n.Tag is string dir)
-                    {
-                        // 레이블 = 부모(클래스) 노드 텍스트
-                        string label = n.Parent?.Text ?? n.Text;
-                        result.Add((dir, label));
-                    }
-                }
-                else CollectCheckedLeaves(n.Nodes, result);
+                n.Checked = state;
+                SetAllTreeChecked(n.Nodes, state);
+            }
+        }
+
+        private void ReloadChartFromTree()
+        {
+            lock (chartSync) chart.Series.Clear();
+            string ycol = cmbYColumn?.SelectedItem?.ToString();
+            if (_tvCsv != null) ReloadChartFromNodes(_tvCsv.Nodes, ycol);
+            AutoAdjustYAxis();
+            ScheduleFreqUpdate();
+        }
+
+        private void ReloadChartFromNodes(TreeNodeCollection nodes, string ycol)
+        {
+            foreach (TreeNode n in nodes)
+            {
+                if (n.Checked && n.Nodes.Count == 0 && n.Tag is string fp)
+                    AddCsvSeriesToChart(Path.GetFileName(fp), fp, ycol);
+                ReloadChartFromNodes(n.Nodes, ycol);
             }
         }
 
@@ -2930,9 +2727,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void RdoInflux_CheckedChanged(object sender, EventArgs e)
         {
             bool influx = _rdoInflux.Checked;
-            _pnlCsvContent.Visible     = !influx && !(_rdoDataset?.Checked == true);
-            _pnlInfluxContent.Visible  =  influx;
-            if (_pnlDatasetContent != null) _pnlDatasetContent.Visible = false;
+            _pnlCsvContent.Visible    = !influx;
+            _pnlInfluxContent.Visible =  influx;
 
             if (influx)
             {
