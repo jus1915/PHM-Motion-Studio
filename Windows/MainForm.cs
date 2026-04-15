@@ -14,6 +14,8 @@ using PHM_Project_DockPanel.Services.DAQ;
 using PHM_Project_DockPanel.Controller;
 using PHM_Project_DockPanel.UI.DataAnalysis;
 using PHM_Project_DockPanel.UI.Dashboard;
+using PHM_Project_DockPanel.UI.Chat;
+using PHM_Project_DockPanel.Services.LLM;
 using PHM_Project_DockPanel.DebugTools;
 using static PHM_Project_DockPanel.Windows.AxisInfoForm;
 using WMX3ApiCLR;
@@ -48,6 +50,7 @@ namespace PHM_Project_DockPanel
         private SimulatorForm _simulator;
         private LogGraphForm _logGraph;
         private LogWriterForm _logWriter;
+        private LlmChatPanel _llmChat;
 
         // ────────────────────────────────────────────────────────────────────
         // 생성자
@@ -389,8 +392,12 @@ namespace PHM_Project_DockPanel
             menuDataAnalysis.DropDownItems.Add(
                 CreateDockMenuItem<DashboardForm>("실시간 추론", DockState.Document));
 
+            // ── AI 관제 보조원 ────────────────────────────────────────────────
+            var menuAiAssistant = new ToolStripMenuItem("AI 관제", null, (s, e) => OpenLlmChat());
+
             menuStrip.Items.Add(menuDataCollection);
             menuStrip.Items.Add(menuDataAnalysis);
+            menuStrip.Items.Add(menuAiAssistant);
             menuStrip.Items.Add(new ToolStripMenuItem("프로그램 종료", null, (s, e) => Close()));
 
             MainMenuStrip = menuStrip;
@@ -490,6 +497,29 @@ namespace PHM_Project_DockPanel
             SaveLayout();
             SaveAxisConfigs();
             DisposeServices();
+        }
+
+        // ────────────────────────────────────────────────────────────────────
+        // AI 관제 보조원
+        // ────────────────────────────────────────────────────────────────────
+        private void OpenLlmChat()
+        {
+            if (_llmChat == null || _llmChat.IsDisposed)
+            {
+                var ctx = new LlmAppContext
+                {
+                    Controller = _controller,
+                    Motion = _motion,
+                    AxisConfigs = _axisConfigs,
+                    ApplyAxisConfigs = configs => _controller.SetAxisConfigs(configs)
+                };
+                _llmChat = new LlmChatPanel(ctx);
+            }
+
+            if (!_llmChat.Visible)
+                _llmChat.Show(_dockPanel, DockState.DockRight);
+            else
+                _llmChat.Activate();
         }
 
         // ────────────────────────────────────────────────────────────────────
