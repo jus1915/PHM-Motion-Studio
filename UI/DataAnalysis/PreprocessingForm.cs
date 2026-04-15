@@ -29,8 +29,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private const int DebounceIntervalMs = 300;
 
         // === Bulk/배치 렌더링 제어 ===
-        private const int MaxSeriesOnChart = 300;   // 한 화면에 표시할 최대 시리즈 수
-        private const int BulkBatchSize = 40;       // 배치 크기(한 번에 추가할 시리즈 수)
+        private const int MaxSeriesOnChart = 300;      // 한 화면에 표시할 최대 시리즈 수
+        private const int BulkBatchSize = 40;          // 배치 크기(한 번에 추가할 시리즈 수)
+        private const int MaxAutoVisualizeFiles = 50;  // 이 수 초과 시 차트 시각화 생략
 
         private const int WM_SETREDRAW = 0x000B;
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -2099,6 +2100,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 lock (chartSync) chart.Series.Clear();
                 var paths = new List<string>();
                 CollectLeafPaths(_tvCsv.Nodes, paths);
+                if (paths.Count > MaxAutoVisualizeFiles)
+                {
+                    AppEvents.RaiseLog(
+                        $"[신호 탐색기] 파일 {paths.Count}개 선택 — 시각화 한도({MaxAutoVisualizeFiles}개) 초과로 " +
+                        "차트 표시를 건너뜁니다. 데이터 정제 탭은 정상 사용 가능합니다.");
+                    return;
+                }
                 await StartBatchedLoadAsync(paths, cmbYColumn?.SelectedItem?.ToString());
             };
 
@@ -2264,6 +2272,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // 체크: 해당 노드의 리프 경로 수집 후 배치 비동기 로드
             var paths = new List<string>();
             CollectLeafPaths(e.Node, paths);
+
+            if (paths.Count > MaxAutoVisualizeFiles)
+            {
+                AppEvents.RaiseLog(
+                    $"[신호 탐색기] 파일 {paths.Count}개 선택 — 시각화 한도({MaxAutoVisualizeFiles}개) 초과로 " +
+                    "차트 표시를 건너뜁니다. 데이터 정제 탭은 정상 사용 가능합니다.");
+                return;
+            }
+
             await StartBatchedLoadAsync(paths, cmbYColumn?.SelectedItem?.ToString());
         }
 
