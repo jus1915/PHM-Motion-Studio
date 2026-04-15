@@ -131,7 +131,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private string[] _corrSelectedKeys = new string[0];
 
         // Other state
-        private readonly string defaultFolder = @"D:\Data\";
+        private readonly string defaultFolder = @"C:\Data\PHM_Logs\Signals";
         private bool _splitterInitialized = false;
         private readonly HashSet<string> _loadingSeries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource _csvLoadCts = new CancellationTokenSource();
