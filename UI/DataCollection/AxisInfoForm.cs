@@ -37,6 +37,7 @@ namespace PHM_Project_DockPanel.Windows
         private CheckBox _chkRealtime;
         private ComboBox _cmbLabel;
         private Label _lblLabelCaption;
+        private Button _btnAddLabel, _btnRemoveLabel;
 
         // ▷ 레거시 호환용(외부 코드가 LogCheckBox에 접근하던 경우 대응)
         private CheckBox _chkLogCombined = new CheckBox { Visible = false }; // 두 체크의 OR, UI에 미표시
@@ -162,10 +163,9 @@ namespace PHM_Project_DockPanel.Windows
 
             _chkRealtime.CheckedChanged += (s, e) =>
             {
-                bool enabled = _chkRealtime.Checked;
-                UpdateRealtimeStatusLabel(enabled);
-                _cmbLabel.Enabled = enabled;
-                AppEvents.RaiseAccelRealtimeToggled(enabled); // 로그 출력 안 함
+                UpdateRealtimeStatusLabel(_chkRealtime.Checked);
+                UpdateLabelEnabled();
+                AppEvents.RaiseAccelRealtimeToggled(_chkRealtime.Checked); // 로그 출력 안 함
             };
 
             // 레이블 콤보박스
@@ -176,11 +176,14 @@ namespace PHM_Project_DockPanel.Windows
                 Margin = new Padding(10, 10, 2, 0)
             };
 
+            _chkAccelCollect.CheckedChanged += (s, e) => UpdateLabelEnabled();
+            _chkTorqueCollect.CheckedChanged += (s, e) => UpdateLabelEnabled();
+
             _cmbLabel = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDown,
                 Width = 120,
-                Margin = new Padding(0, 6, 5, 0),
+                Margin = new Padding(0, 6, 2, 0),
                 Enabled = false
             };
             _cmbLabel.Items.AddRange(new object[]
@@ -193,6 +196,42 @@ namespace PHM_Project_DockPanel.Windows
             _cmbLabel.SelectedIndexChanged += (s, e) =>
                 AppEvents.RaiseInfluxLabelChanged(_cmbLabel.Text.Trim());
 
+            _btnAddLabel = new Button
+            {
+                Text = "+",
+                Width = 26,
+                Height = 23,
+                Margin = new Padding(0, 8, 0, 0),
+                Enabled = false
+            };
+            _btnAddLabel.Click += (s, e) =>
+            {
+                string newLabel = ShowInputDialog("추가할 레이블 이름을 입력하세요:", "레이블 추가");
+                if (string.IsNullOrWhiteSpace(newLabel)) return;
+                newLabel = newLabel.Trim();
+                if (_cmbLabel.Items.Contains(newLabel)) { _cmbLabel.Text = newLabel; return; }
+                _cmbLabel.Items.Add(newLabel);
+                _cmbLabel.Text = newLabel;
+            };
+
+            _btnRemoveLabel = new Button
+            {
+                Text = "-",
+                Width = 26,
+                Height = 23,
+                Margin = new Padding(2, 8, 5, 0),
+                Enabled = false
+            };
+            _btnRemoveLabel.Click += (s, e) =>
+            {
+                string cur = _cmbLabel.Text.Trim();
+                if (string.IsNullOrEmpty(cur)) return;
+                if (!_cmbLabel.Items.Contains(cur)) return;
+                int idx = _cmbLabel.Items.IndexOf(cur);
+                _cmbLabel.Items.Remove(cur);
+                _cmbLabel.SelectedIndex = Math.Max(0, Math.Min(idx, _cmbLabel.Items.Count - 1));
+            };
+
             btnConnect = new Button { Text = "Connect", Width = 100, Margin = new Padding(8, 4, 0, 0) };
             btnConnect.Click += BtnConnect_Click;
 
@@ -204,6 +243,8 @@ namespace PHM_Project_DockPanel.Windows
             rightControlPanel.Controls.Add(_chkRealtime);
             rightControlPanel.Controls.Add(_lblLabelCaption);
             rightControlPanel.Controls.Add(_cmbLabel);
+            rightControlPanel.Controls.Add(_btnAddLabel);
+            rightControlPanel.Controls.Add(_btnRemoveLabel);
             rightControlPanel.Controls.Add(btnConnect);
             rightControlPanel.Controls.Add(btnDisconnect);
 
@@ -376,6 +417,36 @@ namespace PHM_Project_DockPanel.Windows
                 _lblRealtimeStatus.Text = "대기 중";
                 _lblRealtimeStatus.ForeColor = Color.Gray;
             }
+        }
+
+        private void UpdateLabelEnabled()
+        {
+            bool enabled = _chkAccelCollect.Checked || _chkTorqueCollect.Checked || _chkRealtime.Checked;
+            _cmbLabel.Enabled = enabled;
+            _btnAddLabel.Enabled = enabled;
+            _btnRemoveLabel.Enabled = enabled;
+        }
+
+        private static string ShowInputDialog(string prompt, string title)
+        {
+            var dlg = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                Width = 320,
+                Height = 120,
+                MinimizeBox = false,
+                MaximizeBox = false
+            };
+            var lbl = new Label { Text = prompt, Left = 10, Top = 10, Width = 290, AutoSize = false };
+            var txt = new TextBox { Left = 10, Top = 32, Width = 284 };
+            var btnOk = new Button { Text = "확인", Left = 140, Top = 58, Width = 72, DialogResult = DialogResult.OK };
+            var btnCancel = new Button { Text = "취소", Left = 220, Top = 58, Width = 72, DialogResult = DialogResult.Cancel };
+            dlg.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+            dlg.AcceptButton = btnOk;
+            dlg.CancelButton = btnCancel;
+            return dlg.ShowDialog() == DialogResult.OK ? txt.Text : string.Empty;
         }
 
 
