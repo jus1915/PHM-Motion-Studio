@@ -1481,89 +1481,104 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 2) _meta.json 자동 파싱
             var meta = TryParseOnnxMeta(onnxPath);
 
-            // 3) 파일명에서 축 번호 추론 (axis0, axis1, ...)
+            // 3) 파일명 + 상위 폴더에서 축 번호 추론 (axis0, axis_0, axis-0, ...)
             int inferAxis = 0;
             var axisMatch = System.Text.RegularExpressions.Regex.Match(
-                Path.GetFileNameWithoutExtension(onnxPath), @"(?i)axis(\d+)");
-            if (axisMatch.Success) int.TryParse(axisMatch.Groups[1].Value, out inferAxis);
+                Path.GetFileNameWithoutExtension(onnxPath), @"(?i)axis[\s_-]?(\d+)");
+            if (axisMatch.Success)
+                int.TryParse(axisMatch.Groups[1].Value, out inferAxis);
+            else
+            {
+                // 상위 디렉토리명에서 재시도
+                string dirName = Path.GetFileName(Path.GetDirectoryName(onnxPath) ?? "") ?? "";
+                var dirMatch = System.Text.RegularExpressions.Regex.Match(dirName, @"(?i)axis[\s_-]?(\d+)");
+                if (dirMatch.Success) int.TryParse(dirMatch.Groups[1].Value, out inferAxis);
+            }
 
-            // 4) 파일명에서 AE 추론 (meta 없는 경우)
+            // 4) AE 추론
             bool inferAe = meta != null ? meta.IsAe
                 : Path.GetFileNameWithoutExtension(onnxPath).IndexOf("ae", StringComparison.OrdinalIgnoreCase) >= 0;
 
-            // ── 단일 등록 폼 ─────────────────────────────────────────────────
-            NumericUpDown numAxis, numC, numThr;
-            ComboBox      cmbRole;
-            TextBox       txtYCol;
+            // 5) Y 컬럼 추론
+            string inferYCol;
+            if (meta?.YColumn != null)
+                inferYCol = meta.YColumn;
+            else if (Path.GetFileNameWithoutExtension(onnxPath).IndexOf("torque", StringComparison.OrdinalIgnoreCase) >= 0)
+                inferYCol = "Trq(%)";
+            else
+                inferYCol = "x";
+
+            // 6) 채널 수 추론
+            int inferC = meta?.NChannels > 0 ? meta.NChannels : 1;
+
+            // ── 단일 등록 폼 (모든 필드 읽기 전용, AE 임계값만 편집 가능) ────
+            NumericUpDown numThr = null;
             Label         lblThrLabel;
+
+            // 읽기 전용 값 레이블 헬퍼
+            Label ValLbl(string text, bool highlight = false) => new Label
+            {
+                Text = text, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = highlight ? Color.FromArgb(0, 100, 180) : Color.FromArgb(30, 30, 30),
+                Font = highlight ? new Font(Font.FontFamily, Font.Size, FontStyle.Bold) : Font,
+            };
 
             var form = new Form
             {
                 Text = "DL ONNX 모델 등록",
-                Size = new Size(420, 310),
+                Size = new Size(420, 300),
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 StartPosition   = FormStartPosition.CenterParent,
                 MaximizeBox = false, MinimizeBox = false,
             };
+            int rowCount = inferAe ? 7 : 6;
             var tl = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7,
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = rowCount,
                 Padding = new Padding(14, 10, 14, 8),
             };
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 6; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            for (int i = 0; i < rowCount - 1; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             int r = 0;
 
-            // 파일명 (읽기 전용 표시)
+            // 파일명
             tl.Controls.Add(Lbl("파일:"), 0, r);
-            tl.Controls.Add(new Label { Text = Path.GetFileName(onnxPath), Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.Gray }, 1, r++);
+            tl.Controls.Add(ValLbl(Path.GetFileName(onnxPath)), 1, r++);
 
-            // 축 번호
+            // 축 번호 (읽기 전용)
             tl.Controls.Add(Lbl("축 번호:"), 0, r);
-            numAxis = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 7, Value = inferAxis };
-            tl.Controls.Add(numAxis, 1, r++);
+            tl.Controls.Add(ValLbl(inferAxis.ToString(), highlight: true), 1, r++);
 
-            // 역할
+            // 역할 (읽기 전용)
             tl.Controls.Add(Lbl("역할:"), 0, r);
-            cmbRole = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
-            cmbRole.Items.AddRange(new object[] { "분류 (CLS)", "오토인코더 (AE)" });
-            cmbRole.SelectedIndex = inferAe ? 1 : 0;
-            tl.Controls.Add(cmbRole, 1, r++);
+            tl.Controls.Add(ValLbl(inferAe ? "오토인코더 (AE)" : "분류 (CLS)", highlight: true), 1, r++);
 
-            // Y 컬럼
+            // Y 컬럼 (읽기 전용)
             tl.Controls.Add(Lbl("Y 컬럼:"), 0, r);
-            txtYCol = new TextBox { Dock = DockStyle.Fill, Text = meta?.YColumn ?? "x" };
-            tl.Controls.Add(txtYCol, 1, r++);
+            tl.Controls.Add(ValLbl(inferYCol, highlight: true), 1, r++);
 
-            // 채널 수 (meta 있으면 읽기 전용)
+            // 채널 수 (읽기 전용)
             tl.Controls.Add(Lbl("채널 수(C):"), 0, r);
-            numC = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 1, Maximum = 16,
-                Value = meta?.NChannels ?? 1, ReadOnly = meta != null };
-            tl.Controls.Add(numC, 1, r++);
+            tl.Controls.Add(ValLbl(inferC.ToString(), highlight: true), 1, r++);
 
-            // AE 임계값 (분류 시 숨김)
-            lblThrLabel = Lbl("임계값(AE):");
-            tl.Controls.Add(lblThrLabel, 0, r);
-            numThr = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 1000,
-                DecimalPlaces = 4, Value = (decimal)DefaultThreshold, Increment = 0.01m };
-            tl.Controls.Add(numThr, 1, r++);
-            lblThrLabel.Visible = inferAe;
-            numThr.Visible      = inferAe;
-            cmbRole.SelectedIndexChanged += (s2, e2) =>
+            // AE 임계값 (AE 모드에서만 표시, 유일한 편집 가능 필드)
+            if (inferAe)
             {
-                bool ae = cmbRole.SelectedIndex == 1;
-                lblThrLabel.Visible = ae;
-                numThr.Visible      = ae;
-            };
+                lblThrLabel = Lbl("임계값(AE):");
+                tl.Controls.Add(lblThrLabel, 0, r);
+                numThr = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 1000,
+                    DecimalPlaces = 4, Value = (decimal)DefaultThreshold, Increment = 0.01m };
+                tl.Controls.Add(numThr, 1, r++);
+            }
 
             // meta 정보 + 버튼
             string metaText = meta != null
                 ? $"✔ _meta.json 로드 — {(meta.IsAe ? "AE" : "분류")} | 클래스: {string.Join(", ", meta.ClassNames ?? new string[0])} | 채널: {string.Join(",", meta.Channels ?? new string[0])}"
-                : "⚠ _meta.json 없음 — 수동 입력";
+                : "⚠ _meta.json 없음 — 파일명으로 자동 추론";
             var lblMeta = new Label { Text = metaText, AutoSize = false, Dock = DockStyle.Fill,
                 ForeColor = meta != null ? Color.DarkGreen : Color.DarkOrange,
                 TextAlign = ContentAlignment.TopLeft };
@@ -1585,13 +1600,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             if (form.ShowDialog(this) != DialogResult.OK) return;
 
-            // 5) 등록
-            int    axis      = (int)numAxis.Value;
-            bool   isAe      = cmbRole.SelectedIndex == 1;
-            string yCol      = txtYCol.Text.Trim();
-            int    C         = (int)numC.Value;
+            // 7) 등록 — 모든 값은 자동 추론된 값 사용
+            int    axis      = inferAxis;
+            bool   isAe      = inferAe;
+            string yCol      = inferYCol;
+            int    C         = inferC;
             string kind      = meta?.Kind ?? (isAe ? "AE-CNN1D" : "CNN1D-CLS");
-            double threshold = isAe ? (double)numThr.Value : DefaultThreshold;
+            double threshold = isAe && numThr != null ? (double)numThr.Value : DefaultThreshold;
 
             try
             {
