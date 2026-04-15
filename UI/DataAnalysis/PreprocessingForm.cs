@@ -2114,6 +2114,24 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             };
             _tvCsv.AfterCheck += TvCsv_AfterCheck;
 
+            // 파일 노드 선택 시 해당 파일의 헤더로 Y컬럼 콤보 갱신
+            _tvCsv.AfterSelect += (s, e) =>
+            {
+                if (e.Node?.Nodes.Count == 0 && e.Node.Tag is string fp)
+                {
+                    var headers = GetCachedHeaders(fp);
+                    if (headers == null) return;
+                    string prev = cmbYColumn.SelectedItem?.ToString();
+                    LoadYColumnCombo(headers);
+                    // 이전 컬럼이 새 헤더에 있으면 선택 유지
+                    if (!string.IsNullOrEmpty(prev))
+                    {
+                        int idx = cmbYColumn.FindStringExact(prev);
+                        if (idx >= 0) cmbYColumn.SelectedIndex = idx;
+                    }
+                }
+            };
+
             pnl.Controls.Add(_tvCsv);
             pnl.Controls.Add(bottomBar);
             pnl.Controls.Add(toolbar);
@@ -2202,6 +2220,21 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             var cts = new CancellationTokenSource();
             _csvLoadCts = cts;
             var ct = cts.Token;
+
+            // 첫 파일 헤더로 Y컬럼 콤보 갱신 (컬럼이 달라졌을 경우 반영)
+            {
+                var h = GetCachedHeaders(paths[0]);
+                if (h != null)
+                {
+                    string prev = cmbYColumn.SelectedItem?.ToString();
+                    LoadYColumnCombo(h);
+                    if (!string.IsNullOrEmpty(prev))
+                    {
+                        int idx = cmbYColumn.FindStringExact(prev);
+                        if (idx >= 0) cmbYColumn.SelectedIndex = idx;
+                    }
+                }
+            }
 
             // 차트 표시 한도 체크
             int alreadyInChart;
