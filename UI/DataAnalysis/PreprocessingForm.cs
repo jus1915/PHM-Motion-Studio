@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Globalization;
 using System.Windows.Forms;
@@ -133,6 +134,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private readonly string defaultFolder = @"D:\Data\";
         private bool _splitterInitialized = false;
         private readonly HashSet<string> _loadingSeries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private CancellationTokenSource _csvLoadCts = new CancellationTokenSource();
 
         private static readonly string[] TimeColumnCandidates = { "time_s", "cycle" };
 
@@ -2075,19 +2077,23 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             cmbYColumn.SelectedIndexChanged += CmbYColumn_SelectedIndexChanged;
 
             btnCheckAll = new Button { Text = "전체 체크", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 2, 0) };
-            btnCheckAll.Click += (s, e) =>
+            btnCheckAll.Click += async (s, e) =>
             {
                 if (_tvCsv == null) return;
                 _tvCsv.AfterCheck -= TvCsv_AfterCheck;
                 SetAllTreeChecked(_tvCsv.Nodes, true);
                 _tvCsv.AfterCheck += TvCsv_AfterCheck;
-                ReloadChartFromTree();
+                lock (chartSync) chart.Series.Clear();
+                var paths = new List<string>();
+                CollectLeafPaths(_tvCsv.Nodes, paths);
+                await StartBatchedLoadAsync(paths, cmbYColumn?.SelectedItem?.ToString());
             };
 
             btnUncheckAll = new Button { Text = "전체 해제", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
             btnUncheckAll.Click += (s, e) =>
             {
                 if (_tvCsv == null) return;
+                CancelCsvLoad();                              // 진행 중 로드 즉시 취소
                 _tvCsv.AfterCheck -= TvCsv_AfterCheck;
                 SetAllTreeChecked(_tvCsv.Nodes, false);
                 _tvCsv.AfterCheck += TvCsv_AfterCheck;
@@ -2123,6 +2129,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             string root = _txtCsvRoot?.Text?.Trim() ?? currentFolder;
             if (!Directory.Exists(root)) return;
 
+            CancelCsvLoad();    // 폴더 변경 시 이전 로드 취소
             currentFolder = root;
             _tvCsv.BeginUpdate();
             _tvCsv.Nodes.Clear();
@@ -2162,41 +2169,109 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
         }
 
-        private void TvCsv_AfterCheck(object sender, TreeViewEventArgs e)
+        private async void TvCsv_AfterCheck(object sender, TreeViewEventArgs e)
         {
             if (e.Action == TreeViewAction.Unknown) return;
             _tvCsv.AfterCheck -= TvCsv_AfterCheck;
             SetChildChecked(e.Node, e.Node.Checked);
             _tvCsv.AfterCheck += TvCsv_AfterCheck;
 
-            string ycol = cmbYColumn?.SelectedItem?.ToString();
-            UpdateChartForTreeNode(e.Node, e.Node.Checked, ycol);
-            AutoAdjustYAxis();
-            ScheduleFreqUpdate();
+            if (!e.Node.Checked)
+            {
+                // 체크 해제: 진행 중인 로드 취소 + 즉시 차트에서 제거 (I/O 없음, 빠름)
+                CancelCsvLoad();
+                RemoveChartSeriesForNode(e.Node);
+                AutoAdjustYAxis();
+                ScheduleFreqUpdate();
+                return;
+            }
+
+            // 체크: 해당 노드의 리프 경로 수집 후 배치 비동기 로드
+            var paths = new List<string>();
+            CollectLeafPaths(e.Node, paths);
+            await StartBatchedLoadAsync(paths, cmbYColumn?.SelectedItem?.ToString());
         }
 
-        private void UpdateChartForTreeNode(TreeNode node, bool check, string ycol)
+        /// <summary>파일 경로 목록을 배치로 나눠 비동기 로드 — UI 블로킹 없음.</summary>
+        private async Task StartBatchedLoadAsync(IReadOnlyList<string> paths, string ycol)
         {
-            if (node.Nodes.Count == 0) // 리프 = CSV 파일
+            if (paths.Count == 0) return;
+
+            // 이전 로드 취소 후 새 토큰 발행
+            CancelCsvLoad();
+            var cts = new CancellationTokenSource();
+            _csvLoadCts = cts;
+            var ct = cts.Token;
+
+            // 차트 표시 한도 체크
+            int alreadyInChart;
+            lock (chartSync) alreadyInChart = chart.Series.Count;
+            int capacity = MaxSeriesOnChart - alreadyInChart;
+            if (capacity <= 0) return;
+            var limited = (paths.Count > capacity) ? paths.Take(capacity).ToList() : paths;
+            if (paths.Count > capacity)
+                MessageBox.Show($"성능을 위해 최대 {MaxSeriesOnChart}개까지만 표시합니다.",
+                    "표시 한도", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            const int BatchSize = 6;   // 배치당 동시 로드 수 (디스크 I/O 제한)
+            const int BatchDelayMs = 40; // 배치 사이 UI 숨 고르기 (ms)
+
+            try
             {
-                if (node.Tag is string filePath)
+                for (int i = 0; i < limited.Count; i += BatchSize)
                 {
-                    string seriesName = Path.GetFileName(filePath);
-                    if (check)
-                        AddCsvSeriesToChart(seriesName, filePath, ycol);
-                    else
+                    ct.ThrowIfCancellationRequested();
+
+                    int end = Math.Min(i + BatchSize, limited.Count);
+                    for (int j = i; j < end; j++)
                     {
-                        lock (chartSync)
-                            if (chart.Series.IndexOf(seriesName) >= 0)
-                                chart.Series.Remove(chart.Series[seriesName]);
+                        if (ct.IsCancellationRequested) return;
+                        AddCsvSeriesToChart(Path.GetFileName(limited[j]), limited[j], ycol);
                     }
+
+                    // UI 메시지 펌프에 숨 고르기 (마우스/키보드 이벤트 처리)
+                    await Task.Delay(BatchDelayMs, ct);
+                }
+
+                if (!ct.IsCancellationRequested)
+                {
+                    AutoAdjustYAxis();
+                    ScheduleFreqUpdate();
                 }
             }
-            else
+            catch (OperationCanceledException) { /* 정상 취소 */ }
+        }
+
+        private void CancelCsvLoad()
+        {
+            _csvLoadCts.Cancel();
+            _csvLoadCts = new CancellationTokenSource();
+        }
+
+        private static void CollectLeafPaths(TreeNode node, List<string> result)
+        {
+            if (node.Nodes.Count == 0) { if (node.Tag is string p) result.Add(p); }
+            else foreach (TreeNode child in node.Nodes) CollectLeafPaths(child, result);
+        }
+
+        private static void CollectLeafPaths(TreeNodeCollection nodes, List<string> result)
+        {
+            foreach (TreeNode n in nodes) CollectLeafPaths(n, result);
+        }
+
+        private void RemoveChartSeriesForNode(TreeNode node)
+        {
+            if (node.Nodes.Count == 0)
             {
-                foreach (TreeNode child in node.Nodes)
-                    UpdateChartForTreeNode(child, check, ycol);
+                if (node.Tag is string fp)
+                {
+                    string sn = Path.GetFileName(fp);
+                    lock (chartSync)
+                        if (chart.Series.IndexOf(sn) >= 0)
+                            chart.Series.Remove(chart.Series[sn]);
+                }
             }
+            else foreach (TreeNode child in node.Nodes) RemoveChartSeriesForNode(child);
         }
 
         private static void SetChildChecked(TreeNode node, bool state)
@@ -2214,25 +2289,6 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             {
                 n.Checked = state;
                 SetAllTreeChecked(n.Nodes, state);
-            }
-        }
-
-        private void ReloadChartFromTree()
-        {
-            lock (chartSync) chart.Series.Clear();
-            string ycol = cmbYColumn?.SelectedItem?.ToString();
-            if (_tvCsv != null) ReloadChartFromNodes(_tvCsv.Nodes, ycol);
-            AutoAdjustYAxis();
-            ScheduleFreqUpdate();
-        }
-
-        private void ReloadChartFromNodes(TreeNodeCollection nodes, string ycol)
-        {
-            foreach (TreeNode n in nodes)
-            {
-                if (n.Checked && n.Nodes.Count == 0 && n.Tag is string fp)
-                    AddCsvSeriesToChart(Path.GetFileName(fp), fp, ycol);
-                ReloadChartFromNodes(n.Nodes, ycol);
             }
         }
 
