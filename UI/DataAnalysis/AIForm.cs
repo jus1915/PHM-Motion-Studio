@@ -1614,19 +1614,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             };
         }
 
-        /// <summary>현재 데이터 폴더 부모에서 {date_Axis*} 폴더를 스캔해 일괄 학습합니다.</summary>
+        /// <summary>데이터 폴더에서 Axis* 하위 폴더를 스캔해 일괄 학습합니다.</summary>
         private async void StartBatchTrainingAsync()
         {
-            // 현재 폴더의 부모(Signals 루트) 탐색
             string currentDir = _dlDataDir?.Text?.Trim() ?? "";
-            string signalsRoot = System.IO.Directory.Exists(currentDir)
-                ? (System.IO.Path.GetDirectoryName(currentDir) ?? currentDir)
-                : currentDir;
-            if (!System.IO.Directory.Exists(signalsRoot))
+            if (!System.IO.Directory.Exists(currentDir))
             { MessageBox.Show("데이터 폴더가 없습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
-            // Axis 폴더 탐색
-            var axisDirs = System.IO.Directory.GetDirectories(signalsRoot)
+            // Axis 폴더 탐색: 현재 폴더 우선 → 부모 폴더 차선 → 단일 폴더 fallback
+            // 우선순위 ①: currentDir 안에 Axis* 하위폴더 (e.g. train\20260414_Axis0)
+            var axisDirs = System.IO.Directory.GetDirectories(currentDir)
                 .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
                     System.IO.Path.GetFileName(d), @"[Aa]xis\d+"))
                 .OrderBy(d => d)
@@ -1634,15 +1631,20 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             if (axisDirs.Count == 0)
             {
-                // 현재 폴더 자체에 Axis 폴더가 있을 수도 있음 (예: Signals 루트에서 직접 실행)
-                axisDirs = System.IO.Directory.GetDirectories(currentDir)
-                    .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
-                        System.IO.Path.GetFileName(d), @"[Aa]xis\d+"))
-                    .OrderBy(d => d)
-                    .ToList();
-                if (axisDirs.Count == 0)
-                    axisDirs = new List<string> { currentDir }; // 단일 폴더로 fallback
+                // 우선순위 ②: 부모 폴더 안에 Axis* 폴더 (currentDir 자체가 Axis 폴더인 경우)
+                string parentDir = System.IO.Path.GetDirectoryName(currentDir) ?? currentDir;
+                if (parentDir != currentDir && System.IO.Directory.Exists(parentDir))
+                {
+                    axisDirs = System.IO.Directory.GetDirectories(parentDir)
+                        .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
+                            System.IO.Path.GetFileName(d), @"[Aa]xis\d+"))
+                        .OrderBy(d => d)
+                        .ToList();
+                }
             }
+
+            if (axisDirs.Count == 0)
+                axisDirs = new List<string> { currentDir }; // 우선순위 ③: 단일 폴더
 
             var dlg = MessageBox.Show(
                 $"다음 {axisDirs.Count}개 축을 순차 학습합니다:\n\n" +
