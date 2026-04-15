@@ -117,6 +117,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private class FeatureItem { public string Key { get; set; } public string Title { get; set; } }
         private ComboBox cmbDistType;
 
+        // Data Cleaning Tab
+        private DataGridView _gridClean;
+        private RadioButton _rdoMissingDrop, _rdoMissingZero, _rdoMissingFill;
+        private CheckBox _chkOutlierEnable;
+        private ComboBox _cmbOutlierMethod;
+        private NumericUpDown _nudOutlierThreshold;
+        private ComboBox _cmbCleanOutput;
+        private Button _btnCleanPreview, _btnCleanApply;
+
         // Correlation Tab
         private CheckedListBox clbCorrFeatures;
         private ComboBox cmbCorrMethod;
@@ -569,9 +578,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (defaultKeys.Contains(FeatureList[i].Key))
                     clbCorrFeatures.SetItemChecked(i, true);
 
+            var tabCleaning = new TabPage("데이터 정제");
+            tabCleaning.Controls.Add(BuildDataCleaningPanel());
+
             tabControl.TabPages.Add(tabDistribution);
             tabControl.TabPages.Add(tabFeature);
             tabControl.TabPages.Add(tabCorrelation);
+            tabControl.TabPages.Add(tabCleaning);
             split.Panel2.Controls.Add(tabControl);
 
             this.Controls.Add(split);
@@ -2093,7 +2106,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             btnUncheckAll.Click += (s, e) =>
             {
                 if (_tvCsv == null) return;
-                CancelCsvLoad();                              // 진행 중 로드 즉시 취소
+                CancelCsvLoad();
                 _tvCsv.AfterCheck -= TvCsv_AfterCheck;
                 SetAllTreeChecked(_tvCsv.Nodes, false);
                 _tvCsv.AfterCheck += TvCsv_AfterCheck;
@@ -2101,7 +2114,51 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 AutoAdjustYAxis();
                 ClearFrequencyChart();
             };
-            bottomBar.Controls.AddRange(new Control[] { cmbYColumn, btnCheckAll, btnUncheckAll });
+
+            var btnDeleteChecked = new Button
+            {
+                Text = "🗑 삭제", Height = 22, AutoSize = true,
+                Margin = new Padding(10, 2, 0, 0), ForeColor = Color.Firebrick
+            };
+            btnDeleteChecked.Click += (s, e) =>
+            {
+                var toDelete = GetCheckedFileNames().ToList();
+                if (toDelete.Count == 0)
+                {
+                    MessageBox.Show("삭제할 파일을 먼저 체크하세요.", "알림",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                if (MessageBox.Show(
+                    $"체크된 {toDelete.Count}개 파일을 영구 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
+                    "파일 삭제 확인", MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                    return;
+
+                CancelCsvLoad();
+                int deleted = 0;
+                var errors = new List<string>();
+                foreach (var fp in toDelete)
+                {
+                    try
+                    {
+                        string sn = Path.GetFileName(fp);
+                        lock (chartSync)
+                            if (chart.Series.IndexOf(sn) >= 0)
+                                chart.Series.Remove(chart.Series[sn]);
+                        if (File.Exists(fp)) { File.Delete(fp); deleted++; }
+                    }
+                    catch (Exception ex) { errors.Add($"{Path.GetFileName(fp)}: {ex.Message}"); }
+                }
+                RefreshCsvTree();
+                string msg = $"{deleted}개 파일이 삭제되었습니다.";
+                if (errors.Count > 0)
+                    msg += $"\n\n오류 {errors.Count}건:\n" + string.Join("\n", errors.Take(5));
+                MessageBox.Show(msg, "삭제 완료", MessageBoxButtons.OK,
+                    errors.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            };
+
+            bottomBar.Controls.AddRange(new Control[] { cmbYColumn, btnCheckAll, btnUncheckAll, btnDeleteChecked });
 
             // ── 트리 뷰 ──────────────────────────────────────────────────────
             _tvCsv = new TreeView
@@ -2323,6 +2380,366 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 n.Checked = state;
                 SetAllTreeChecked(n.Nodes, state);
             }
+        }
+
+        // =====================================================================
+        // 데이터 정제 탭
+        // =====================================================================
+        private Panel BuildDataCleaningPanel()
+        {
+            var pnl = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
+
+            // ── 옵션 패널 ──────────────────────────────────────────────────
+            var optPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1, Padding = new Padding(4, 4, 4, 2)
+            };
+            optPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+            // Row 0: 결측치 처리
+            var rowMissing = new FlowLayoutPanel
+            {
+                AutoSize = true, Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 2, 0, 2)
+            };
+            rowMissing.Controls.Add(new Label { Text = "결측치 처리:", AutoSize = true, Margin = new Padding(0, 3, 8, 0) });
+            _rdoMissingDrop = new RadioButton { Text = "행 제거", AutoSize = true, Checked = true, Margin = new Padding(0, 1, 12, 0) };
+            _rdoMissingZero = new RadioButton { Text = "0 채우기", AutoSize = true, Margin = new Padding(0, 1, 12, 0) };
+            _rdoMissingFill = new RadioButton { Text = "앞 값으로 채우기", AutoSize = true, Margin = new Padding(0, 1, 0, 0) };
+            rowMissing.Controls.AddRange(new Control[] { _rdoMissingDrop, _rdoMissingZero, _rdoMissingFill });
+
+            // Row 1: 이상치 제거
+            var rowOutlier = new FlowLayoutPanel
+            {
+                AutoSize = true, Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 2, 0, 2)
+            };
+            _chkOutlierEnable = new CheckBox { Text = "이상치 제거", AutoSize = true, Margin = new Padding(0, 2, 12, 0) };
+            rowOutlier.Controls.Add(_chkOutlierEnable);
+            rowOutlier.Controls.Add(new Label { Text = "방법:", AutoSize = true, Margin = new Padding(0, 4, 4, 0) });
+            _cmbOutlierMethod = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList, Width = 82, Margin = new Padding(0, 1, 12, 0)
+            };
+            _cmbOutlierMethod.Items.AddRange(new object[] { "Z-score", "IQR" });
+            _cmbOutlierMethod.SelectedIndex = 0;
+            rowOutlier.Controls.Add(_cmbOutlierMethod);
+            rowOutlier.Controls.Add(new Label { Text = "임계값:", AutoSize = true, Margin = new Padding(0, 4, 4, 0) });
+            _nudOutlierThreshold = new NumericUpDown
+            {
+                Value = 3, Minimum = 1, Maximum = 10, DecimalPlaces = 1,
+                Increment = 0.5m, Width = 62, Margin = new Padding(0, 1, 0, 0)
+            };
+            rowOutlier.Controls.Add(_nudOutlierThreshold);
+
+            // Row 2: 출력 + 버튼
+            var rowAction = new FlowLayoutPanel
+            {
+                AutoSize = true, Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 4, 0, 2)
+            };
+            rowAction.Controls.Add(new Label { Text = "출력:", AutoSize = true, Margin = new Padding(0, 4, 4, 0) });
+            _cmbCleanOutput = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList, Width = 110, Margin = new Padding(0, 1, 12, 0)
+            };
+            _cmbCleanOutput.Items.AddRange(new object[] { "덮어쓰기", "_cleaned 폴더" });
+            _cmbCleanOutput.SelectedIndex = 1;
+            _btnCleanPreview = new Button { Text = "▶ 미리보기", AutoSize = true, Margin = new Padding(0, 1, 4, 0) };
+            _btnCleanPreview.Click += BtnCleanPreview_Click;
+            _btnCleanApply = new Button { Text = "✓ 적용", AutoSize = true, Margin = new Padding(0, 1, 0, 0) };
+            _btnCleanApply.Click += BtnCleanApply_Click;
+            rowAction.Controls.AddRange(new Control[] { _cmbCleanOutput, _btnCleanPreview, _btnCleanApply });
+
+            optPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            optPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            optPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            optPanel.Controls.Add(rowMissing,  0, 0);
+            optPanel.Controls.Add(rowOutlier,  0, 1);
+            optPanel.Controls.Add(rowAction,   0, 2);
+
+            // ── 결과 그리드 ────────────────────────────────────────────────
+            _gridClean = new DataGridView
+            {
+                Dock = DockStyle.Fill, ReadOnly = true,
+                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Color.WhiteSmoke },
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 24
+            };
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "File",    HeaderText = "파일명",     FillWeight = 200 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Total",   HeaderText = "전체 행",    FillWeight = 60 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Missing", HeaderText = "결측 행",    FillWeight = 60 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Outlier", HeaderText = "이상치 행",  FillWeight = 70 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "After",   HeaderText = "정제 후 행", FillWeight = 70 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Rate",    HeaderText = "제거율(%)",  FillWeight = 60 });
+
+            pnl.Controls.Add(_gridClean);
+            pnl.Controls.Add(optPanel);
+            return pnl;
+        }
+
+        private async void BtnCleanPreview_Click(object sender, EventArgs e)
+        {
+            var paths = GetCheckedFileNames().ToList();
+            if (paths.Count == 0)
+            {
+                MessageBox.Show("왼쪽 트리에서 분석할 CSV 파일을 체크하세요.", "알림",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            _btnCleanPreview.Enabled = false;
+            _btnCleanApply.Enabled = false;
+            _gridClean.Rows.Clear();
+
+            bool removeMissing = _rdoMissingDrop.Checked;
+            bool fillZero      = _rdoMissingZero.Checked;
+            bool useOutlier    = _chkOutlierEnable.Checked;
+            string method      = _cmbOutlierMethod.SelectedItem?.ToString() ?? "Z-score";
+            double threshold   = (double)_nudOutlierThreshold.Value;
+
+            var results = await Task.Run(() =>
+                paths.Select(fp => CleanFile(fp, false, null, removeMissing, fillZero, useOutlier, method, threshold))
+                     .ToList());
+
+            _gridClean.SuspendLayout();
+            foreach (var r in results)
+            {
+                double rate = r.TotalRows > 0
+                    ? Math.Round(100.0 * (r.TotalRows - r.CleanedRows) / r.TotalRows, 1)
+                    : 0;
+                var row = _gridClean.Rows.Add(
+                    Path.GetFileName(r.FilePath),
+                    r.TotalRows, r.MissingRows, r.OutlierRows, r.CleanedRows,
+                    $"{rate:F1}");
+                if (rate > 20)
+                    _gridClean.Rows[row].DefaultCellStyle.ForeColor = Color.Firebrick;
+            }
+            _gridClean.ResumeLayout();
+
+            _btnCleanPreview.Enabled = true;
+            _btnCleanApply.Enabled = true;
+        }
+
+        private async void BtnCleanApply_Click(object sender, EventArgs e)
+        {
+            var paths = GetCheckedFileNames().ToList();
+            if (paths.Count == 0)
+            {
+                MessageBox.Show("왼쪽 트리에서 적용할 CSV 파일을 체크하세요.", "알림",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            bool overwrite     = _cmbCleanOutput.SelectedIndex == 0;
+            bool removeMissing = _rdoMissingDrop.Checked;
+            bool fillZero      = _rdoMissingZero.Checked;
+            bool useOutlier    = _chkOutlierEnable.Checked;
+            string method      = _cmbOutlierMethod.SelectedItem?.ToString() ?? "Z-score";
+            double threshold   = (double)_nudOutlierThreshold.Value;
+
+            string confirm = overwrite
+                ? $"{paths.Count}개 파일에 정제를 적용하고 덮어씁니다.\n계속하시겠습니까?"
+                : $"{paths.Count}개 파일을 정제하여 '_cleaned' 폴더에 저장합니다.\n계속하시겠습니까?";
+            if (MessageBox.Show(confirm, "적용 확인",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+
+            _btnCleanPreview.Enabled = false;
+            _btnCleanApply.Enabled = false;
+            _gridClean.Rows.Clear();
+
+            var results = await Task.Run(() =>
+            {
+                return paths.Select(fp =>
+                {
+                    string outPath = overwrite
+                        ? fp
+                        : Path.Combine(Path.GetDirectoryName(fp), "_cleaned", Path.GetFileName(fp));
+                    return CleanFile(fp, true, outPath, removeMissing, fillZero, useOutlier, method, threshold);
+                }).ToList();
+            });
+
+            _gridClean.SuspendLayout();
+            foreach (var r in results)
+            {
+                double rate = r.TotalRows > 0
+                    ? Math.Round(100.0 * (r.TotalRows - r.CleanedRows) / r.TotalRows, 1)
+                    : 0;
+                _gridClean.Rows.Add(
+                    Path.GetFileName(r.FilePath),
+                    r.TotalRows, r.MissingRows, r.OutlierRows, r.CleanedRows,
+                    $"{rate:F1}");
+            }
+            _gridClean.ResumeLayout();
+
+            if (overwrite) RefreshCsvTree();
+            MessageBox.Show($"{results.Count}개 파일 정제 완료.", "완료",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            _btnCleanPreview.Enabled = true;
+            _btnCleanApply.Enabled = true;
+        }
+
+        private struct CleanStats
+        {
+            public string FilePath;
+            public int TotalRows, MissingRows, OutlierRows, CleanedRows;
+        }
+
+        /// <summary>
+        /// CSV 파일 정제. doWrite=false 이면 통계만 반환, true 이면 outPath 에 저장.
+        /// </summary>
+        private static CleanStats CleanFile(string filePath, bool doWrite, string outPath,
+            bool removeMissing, bool fillZero, bool useOutlier, string method, double threshold)
+        {
+            var stats = new CleanStats { FilePath = filePath };
+            try
+            {
+                string[] allLines = File.ReadAllLines(filePath, Encoding.UTF8);
+                if (allLines.Length < 2) return stats;
+
+                string headerLine  = allLines[0];
+                string[] headers   = headerLine.Split(new[] { ',', '\t', ';' });
+                int[] dataColIdx   = Enumerable.Range(0, headers.Length)
+                                               .Where(i => !IsTimeColumn(headers[i].Trim()))
+                                               .ToArray();
+                if (dataColIdx.Length == 0) { stats.TotalRows = allLines.Length - 1; return stats; }
+
+                stats.TotalRows = allLines.Length - 1;
+
+                // ── 1차 패스: 파싱 + 결측 처리 ───────────────────────────
+                var parsedRows   = new List<(string[] Parts, double[] Vals, bool HadMissing)>();
+                double[] lastOk  = new double[dataColIdx.Length];
+
+                for (int li = 1; li < allLines.Length; li++)
+                {
+                    string line = allLines[li];
+                    if (string.IsNullOrWhiteSpace(line)) { stats.TotalRows--; continue; }
+
+                    var parts = line.Split(new[] { ',', '\t', ';' });
+                    bool hadMissing = false;
+                    var vals = new double[dataColIdx.Length];
+
+                    for (int j = 0; j < dataColIdx.Length; j++)
+                    {
+                        int ci = dataColIdx[j];
+                        if (ci < parts.Length
+                            && double.TryParse(parts[ci].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out double v)
+                            && !double.IsNaN(v) && !double.IsInfinity(v))
+                        {
+                            vals[j] = v;
+                            lastOk[j] = v;
+                        }
+                        else
+                        {
+                            hadMissing = true;
+                            vals[j] = fillZero ? 0.0 : lastOk[j]; // 0채우기 or 앞값채우기
+                        }
+                    }
+
+                    if (hadMissing) stats.MissingRows++;
+                    parsedRows.Add((parts, vals, hadMissing));
+                }
+
+                // ── keep 마스크: 결측 행 제거 여부 ────────────────────────
+                var keep = new bool[parsedRows.Count];
+                for (int i = 0; i < parsedRows.Count; i++)
+                    keep[i] = !removeMissing || !parsedRows[i].HadMissing;
+
+                // ── 2차 패스: 이상치 탐지 (생존 행 기준 통계) ─────────────
+                if (useOutlier)
+                {
+                    var alive = Enumerable.Range(0, parsedRows.Count).Where(i => keep[i]).ToList();
+
+                    for (int col = 0; col < dataColIdx.Length; col++)
+                    {
+                        double[] colVals = alive
+                            .Select(i => parsedRows[i].Vals[col])
+                            .Where(v => !double.IsNaN(v))
+                            .OrderBy(v => v)
+                            .ToArray();
+                        if (colVals.Length < 4) continue;
+
+                        double lo, hi;
+                        if (method == "IQR")
+                        {
+                            double q1 = Percentile(colVals, 25), q3 = Percentile(colVals, 75);
+                            double iqr = q3 - q1;
+                            lo = q1 - threshold * iqr; hi = q3 + threshold * iqr;
+                        }
+                        else // Z-score
+                        {
+                            double mean = colVals.Average();
+                            double std  = Math.Sqrt(colVals.Select(v => (v - mean) * (v - mean)).Average());
+                            if (std < 1e-10) continue;
+                            lo = mean - threshold * std; hi = mean + threshold * std;
+                        }
+
+                        foreach (int i in alive)
+                        {
+                            double v = parsedRows[i].Vals[col];
+                            if (v < lo || v > hi) keep[i] = false;
+                        }
+                    }
+
+                    // 이상치 카운트 = 결측 필터 통과 후 이상치로 제거된 수
+                    stats.OutlierRows = alive.Count(i => !keep[i]);
+                }
+
+                stats.CleanedRows = keep.Count(b => b);
+
+                // ── 파일 쓰기 ─────────────────────────────────────────────
+                if (doWrite && outPath != null)
+                {
+                    var outLines = new List<string> { headerLine };
+                    for (int i = 0; i < parsedRows.Count; i++)
+                    {
+                        if (!keep[i]) continue;
+                        var (parts, vals, hadMissing) = parsedRows[i];
+                        if (hadMissing && !removeMissing)
+                        {
+                            // 채워진 값을 원래 부분에 반영
+                            var newParts = (string[])parts.Clone();
+                            for (int j = 0; j < dataColIdx.Length; j++)
+                            {
+                                int ci = dataColIdx[j];
+                                if (ci < newParts.Length)
+                                    newParts[ci] = vals[j].ToString("G", CultureInfo.InvariantCulture);
+                            }
+                            outLines.Add(string.Join(",", newParts));
+                        }
+                        else
+                        {
+                            outLines.Add(string.Join(",", parts));
+                        }
+                    }
+
+                    string dir = Path.GetDirectoryName(outPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+                    File.WriteAllLines(outPath, outLines, new UTF8Encoding(false));
+                }
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
+            return stats;
+        }
+
+        private static double Percentile(double[] sorted, double p)
+        {
+            if (sorted.Length == 0) return 0;
+            double idx = (p / 100.0) * (sorted.Length - 1);
+            int lo = (int)idx, hi = Math.Min(lo + 1, sorted.Length - 1);
+            return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
         }
 
         // =====================================================================
