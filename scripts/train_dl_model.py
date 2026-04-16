@@ -510,6 +510,218 @@ class CNN1DClassifier(nn.Module):
         return self.classifier(x) # (B, n_classes)
 
 
+# ── AE 전용 Dataset ──────────────────────────────────────────────────────────
+
+class AEWindowDataset(Dataset):
+    """AE 학습용 데이터셋 — 레이블 없이 윈도우 텐서만 반환합니다."""
+
+    def __init__(self, windows: List[Tuple[np.ndarray, int]]) -> None:
+        self.windows = [w for w, _ in windows]  # 레이블 무시
+
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return torch.from_numpy(self.windows[idx])  # (T, C) float32
+
+
+# ── AE 1D-CNN 모델 ───────────────────────────────────────────────────────────
+
+class AE1DCNN(nn.Module):
+    """1D-CNN 오토인코더.
+
+    입력/출력 포맷: (B, T, C) — channels last, C# 대시보드와 동일.
+    구조: Encoder(Conv × 3, MaxPool × 2) → interpolate(T 복원) → Decoder(Conv × 3)
+    """
+
+    def __init__(self, n_channels: int) -> None:
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
+            nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128), nn.ReLU(inplace=True),
+        )
+        self.decoder = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64), nn.ReLU(inplace=True),
+            nn.Conv1d(64, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32), nn.ReLU(inplace=True),
+            nn.Conv1d(32, n_channels, kernel_size=7, padding=3),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """순전파.
+
+        Args:
+            x: (B, T, C) — channels last
+
+        Returns:
+            recon: (B, T, C) — 복원 신호
+        """
+        T = x.size(1)
+        z = self.encoder(x.permute(0, 2, 1))         # (B, C, T) → encoder → (B, 128, T//4)
+        z_up = torch.nn.functional.interpolate(       # (B, 128, T//4) → (B, 128, T)
+            z, size=T, mode="linear", align_corners=False
+        )
+        return self.decoder(z_up).permute(0, 2, 1)   # (B, C, T) → (B, T, C)
+
+
+# ── AE 학습 루프 ──────────────────────────────────────────────────────────────
+
+def train_ae(
+    params: dict,
+    windows: List[Tuple[np.ndarray, int]],
+    n_channels: int,
+    mlflow_run=None,
+) -> Tuple["AE1DCNN", float, int, float]:
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mse, epochs, threshold)를 반환합니다.
+
+    threshold = val 세트 복원 오차의 mean + 3 * std
+    """
+    seed = int(params.get("seed", 42))
+    torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
+
+    epochs     = int(params.get("epochs", 50))
+    batch_size = int(params.get("batch_size", 32))
+    lr         = float(params.get("lr", 0.001))
+    val_split  = float(params.get("val_split", 0.2))
+    patience   = max(5, min(10, epochs // 8))
+
+    # 랜덤 분할 (레이블 불필요)
+    n = len(windows)
+    n_val = max(1, int(n * val_split))
+    idx = list(range(n)); random.shuffle(idx)
+    val_idx, train_idx = idx[:n_val], idx[n_val:]
+
+    dataset      = AEWindowDataset(windows)
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size,
+                              shuffle=True,  num_workers=0, pin_memory=False)
+    val_loader   = DataLoader(Subset(dataset, val_idx),   batch_size=batch_size,
+                              shuffle=False, num_workers=0, pin_memory=False)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model  = AE1DCNN(n_channels=n_channels).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
+    )
+    criterion = nn.MSELoss()
+
+    print(f"[train_ae] 디바이스: {device} | 학습={len(train_idx)} 검증={len(val_idx)} | patience={patience}",
+          file=sys.stderr)
+
+    best_val_mse  = float("inf")
+    best_state: dict = {}
+    no_improve    = 0
+    epochs_trained = 0
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        total_loss = 0.0; n_batches = 0
+        for x_batch in train_loader:
+            x_batch = x_batch.to(device)
+            optimizer.zero_grad()
+            recon = model(x_batch)
+            loss  = criterion(recon, x_batch)
+            loss.backward(); optimizer.step()
+            total_loss += loss.item(); n_batches += 1
+        avg_loss = total_loss / n_batches if n_batches > 0 else float("nan")
+
+        model.eval()
+        val_sum = 0.0; val_n = 0
+        with torch.no_grad():
+            for x_batch in val_loader:
+                x_batch = x_batch.to(device)
+                val_sum += criterion(model(x_batch), x_batch).item() * x_batch.size(0)
+                val_n   += x_batch.size(0)
+        val_mse = val_sum / val_n if val_n > 0 else float("nan")
+        epochs_trained = epoch
+
+        scheduler.step(val_mse)
+
+        # C# 파서용 stdout JSON
+        print(json.dumps({"epoch": epoch, "loss": round(avg_loss, 6),
+                          "val_mse": round(val_mse, 6)}), flush=True)
+
+        if val_mse < best_val_mse:
+            best_val_mse = val_mse
+            best_state   = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            no_improve   = 0
+        else:
+            no_improve += 1
+
+        if no_improve >= patience:
+            print(f"[train_ae] Early stopping at epoch {epoch} (patience={patience})",
+                  file=sys.stderr)
+            break
+
+    if best_state:
+        model.load_state_dict(best_state)
+    model.eval()
+
+    # 임계값 계산: val 세트 샘플별 MSE의 mean + 3σ
+    per_sample_errs: List[float] = []
+    with torch.no_grad():
+        for x_batch in val_loader:
+            x_batch = x_batch.to(device)
+            err = ((model(x_batch) - x_batch) ** 2).mean(dim=(1, 2))  # (B,)
+            per_sample_errs.extend(err.cpu().numpy().tolist())
+
+    if per_sample_errs:
+        err_arr   = np.array(per_sample_errs, dtype=np.float64)
+        threshold = float(err_arr.mean() + 3.0 * err_arr.std())
+    else:
+        threshold = float(best_val_mse * 2.0)
+
+    print(
+        f"[train_ae] 완료 — best_val_mse={best_val_mse:.6f}  "
+        f"threshold={threshold:.6f}  epochs={epochs_trained}",
+        file=sys.stderr,
+    )
+    return model, best_val_mse, epochs_trained, threshold
+
+
+# ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
+
+def export_onnx_ae(
+    model: "AE1DCNN",
+    output_path: str,
+    window_size: int,
+    n_channels: int,
+) -> None:
+    """AE 모델을 ONNX opset 17로 내보냅니다.
+
+    입력: "input"  shape (1, T, C)
+    출력: "recon"  shape (1, T, C)
+    """
+    import onnx
+
+    model.eval(); model.cpu()
+    dummy = torch.randn(1, window_size, n_channels, dtype=torch.float32)
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    torch.onnx.export(
+        model, dummy, output_path,
+        export_params=True,
+        opset_version=17,
+        do_constant_folding=True,
+        input_names=["input"],
+        output_names=["recon"],
+        dynamic_axes={
+            "input": {0: "batch", 1: "time"},
+            "recon": {0: "batch", 1: "time"},
+        },
+        dynamo=False,
+    )
+
+    onnx_model = onnx.load(output_path)
+    onnx.checker.check_model(onnx_model)
+    print(f"[export] AE ONNX 저장 완료: {output_path}", file=sys.stderr)
+
+
 # ── 학습 루프 ────────────────────────────────────────────────────────────────
 
 def train(
@@ -732,33 +944,50 @@ def save_meta(
     params: dict,
     class_names: List[str],
     channels: List[str],
-    val_accuracy: float,
-    epochs_trained: int,
+    val_accuracy: float = 0.0,
+    epochs_trained: int = 0,
     mlflow_run_id: Optional[str] = None,
     mlflow_tracking_uri: Optional[str] = None,
+    val_mse: Optional[float] = None,
+    threshold: Optional[float] = None,
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
+
+    session="AD" (AE) 인 경우 kind=AE-CNN1D, output_name=recon, threshold 포함.
+    session="FD" (CLS) 인 경우 kind=CNN1D, output_name=logits, val_accuracy 포함.
 
     Returns:
         저장된 _meta.json 경로
     """
-    sensor_type = params.get("sensor_type", "accel")  # "accel" or "torque"
+    session     = params.get("session", "FD").upper()
+    is_ae       = session == "AD"
+    sensor_type = params.get("sensor_type", "accel")
+
     meta = {
-        "kind": "CNN1D",
-        "session": "FD",
+        "kind":        "AE-CNN1D" if is_ae else "CNN1D",
+        "session":     session,
         "sensor_type": sensor_type,
-        "y_column": channels[0] if channels else "",
-        "channels": channels,
-        "n_channels": len(channels),
-        "class_names": class_names,
-        "n_classes": len(class_names),
+        "y_column":    channels[0] if channels else "",
+        "channels":    channels,
+        "n_channels":  len(channels),
         "window_size": int(params.get("window_size", 1024)),
-        "input_name": "input",
-        "output_name": "logits",
+        "input_name":  "input",
+        "output_name": "recon" if is_ae else "logits",
         "standardize_per_sample": True,
-        "val_accuracy": round(val_accuracy, 6),
         "epochs_trained": epochs_trained,
     }
+
+    if is_ae:
+        meta["val_mse"]   = round(val_mse or 0.0, 6)
+        meta["threshold"] = round(threshold or 0.0, 6)
+        normal_classes    = params.get("normal_classes", class_names)
+        meta["normal_classes"] = normal_classes
+    else:
+        meta["class_names"] = class_names
+        meta["n_classes"]   = len(class_names)
+        meta["recon_output_name"] = None
+        meta["val_accuracy"] = round(val_accuracy, 6)
+
     if mlflow_run_id:
         meta["mlflow_run_id"] = mlflow_run_id
     if mlflow_tracking_uri:
@@ -888,11 +1117,17 @@ def main() -> None:
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
+    session    = params.get("session", "FD").upper()
+    is_ae      = session == "AD"
     n_channels = len(channels)
-    n_classes = len(class_names)
+    n_classes  = len(class_names)
+
+    # AE 모드에서는 normal_classes 폴더만 로드
+    load_class_names = params.get("normal_classes", class_names) if is_ae else class_names
 
     print(
-        f"[main] 채널={channels}, 클래스={class_names}, "
+        f"[main] session={session} | 채널={channels} | "
+        f"{'정상클래스' if is_ae else '클래스'}={load_class_names} | "
         f"window_size={window_size}, stride={stride}",
         file=sys.stderr,
     )
@@ -905,7 +1140,7 @@ def main() -> None:
             csv_files=params["csv_files"],
             channels=channels,
             label_column=label_column,
-            class_names=class_names,
+            class_names=load_class_names,
             window_size=window_size,
             stride=stride,
         )
@@ -914,7 +1149,7 @@ def main() -> None:
             data_dir=params["data_dir"],
             channels=channels,
             label_column=label_column,
-            class_names=class_names,
+            class_names=load_class_names,
             window_size=window_size,
             stride=stride,
             sensor_type=params.get("sensor_type", ""),
@@ -932,14 +1167,72 @@ def main() -> None:
     for _, lbl in windows:
         label_counts[lbl] = label_counts.get(lbl, 0) + 1
     dist_str = ", ".join(
-        f"{class_names[i] if i < len(class_names) else i}={c}"
+        f"{load_class_names[i] if i < len(load_class_names) else i}={c}"
         for i, c in sorted(label_counts.items())
     )
-    print(f"[main] 클래스 분포: {dist_str}", file=sys.stderr)
+    print(f"[main] {'정상 데이터' if is_ae else '클래스'} 분포: {dist_str}", file=sys.stderr)
 
-    if len(label_counts) < 2:
-        print(json.dumps({"error": "학습에 필요한 클래스가 2개 미만입니다."}))
+    if not is_ae and len(label_counts) < 2:
+        print(json.dumps({"error": "분류 학습에 필요한 클래스가 2개 미만입니다."}))
         sys.exit(1)
+
+    mlflow_tracking_uri = params.get("mlflow_tracking_uri") or os.environ.get("MLFLOW_TRACKING_URI", "")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # AE (이상탐지) 경로
+    # ══════════════════════════════════════════════════════════════════════════
+    if is_ae:
+        print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
+        mlflow_run, mlflow_mod = _try_setup_mlflow(params)
+
+        ae_model, best_val_mse, epochs_trained, threshold = train_ae(
+            params=params,
+            windows=windows,
+            n_channels=n_channels,
+            mlflow_run=mlflow_run,
+        )
+
+        export_onnx_ae(
+            model=ae_model,
+            output_path=output_path,
+            window_size=window_size,
+            n_channels=n_channels,
+        )
+
+        meta_path = save_meta(
+            output_path=output_path,
+            params=params,
+            class_names=load_class_names,
+            channels=channels,
+            epochs_trained=epochs_trained,
+            mlflow_run_id=mlflow_run.info.run_id if mlflow_run else None,
+            mlflow_tracking_uri=mlflow_tracking_uri or None,
+            val_mse=best_val_mse,
+            threshold=threshold,
+        )
+
+        _try_end_mlflow(
+            mlflow_run=mlflow_run, mlflow_mod=mlflow_mod,
+            model=ae_model, output_path=output_path, meta_path=meta_path,
+            best_val_acc=0.0, epochs_trained=epochs_trained,
+        )
+
+        info_str = (
+            f"AE-CNN1D 학습 완료 | 윈도우={len(windows)} | "
+            f"val_mse={best_val_mse:.6f} | threshold={threshold:.6f} | epochs={epochs_trained}"
+        )
+        result = {
+            "info":      info_str,
+            "val_mse":   round(best_val_mse, 6),
+            "threshold": round(threshold, 6),
+            "epochs":    epochs_trained,
+        }
+        print(json.dumps(result), flush=True)
+        sys.exit(0)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CLS (분류) 경로 — 기존 로직
+    # ══════════════════════════════════════════════════════════════════════════
 
     # ── MLflow 초기화 ─────────────────────────────────────────────────────────
     mlflow_run, mlflow_mod = _try_setup_mlflow(params)
@@ -962,7 +1255,6 @@ def main() -> None:
     )
 
     # ── _meta.json 저장 ───────────────────────────────────────────────────────
-    mlflow_tracking_uri = params.get("mlflow_tracking_uri") or os.environ.get("MLFLOW_TRACKING_URI", "")
     meta_path = save_meta(
         output_path=output_path,
         params=params,

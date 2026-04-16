@@ -130,6 +130,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private ProgressBar      _dlProgress;
         private Label            _dlStatus;
         private System.Diagnostics.Process _dlProc;
+        private RadioButton      _dlRdoCls, _dlRdoAe;   // DL 모델 유형: 분류(CLS) / AE
+        private Label            _dlClassListLbl;        // "결함 클래스:" ↔ "정상 클래스:"
 
         public AIForm()
         {
@@ -1365,7 +1367,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
 
             // 클래스 관리 헤더
-            tl.Controls.Add(Lbl("결함 클래스:"), 0, row);
+            _dlClassListLbl = Lbl("결함 클래스:");
+            tl.Controls.Add(_dlClassListLbl, 0, row);
             var addRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
             _dlNewClassName = new TextBox { Width = 120, Height = 22 };
             var btnAddClass = new Button { Text = "+ 추가", Width = 60, Height = 22 };
@@ -1497,8 +1500,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 string modelsDir = System.IO.Path.Combine(
                     System.IO.Path.GetDirectoryName(_dlOutputPath.Text)
                     ?? @"C:\Data\PHM_Logs\models");
-                string sigTag = useAccel ? "accel" : "torque";
-                _dlOutputPath.Text = System.IO.Path.Combine(modelsDir, $"cnn1d_axis{axisNum}_{sigTag}.onnx");
+                string sigTag   = useAccel ? "accel" : "torque";
+                bool   scanIsAe = _dlRdoAe?.Checked == true;
+                string scanPfx  = scanIsAe ? "ae_cnn1d" : "cnn1d";
+                _dlOutputPath.Text = System.IO.Path.Combine(modelsDir, $"{scanPfx}_axis{axisNum}_{sigTag}.onnx");
             }
 
             string sigTypeText = useAccel ? "가속도계(Accel)" : "토크(Torque)";
@@ -1516,12 +1521,22 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private GroupBox BuildDlRightPanel()
         {
             var grp = new GroupBox { Text = "모델 설정 / 출력", Dock = DockStyle.Fill, Padding = new Padding(8) };
-            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 9 };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 10 };
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 9; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            for (int i = 0; i < 10; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
             int row = 0;
+
+            // 모델 유형: 분류(CLS) / AE(이상탐지)
+            tl.Controls.Add(Lbl("모델 유형:"), 0, row);
+            var modeFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+            _dlRdoCls = new RadioButton { Text = "분류(CLS)", Checked = true, AutoSize = true };
+            _dlRdoAe  = new RadioButton { Text = "AE(이상탐지)", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+            _dlRdoCls.CheckedChanged += (s, e) => { if (_dlRdoCls.Checked) UpdateDlModeUi(); };
+            _dlRdoAe.CheckedChanged  += (s, e) => { if (_dlRdoAe.Checked)  UpdateDlModeUi(); };
+            modeFlow.Controls.AddRange(new Control[] { _dlRdoCls, _dlRdoAe });
+            tl.Controls.Add(modeFlow, 1, row++);
 
             // 윈도우 크기
             tl.Controls.Add(Lbl("윈도우(샘플):"), 0, row);
@@ -1571,6 +1586,27 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             return grp;
         }
 
+        /// <summary>모델 유형(CLS/AE) 전환 시 관련 UI를 동기화합니다.</summary>
+        private void UpdateDlModeUi()
+        {
+            bool isAe = _dlRdoAe?.Checked == true;
+
+            // 클래스 목록 레이블 전환
+            if (_dlClassListLbl != null)
+                _dlClassListLbl.Text = isAe ? "정상 클래스:" : "결함 클래스:";
+
+            // 출력 경로 파일명 접두사 ae_ 추가/제거
+            if (_dlOutputPath != null)
+            {
+                string dir = System.IO.Path.GetDirectoryName(_dlOutputPath.Text) ?? "";
+                string fn  = System.IO.Path.GetFileNameWithoutExtension(_dlOutputPath.Text);
+                if (isAe && !fn.StartsWith("ae_", StringComparison.OrdinalIgnoreCase))
+                    _dlOutputPath.Text = System.IO.Path.Combine(dir, "ae_" + fn + ".onnx");
+                else if (!isAe && fn.StartsWith("ae_", StringComparison.OrdinalIgnoreCase))
+                    _dlOutputPath.Text = System.IO.Path.Combine(dir, fn.Substring(3) + ".onnx");
+            }
+        }
+
         private static Label Lbl(string text) =>
             new Label { Text = text, AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
 
@@ -1588,13 +1624,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             else { if (_dlChX.Checked) channels.Add("x"); if (_dlChY.Checked) channels.Add("y"); if (_dlChZ.Checked) channels.Add("z"); }
             if (channels.Count == 0) return null;
 
+            bool isAe = _dlRdoAe?.Checked == true;
             var classNames = _dlClassList.Items.Cast<string>().ToList();
-            if (classNames.Count < 2) return null;
+            // CLS: 클래스 2개 이상, AE: 정상 클래스 1개 이상
+            if (!isAe && classNames.Count < 2) return null;
+            if (isAe  && classNames.Count < 1) return null;
 
             if (!double.TryParse(_dlLr.Text.Trim(), System.Globalization.NumberStyles.Float,
                 CultureInfo.InvariantCulture, out double lr) || lr <= 0) return null;
 
-            return new Dictionary<string, object>
+            var p = new Dictionary<string, object>
             {
                 ["data_dir"]            = dataDir,
                 ["output"]              = outputPath,
@@ -1611,7 +1650,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ["seed"]                = 42,
                 ["mlflow_tracking_uri"] = Services.ServerSettings.Current.MlflowUrl ?? "",
                 ["mlflow_experiment"]   = "PHM-DL",
+                ["session"]             = isAe ? "AD" : "FD",
             };
+            // AE: 어떤 폴더를 "정상"으로 볼지 명시
+            if (isAe) p["normal_classes"] = classNames.ToArray();
+            return p;
         }
 
         /// <summary>데이터 폴더에서 Axis* 하위 폴더를 스캔해 일괄 학습합니다.</summary>
@@ -1677,7 +1720,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 string axisName = System.IO.Path.GetFileName(axisDir);
                 var axisMatch = System.Text.RegularExpressions.Regex.Match(axisName, @"[Aa]xis(\d+)");
                 int axisNum = axisMatch.Success ? int.Parse(axisMatch.Groups[1].Value) : done;
-                string outputPath = System.IO.Path.Combine(modelsDir, $"cnn1d_axis{axisNum}_{sigTag}.onnx");
+                bool   batchIsAe = _dlRdoAe?.Checked == true;
+                string batchPfx  = batchIsAe ? "ae_cnn1d" : "cnn1d";
+                string outputPath = System.IO.Path.Combine(modelsDir, $"{batchPfx}_axis{axisNum}_{sigTag}.onnx");
                 try { System.IO.Directory.CreateDirectory(modelsDir); } catch { }
 
                 var paramsObj = BuildDlParams(axisDir, outputPath);
@@ -1745,9 +1790,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                                     onProgress?.Invoke(pct);
                                     if (doc.RootElement.TryGetProperty("val_acc", out var va))
                                         _dlStatus.Text = $"에포크 {ep.GetInt32()}/{totalEpochs}  val_acc={va.GetDouble():F3}";
+                                    else if (doc.RootElement.TryGetProperty("val_mse", out var vm))
+                                        _dlStatus.Text = $"에포크 {ep.GetInt32()}/{totalEpochs}  val_mse={vm.GetDouble():F5}";
                                 }
                                 if (doc.RootElement.TryGetProperty("accuracy", out var acc))
                                     _dlStatus.Text = $"완료  최종={acc.GetDouble():F3}";
+                                else if (doc.RootElement.TryGetProperty("threshold", out var thr))
+                                    _dlStatus.Text = $"완료  임계값={thr.GetDouble():F4}";
                             }
                         }
                         catch { }
@@ -1780,7 +1829,14 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // ── params 빌드 ─────────────────────────────────────────────────
             var paramsObj = BuildDlParams(dataDir, outputPath);
             if (paramsObj == null)
-            { MessageBox.Show("입력 채널(1개 이상), 결함 클래스(2개 이상), 학습률을 확인하세요.", "설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+            {
+                bool trainIsAe = _dlRdoAe?.Checked == true;
+                MessageBox.Show(
+                    trainIsAe ? "입력 채널(1개 이상), 정상 클래스(1개 이상), 학습률을 확인하세요."
+                              : "입력 채널(1개 이상), 결함 클래스(2개 이상), 학습률을 확인하세요.",
+                    "설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
 
             // ── Python 및 스크립트 확인 ──────────────────────────────────────
             string scriptsDir = System.IO.Path.Combine(
@@ -1837,7 +1893,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             {
                 _dlStatus.Text = "완료 ✓";
                 AppendDlLog($"\n모델 저장: {outputPath}", Color.Cyan);
-                MessageBox.Show($"DL 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX 분류 모델로 로드하세요.",
+                bool doneIsAe = _dlRdoAe?.Checked == true;
+                MessageBox.Show(
+                    doneIsAe
+                        ? $"AE 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX AE 모델로 로드하세요."
+                        : $"DL 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX 분류 모델로 로드하세요.",
                     "학습 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
