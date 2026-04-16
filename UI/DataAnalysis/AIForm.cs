@@ -1765,7 +1765,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 {
                     UseShellExecute = false, RedirectStandardOutput = true,
                     RedirectStandardError = true, CreateNoWindow = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                    StandardErrorEncoding  = System.Text.Encoding.UTF8,
                 };
+                // Python I/O 인코딩 강제 — MLflow 등 라이브러리가 이모지/한글을 stderr로 출력할 때
+                // 시스템 기본 인코딩(cp949)과 충돌하는 문제 방지
+                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+                psi.EnvironmentVariables["PYTHONUTF8"]       = "1";
                 _dlProc = System.Diagnostics.Process.Start(psi);
                 _dlProc.ErrorDataReceived += (s2, ea) =>
                 {

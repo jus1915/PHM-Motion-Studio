@@ -1117,25 +1117,42 @@ def _try_end_mlflow(
             print(f"[mlflow] 아티팩트 업로드 실패 (건너뜀): {os.path.basename(path)} — {e}", file=sys.stderr)
 
     # PyTorch 모델 로깅 — 구버전 MLflow 서버(2.x < 2.13) 에서 /logged-models API 없을 수 있음
+    # 404 또는 인코딩 오류가 발생해도 run 종료에 영향을 주지 않도록 완전히 격리
     try:
         import importlib
         if importlib.util.find_spec("mlflow.pytorch") is not None:
-            # artifact_path 대신 name 사용 (MLflow 2.13+), 구버전에서는 artifact_path fallback
             try:
                 mlflow_mod.pytorch.log_model(model, name="pytorch_model")
             except TypeError:
-                mlflow_mod.pytorch.log_model(model, artifact_path="pytorch_model")
+                try:
+                    mlflow_mod.pytorch.log_model(model, artifact_path="pytorch_model")
+                except Exception:
+                    pass  # 구버전 서버에서 완전히 무시
     except Exception as e:
-        print(f"[mlflow] pytorch 모델 로깅 실패 (건너뜀): {e}", file=sys.stderr)
+        # 이모지/비ASCII 포함 오류 메시지가 cp949 stdout에 쓰이는 문제 방지 — ASCII safe 출력
+        try:
+            msg = e.args[0] if e.args else ""
+            safe_msg = msg.encode("ascii", errors="replace").decode("ascii")
+            print(f"[mlflow] pytorch 모델 로깅 실패 (건너뜀): {safe_msg}", file=sys.stderr)
+        except Exception:
+            print("[mlflow] pytorch 모델 로깅 실패 (건너뜀)", file=sys.stderr)
 
+    # run 종료는 반드시 시도 — 위 오류와 완전히 분리
+    run_id = None
+    try:
+        run_id = mlflow_run.info.run_id
+    except Exception:
+        pass
     try:
         mlflow_mod.end_run()
-        run_id = mlflow_run.info.run_id
         print(f"[mlflow] run 종료: {run_id}", file=sys.stderr)
-        return run_id
     except Exception as e:
-        print(f"[mlflow] run 종료 실패: {e}", file=sys.stderr)
-        return None
+        try:
+            safe_msg = str(e).encode("ascii", errors="replace").decode("ascii")
+            print(f"[mlflow] run 종료 실패 (건너뜀): {safe_msg}", file=sys.stderr)
+        except Exception:
+            print("[mlflow] run 종료 실패 (건너뜀)", file=sys.stderr)
+    return run_id
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
