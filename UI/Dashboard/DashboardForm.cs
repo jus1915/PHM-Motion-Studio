@@ -86,8 +86,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public bool IsAutoencoder;          // AE 여부
             public string ReconOutputName = "recon"; // (T,C) 또는 (1,T,C)
             public double Threshold = 1.0;      // AE 스코어 임계값 (없으면 DashboardForm.DefaultThreshold)
-            public double[] GlobalMean;         // AE 전역 정규화 — 채널별 mean (null이면 per-sample z-score)
-            public double[] GlobalStd;          // AE 전역 정규화 — 채널별 std
+            public double   RmsMean    = -1;    // AE 정상 데이터 RMS 평균 (-1=없음)
+            public double   RmsThr     = -1;    // AE RMS 임계값 (mean+2σ)
             public int      WindowSize = 256;   // AE 학습 윈도우 크기 — 추론 시 슬라이딩 윈도우에 사용
             public InferenceSession Session;
         }
@@ -1425,8 +1425,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public string[] ClassNames;
             public bool     IsAe;
             public double   Threshold   = -1;   // -1 = 없음(기본값 사용)
-            public double[] GlobalMean;          // AE 전역 정규화 통계
-            public double[] GlobalStd;
+            public double   RmsMean     = -1;   // AE 정상 RMS 평균
+            public double   RmsThr      = -1;   // AE RMS 임계값
             public int      WindowSize  = 256;   // 학습 시 슬라이딩 윈도우 크기
         }
 
@@ -1470,19 +1470,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         double tv;
                         if (tp.TryGetDouble(out tv)) m.Threshold = tv;
                     }
-                    if (root.TryGetProperty("global_mean", out var gmp) &&
-                        gmp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    if (root.TryGetProperty("rms_mean", out var rmp))
                     {
-                        var arr = new System.Collections.Generic.List<double>();
-                        foreach (var v in gmp.EnumerateArray()) arr.Add(v.GetDouble());
-                        m.GlobalMean = arr.ToArray();
+                        double rv; if (rmp.TryGetDouble(out rv)) m.RmsMean = rv;
                     }
-                    if (root.TryGetProperty("global_std", out var gsp) &&
-                        gsp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    if (root.TryGetProperty("rms_thr", out var rtp))
                     {
-                        var arr = new System.Collections.Generic.List<double>();
-                        foreach (var v in gsp.EnumerateArray()) arr.Add(v.GetDouble());
-                        m.GlobalStd = arr.ToArray();
+                        double rv; if (rtp.TryGetDouble(out rv)) m.RmsThr = rv;
                     }
                     if (root.TryGetProperty("window_size", out var wp))
                     {
@@ -1662,10 +1656,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     OutputName          = isAe ? null    : "logits",
                     ReconOutputName     = isAe ? "recon" : null,
                     IsAutoencoder       = isAe,
-                    // AE: 전역 정규화 통계가 있으면 per-sample z-score 비활성화
-                    StandardizePerSample = isAe ? (meta?.GlobalMean == null) : true,
-                    GlobalMean          = isAe ? meta?.GlobalMean : null,
-                    GlobalStd           = isAe ? meta?.GlobalStd  : null,
+                    StandardizePerSample = true,   // AE도 per-sample z-score 사용 (형태 학습)
+                    RmsMean             = (isAe && meta != null) ? meta.RmsMean : -1,
+                    RmsThr              = (isAe && meta != null) ? meta.RmsThr  : -1,
                     WindowSize          = (isAe && meta != null && meta.WindowSize > 0) ? meta.WindowSize : 256,
                     Threshold           = threshold,
                     Session             = session,
@@ -1881,23 +1874,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int T = seq.GetLength(0), C = seq.GetLength(1);
             if (C != om.C) { info = "channel mismatch"; return false; }
 
-            // 정규화: GlobalMean/Std가 있으면 전역 정규화, 없으면 per-sample z-score
-            bool useGlobal = om.GlobalMean != null && om.GlobalStd != null;
-            if (useGlobal)
-                GlobalNormalizeInPlace(seq, om.GlobalMean, om.GlobalStd);
-            else if (om.StandardizePerSample)
-                ZScoreInPlace(seq);
-
-            // 2) 슬라이딩 윈도우 추론 — 학습과 동일한 window_size로 분할하여 최대 MAE 사용
-            //    CSV 전체를 한 번에 넣으면 AE 병목이 없어져 모든 신호를 완벽 재구성(낮은 MAE) → 감지 불가
+            // 2) 슬라이딩 윈도우 추론
+            //    학습과 동일한 window_size로 분할 → 각 윈도우별 (z-score 후) MAE 계산 → 최대값 사용
             int W      = om.WindowSize > 0 ? om.WindowSize : 256;
             int stride = Math.Max(1, W / 2);  // 50% 오버랩
 
+            // RMS 계산은 z-score 전 원본 값으로 (진폭 보존)
+            double windowRmsMax = 0.0;
+
             if (T < W)
             {
-                // 시퀀스가 윈도우보다 짧으면 단일 추론
-                score = AeInferWindow(om, seq, 0, T);
-                info  = string.Format("AE({0}) single T={1}", Path.GetFileNameWithoutExtension(om.ModelPath), T);
+                double rawRms = ComputeRms(seq, 0, T);
+                if (om.StandardizePerSample) ZScoreInPlace(seq);
+                double mae = AeInferWindow(om, seq, 0, T);
+                score = CompositeAeScore(mae, rawRms, om);
+                info  = string.Format("AE W={0} single", T);
                 return score >= 0;
             }
 
@@ -1905,7 +1896,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int    wCount = 0;
             for (int start = 0; start <= T - W; start += stride)
             {
-                double mae = AeInferWindow(om, seq, start, W);
+                // raw RMS (정규화 전)
+                double rawRms = ComputeRms(seq, start, W);
+                if (rawRms > windowRmsMax) windowRmsMax = rawRms;
+
+                // z-score 슬라이스 복사 후 추론
+                double mae = AeInferWindowZScore(om, seq, start, W);
                 if (mae < 0) continue;
                 if (mae > maxMae) maxMae = mae;
                 wCount++;
@@ -1913,14 +1909,55 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             if (wCount == 0) { info = "no valid window"; return false; }
 
-            score = maxMae;
-            info  = string.Format("AE({0}) W={1} n={2} {3}",
-                Path.GetFileNameWithoutExtension(om.ModelPath), W, wCount,
-                useGlobal ? "global-norm" : "zscore");
+            score = CompositeAeScore(maxMae, windowRmsMax, om);
+            info  = string.Format("AE W={0} n={1} mae={2:F4} rms={3:F4}",
+                W, wCount, maxMae, windowRmsMax);
             return true;
         }
 
-        /// <summary>seq の [start, start+length) スライスを AE に通して MAE を返します。失敗時は -1。</summary>
+        /// <summary>RAW 슬라이스의 전채널 RMS를 계산합니다.</summary>
+        private static double ComputeRms(float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            double sum = 0.0; long n = 0;
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                {
+                    double v = seq[start + t, c];
+                    sum += v * v; n++;
+                }
+            return n > 0 ? Math.Sqrt(sum / n) : 0.0;
+        }
+
+        /// <summary>복합 스코어 = max(mae_ratio, rms_ratio) — 각 비율이 1을 넘으면 이상.</summary>
+        private static double CompositeAeScore(double mae, double rms, OnnxAxisModel om)
+        {
+            if (mae < 0) return -1;
+            double maeRatio = om.Threshold > 0 ? mae / om.Threshold : mae;
+            double rmsRatio = (om.RmsThr > 0 && rms > 0)
+                ? Math.Max(0.0, (rms - om.RmsMean) / (om.RmsThr - om.RmsMean + 1e-9))
+                : 0.0;
+            // 최종 스코어: mae 직접 반환, rms 이상은 mae를 스케일업하여 표현
+            // score = mae * (1 + rms_excess) — threshold와 같은 단위 유지
+            double rmsExcess = Math.Max(0.0, rmsRatio - 1.0);
+            return mae * (1.0 + rmsExcess * 2.0);
+        }
+
+        /// <summary>슬라이스를 z-score 후 AE에 통과해 MAE를 반환합니다. 실패 시 -1.</summary>
+        private double AeInferWindowZScore(OnnxAxisModel om, float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            // 슬라이스 복사 + z-score
+            float[,] win = new float[length, C];
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    win[t, c] = seq[start + t, c];
+            ZScoreInPlace(win);
+
+            return AeInferWindow(om, win, 0, length);
+        }
+
+        /// <summary>이미 정규화된 seq의 [start, start+length) 슬라이스를 AE에 통과해 MAE를 반환합니다. 실패 시 -1.</summary>
         private double AeInferWindow(OnnxAxisModel om, float[,] seq, int start, int length)
         {
             int C = seq.GetLength(1);
@@ -1931,30 +1968,34 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             var inputs = new List<NamedOnnxValue>
                 { NamedOnnxValue.CreateFromTensor(om.InputName, tensor) };
-
             try
             {
                 using (var results = om.Session.Run(inputs))
                 {
-                    var outNv    = results.FirstOrDefault(v => v.Name == om.ReconOutputName) ?? results.First();
+                    var outNv     = results.FirstOrDefault(v => v.Name == om.ReconOutputName) ?? results.First();
                     var reconFlat = outNv.AsEnumerable<float>().ToArray();
+                    if (reconFlat.Length < length * C) return -1;
 
-                    int targetLen = length * C;
-                    if (reconFlat.Length < targetLen) return -1;
-
-                    float[,] orig  = new float[length, C];
                     float[,] recon = new float[length, C];
                     int idx = 0;
                     for (int t = 0; t < length; t++)
                         for (int c = 0; c < C; c++)
-                        {
-                            orig[t, c]  = seq[start + t, c];
                             recon[t, c] = reconFlat[idx++];
-                        }
-                    return MeanAbsoluteError(orig, recon);
+                    return MeanAbsoluteError(seq.GetLength(0) == length ? seq
+                        : ExtractSlice(seq, start, length), recon);
                 }
             }
             catch { return -1; }
+        }
+
+        private static float[,] ExtractSlice(float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            var s = new float[length, C];
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    s[t, c] = seq[start + t, c];
+            return s;
         }
 
         private static float[] Softmax(IReadOnlyList<float> logits)

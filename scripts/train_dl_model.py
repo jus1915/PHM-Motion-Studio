@@ -609,14 +609,16 @@ def train_ae(
     windows: List[Tuple[np.ndarray, int]],
     n_channels: int,
     mlflow_run=None,
-) -> Tuple["AE1DCNN", float, int, float, np.ndarray, np.ndarray]:
-    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, threshold, g_mean, g_std)를 반환합니다.
+) -> Tuple["AE1DCNN", float, int, float, float, float]:
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr)를 반환합니다.
 
     정규화 전략:
-        - 윈도우별 per-sample z-score 를 사용하지 않음 (절대 진폭·에너지 보존).
-        - 대신 학습 데이터 전체의 채널별 전역 통계(mean/std)로 정규화.
-        - C# 런타임도 동일한 전역 통계로 정규화해야 올바른 스코어가 나옴.
-    손실/임계값: MAE (nn.L1Loss), threshold = mean + 2σ (민감도 향상)
+        - 윈도우별 per-sample z-score 로 학습 (형태·주파수 패턴 학습, 수렴 안정).
+        - 진폭(에너지) 이상은 별도 RMS 통계로 감지 → 복합 스코어 사용.
+
+    스코어 = mae_score + alpha * rms_score  (C# 에서 계산)
+        mae_score  = ae_mae  / mae_thr    (형태 이상)
+        rms_score  = max(0, (rms - rms_mean) / rms_std)  (진폭 이상)
     """
     seed = int(params.get("seed", 42))
     torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
@@ -627,13 +629,24 @@ def train_ae(
     val_split  = float(params.get("val_split", 0.2))
     patience   = max(5, min(10, epochs // 8))
 
-    # ── 전역 정규화 통계 계산 (학습 전체 기준) ──────────────────────────────
-    g_mean, g_std = _compute_global_stats(windows)
-    windows_norm  = _apply_global_norm(windows, g_mean, g_std)
+    # ── RAW 윈도우에서 RMS 통계 계산 (진폭 이상 감지용) ────────────────────
+    # windows는 normalize=False로 로드된 RAW 데이터
+    raw_rms_list: List[float] = []
+    for w, _ in windows:
+        # 전체 채널 RMS: sqrt(mean(x^2))
+        rms = float(np.sqrt(np.mean(w.astype(np.float64) ** 2)))
+        raw_rms_list.append(rms)
+    rms_arr  = np.array(raw_rms_list, dtype=np.float64)
+    rms_mean = float(rms_arr.mean())
+    rms_std  = float(rms_arr.std()) if rms_arr.std() > 1e-8 else float(rms_arr.mean() * 0.1)
+    rms_thr  = float(rms_mean + 2.0 * rms_std)
     print(
-        f"[train_ae] 전역 정규화 — mean={g_mean.round(4)}, std={g_std.round(4)}",
+        f"[train_ae] RMS 통계 — mean={rms_mean:.4f}  std={rms_std:.4f}  thr={rms_thr:.4f}",
         file=sys.stderr,
     )
+
+    # ── per-sample z-score 적용 (형태 학습) ─────────────────────────────────
+    windows_norm = [(_zscore_normalize(w), lbl) for w, lbl in windows]
 
     # 랜덤 분할 (레이블 불필요)
     n = len(windows_norm)
@@ -653,8 +666,7 @@ def train_ae(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
     )
-    # ★ MAE 손실 — C# MeanAbsoluteError와 동일한 지표
-    criterion = nn.L1Loss()
+    criterion = nn.L1Loss()  # MAE — C# MeanAbsoluteError와 동일
 
     print(f"[train_ae] 디바이스: {device} | 학습={len(train_idx)} 검증={len(val_idx)} | patience={patience}",
           file=sys.stderr)
@@ -670,8 +682,7 @@ def train_ae(
         for x_batch in train_loader:
             x_batch = x_batch.to(device)
             optimizer.zero_grad()
-            recon = model(x_batch)
-            loss  = criterion(recon, x_batch)
+            loss = criterion(model(x_batch), x_batch)
             loss.backward(); optimizer.step()
             total_loss += loss.item(); n_batches += 1
         avg_loss = total_loss / n_batches if n_batches > 0 else float("nan")
@@ -687,8 +698,6 @@ def train_ae(
         epochs_trained = epoch
 
         scheduler.step(val_mae)
-
-        # C# 파서용 stdout JSON (val_mse 키 유지로 C# UI 호환)
         print(json.dumps({"epoch": epoch, "loss": round(avg_loss, 6),
                           "val_mse": round(val_mae, 6)}), flush=True)
 
@@ -708,8 +717,7 @@ def train_ae(
         model.load_state_dict(best_state)
     model.eval()
 
-    # ★ 임계값 계산: val 세트 샘플별 MAE 의 mean + 3σ
-    # 샘플별 MAE = |recon - x|.mean(dim=(T,C))
+    # ── MAE 임계값: val 세트 샘플별 MAE의 mean + 2σ ────────────────────────
     per_sample_maes: List[float] = []
     with torch.no_grad():
         for x_batch in val_loader:
@@ -719,17 +727,16 @@ def train_ae(
 
     if per_sample_maes:
         err_arr   = np.array(per_sample_maes, dtype=np.float64)
-        # mean + 2σ (3σ보다 민감 — 정상 데이터의 95.4% 커버)
-        threshold = float(err_arr.mean() + 2.0 * err_arr.std())
+        mae_thr   = float(err_arr.mean() + 2.0 * err_arr.std())
     else:
-        threshold = float(best_val_mae * 2.0)
+        mae_thr   = float(best_val_mae * 2.0)
 
     print(
         f"[train_ae] 완료 — best_val_mae={best_val_mae:.6f}  "
-        f"threshold={threshold:.6f}  epochs={epochs_trained}",
+        f"mae_thr={mae_thr:.6f}  rms_thr={rms_thr:.4f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mae, epochs_trained, threshold, g_mean, g_std
+    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -998,8 +1005,8 @@ def save_meta(
     mlflow_tracking_uri: Optional[str] = None,
     val_mse: Optional[float] = None,
     threshold: Optional[float] = None,
-    global_mean: Optional[List[float]] = None,
-    global_std:  Optional[List[float]] = None,
+    rms_mean: Optional[float] = None,
+    rms_thr:  Optional[float] = None,
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
@@ -1029,14 +1036,14 @@ def save_meta(
 
     if is_ae:
         meta["val_mae"]   = round(val_mse or 0.0, 6)   # val_mse 인수가 실제로는 val_mae 값
-        meta["threshold"] = round(threshold or 0.0, 6)
+        meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (z-score 공간)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
-        # 전역 정규화 통계 — C# 런타임이 동일한 정규화를 적용하는 데 필요
-        if global_mean is not None:
-            meta["global_mean"] = [round(float(v), 8) for v in global_mean]
-        if global_std is not None:
-            meta["global_std"]  = [round(float(v), 8) for v in global_std]
+        # RMS 진폭 이상 감지용 통계
+        if rms_mean is not None:
+            meta["rms_mean"] = round(float(rms_mean), 6)
+        if rms_thr is not None:
+            meta["rms_thr"]  = round(float(rms_thr),  6)
     else:
         meta["class_names"] = class_names
         meta["n_classes"]   = len(class_names)
@@ -1207,7 +1214,8 @@ def main() -> None:
     # ── 데이터 로드 ───────────────────────────────────────────────────────────
     windows: List[Tuple[np.ndarray, int]] = []
 
-    # AE 학습: per-sample z-score 정규화 비활성화 (전역 통계를 train_ae 내부에서 계산)
+    # AE 학습: windows는 RAW로 전달 (train_ae 내부에서 RMS 통계 계산 후 z-score 적용)
+    # CLS 학습: per-sample z-score 정규화 적용
     normalize_windows = not is_ae
 
     if "csv_files" in params and params["csv_files"]:
@@ -1262,7 +1270,7 @@ def main() -> None:
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
-        ae_model, best_val_mse, epochs_trained, threshold, g_mean, g_std = train_ae(
+        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr = train_ae(
             params=params,
             windows=windows,
             n_channels=n_channels,
@@ -1286,8 +1294,8 @@ def main() -> None:
             mlflow_tracking_uri=mlflow_tracking_uri or None,
             val_mse=best_val_mse,
             threshold=threshold,
-            global_mean=g_mean.tolist(),
-            global_std=g_std.tolist(),
+            rms_mean=rms_mean,
+            rms_thr=rms_thr,
         )
 
         _try_end_mlflow(
