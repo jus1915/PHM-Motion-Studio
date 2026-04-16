@@ -356,10 +356,6 @@ def load_windows_from_dir(
 
         label_int = name_to_id.get(label_str.lower())
         if label_int is None:
-            print(
-                f"[data] 경고: '{label_str}' 은 class_names에 없어 건너뜁니다 — {csv_path.name}",
-                file=sys.stderr,
-            )
             skipped += 1
             continue
 
@@ -423,10 +419,6 @@ def load_windows_from_file_list(
         label_str = forced_label if forced_label else (csv_label or "")
         label_int = name_to_id.get(label_str.lower())
         if label_int is None:
-            print(
-                f"[data] 경고: '{label_str}' 은 class_names에 없어 건너뜁니다 — {Path(path).name}",
-                file=sys.stderr,
-            )
             skipped += 1
             continue
 
