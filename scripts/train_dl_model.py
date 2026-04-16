@@ -137,14 +137,17 @@ def _extract_windows(
     label_int: int,
     window_size: int,
     stride: int,
+    normalize: bool = True,
 ) -> List[Tuple[np.ndarray, int]]:
     """슬라이딩 윈도우로 (window_array, label_int) 튜플 목록을 생성합니다.
 
     Args:
-        signal: shape (N, C) float32 배열
-        label_int: 정수 레이블
+        signal:     shape (N, C) float32 배열
+        label_int:  정수 레이블
         window_size: 윈도우 샘플 수 T
-        stride: 슬라이딩 스트라이드
+        stride:     슬라이딩 스트라이드
+        normalize:  True이면 윈도우별 z-score 정규화 (CLS 용).
+                    AE는 False — 절대 진폭/에너지 정보를 보존해야 이상 탐지가 가능.
 
     Returns:
         [(window_np, label_int), ...] — 각 window_np shape (T, C)
@@ -153,9 +156,37 @@ def _extract_windows(
     n_samples = signal.shape[0]
     for start in range(0, n_samples - window_size + 1, stride):
         window = signal[start : start + window_size].copy()
-        window = _zscore_normalize(window)
+        if normalize:
+            window = _zscore_normalize(window)
         results.append((window, label_int))
     return results
+
+
+def _compute_global_stats(
+    windows: List[Tuple[np.ndarray, int]]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """윈도우 목록 전체로부터 채널별 전역 mean/std를 계산합니다.
+
+    Returns:
+        (mean, std) 각 shape (C,) float64
+    """
+    all_vals = np.concatenate([w for w, _ in windows], axis=0)  # (N*T, C)
+    mean = all_vals.mean(axis=0)
+    std  = all_vals.std(axis=0)
+    std  = np.where(std < 1e-8, 1.0, std)
+    return mean.astype(np.float64), std.astype(np.float64)
+
+
+def _apply_global_norm(
+    windows: List[Tuple[np.ndarray, int]],
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> List[Tuple[np.ndarray, int]]:
+    """채널별 전역 통계로 모든 윈도우를 정규화합니다."""
+    return [
+        (((w - mean) / std).astype(np.float32), lbl)
+        for w, lbl in windows
+    ]
 
 
 def _detect_sensor_type_from_headers(csv_path: str) -> str:
@@ -259,6 +290,7 @@ def load_windows_from_dir(
     channels: List[str],
     label_column: str,
     class_names: List[str],
+    normalize: bool = True,
     window_size: int,
     stride: int,
     sensor_type: str = "",
@@ -339,7 +371,7 @@ def load_windows_from_dir(
             skipped += 1
             continue
 
-        windows = _extract_windows(signal, label_int, window_size, stride)
+        windows = _extract_windows(signal, label_int, window_size, stride, normalize=normalize)
         all_windows.extend(windows)
 
     print(
@@ -357,6 +389,7 @@ def load_windows_from_file_list(
     class_names: List[str],
     window_size: int,
     stride: int,
+    normalize: bool = True,
 ) -> List[Tuple[np.ndarray, int]]:
     """명시적 파일 목록에서 윈도우를 추출합니다.
 
@@ -405,7 +438,7 @@ def load_windows_from_file_list(
             skipped += 1
             continue
 
-        windows = _extract_windows(signal, label_int, window_size, stride)
+        windows = _extract_windows(signal, label_int, window_size, stride, normalize=normalize)
         all_windows.extend(windows)
 
     print(
@@ -576,11 +609,14 @@ def train_ae(
     windows: List[Tuple[np.ndarray, int]],
     n_channels: int,
     mlflow_run=None,
-) -> Tuple["AE1DCNN", float, int, float]:
-    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, threshold)를 반환합니다.
+) -> Tuple["AE1DCNN", float, int, float, np.ndarray, np.ndarray]:
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, threshold, g_mean, g_std)를 반환합니다.
 
-    손실 함수: MAE (nn.L1Loss) — C# 런타임의 MeanAbsoluteError와 동일한 지표.
-    threshold  = val 세트 샘플별 MAE 의 mean + 3σ
+    정규화 전략:
+        - 윈도우별 per-sample z-score 를 사용하지 않음 (절대 진폭·에너지 보존).
+        - 대신 학습 데이터 전체의 채널별 전역 통계(mean/std)로 정규화.
+        - C# 런타임도 동일한 전역 통계로 정규화해야 올바른 스코어가 나옴.
+    손실/임계값: MAE (nn.L1Loss), threshold = mean + 2σ (민감도 향상)
     """
     seed = int(params.get("seed", 42))
     torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
@@ -591,13 +627,21 @@ def train_ae(
     val_split  = float(params.get("val_split", 0.2))
     patience   = max(5, min(10, epochs // 8))
 
+    # ── 전역 정규화 통계 계산 (학습 전체 기준) ──────────────────────────────
+    g_mean, g_std = _compute_global_stats(windows)
+    windows_norm  = _apply_global_norm(windows, g_mean, g_std)
+    print(
+        f"[train_ae] 전역 정규화 — mean={g_mean.round(4)}, std={g_std.round(4)}",
+        file=sys.stderr,
+    )
+
     # 랜덤 분할 (레이블 불필요)
-    n = len(windows)
+    n = len(windows_norm)
     n_val = max(1, int(n * val_split))
     idx = list(range(n)); random.shuffle(idx)
     val_idx, train_idx = idx[:n_val], idx[n_val:]
 
-    dataset      = AEWindowDataset(windows)
+    dataset      = AEWindowDataset(windows_norm)
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=batch_size,
                               shuffle=True,  num_workers=0, pin_memory=False)
     val_loader   = DataLoader(Subset(dataset, val_idx),   batch_size=batch_size,
@@ -675,7 +719,8 @@ def train_ae(
 
     if per_sample_maes:
         err_arr   = np.array(per_sample_maes, dtype=np.float64)
-        threshold = float(err_arr.mean() + 3.0 * err_arr.std())
+        # mean + 2σ (3σ보다 민감 — 정상 데이터의 95.4% 커버)
+        threshold = float(err_arr.mean() + 2.0 * err_arr.std())
     else:
         threshold = float(best_val_mae * 2.0)
 
@@ -684,7 +729,7 @@ def train_ae(
         f"threshold={threshold:.6f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mae, epochs_trained, threshold
+    return model, best_val_mae, epochs_trained, threshold, g_mean, g_std
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -953,6 +998,8 @@ def save_meta(
     mlflow_tracking_uri: Optional[str] = None,
     val_mse: Optional[float] = None,
     threshold: Optional[float] = None,
+    global_mean: Optional[List[float]] = None,
+    global_std:  Optional[List[float]] = None,
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
@@ -985,6 +1032,11 @@ def save_meta(
         meta["threshold"] = round(threshold or 0.0, 6)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
+        # 전역 정규화 통계 — C# 런타임이 동일한 정규화를 적용하는 데 필요
+        if global_mean is not None:
+            meta["global_mean"] = [round(float(v), 8) for v in global_mean]
+        if global_std is not None:
+            meta["global_std"]  = [round(float(v), 8) for v in global_std]
     else:
         meta["class_names"] = class_names
         meta["n_classes"]   = len(class_names)
@@ -1138,6 +1190,9 @@ def main() -> None:
     # ── 데이터 로드 ───────────────────────────────────────────────────────────
     windows: List[Tuple[np.ndarray, int]] = []
 
+    # AE 학습: per-sample z-score 정규화 비활성화 (전역 통계를 train_ae 내부에서 계산)
+    normalize_windows = not is_ae
+
     if "csv_files" in params and params["csv_files"]:
         windows = load_windows_from_file_list(
             csv_files=params["csv_files"],
@@ -1146,6 +1201,7 @@ def main() -> None:
             class_names=load_class_names,
             window_size=window_size,
             stride=stride,
+            normalize=normalize_windows,
         )
     elif "data_dir" in params and params["data_dir"]:
         windows = load_windows_from_dir(
@@ -1156,6 +1212,7 @@ def main() -> None:
             window_size=window_size,
             stride=stride,
             sensor_type=params.get("sensor_type", ""),
+            normalize=normalize_windows,
         )
     else:
         print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
@@ -1188,7 +1245,7 @@ def main() -> None:
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
-        ae_model, best_val_mse, epochs_trained, threshold = train_ae(
+        ae_model, best_val_mse, epochs_trained, threshold, g_mean, g_std = train_ae(
             params=params,
             windows=windows,
             n_channels=n_channels,
@@ -1212,6 +1269,8 @@ def main() -> None:
             mlflow_tracking_uri=mlflow_tracking_uri or None,
             val_mse=best_val_mse,
             threshold=threshold,
+            global_mean=g_mean.tolist(),
+            global_std=g_std.tolist(),
         )
 
         _try_end_mlflow(

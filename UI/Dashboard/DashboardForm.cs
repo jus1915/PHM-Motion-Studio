@@ -86,6 +86,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public bool IsAutoencoder;          // AE 여부
             public string ReconOutputName = "recon"; // (T,C) 또는 (1,T,C)
             public double Threshold = 1.0;      // AE 스코어 임계값 (없으면 DashboardForm.DefaultThreshold)
+            public double[] GlobalMean;         // AE 전역 정규화 — 채널별 mean (null이면 per-sample z-score)
+            public double[] GlobalStd;          // AE 전역 정규화 — 채널별 std
             public InferenceSession Session;
         }
 
@@ -1421,7 +1423,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public int      NChannels  = 1;
             public string[] ClassNames;
             public bool     IsAe;
-            public double   Threshold  = -1;  // -1 = 없음(기본값 사용)
+            public double   Threshold  = -1;   // -1 = 없음(기본값 사용)
+            public double[] GlobalMean;         // AE 전역 정규화 통계
+            public double[] GlobalStd;
         }
 
         private static OnnxMeta TryParseOnnxMeta(string onnxPath)
@@ -1463,6 +1467,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     {
                         double tv;
                         if (tp.TryGetDouble(out tv)) m.Threshold = tv;
+                    }
+                    if (root.TryGetProperty("global_mean", out var gmp) &&
+                        gmp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var arr = new System.Collections.Generic.List<double>();
+                        foreach (var v in gmp.EnumerateArray()) arr.Add(v.GetDouble());
+                        m.GlobalMean = arr.ToArray();
+                    }
+                    if (root.TryGetProperty("global_std", out var gsp) &&
+                        gsp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var arr = new System.Collections.Generic.List<double>();
+                        foreach (var v in gsp.EnumerateArray()) arr.Add(v.GetDouble());
+                        m.GlobalStd = arr.ToArray();
                     }
                     return m;
                 }
@@ -1637,7 +1655,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     OutputName          = isAe ? null    : "logits",
                     ReconOutputName     = isAe ? "recon" : null,
                     IsAutoencoder       = isAe,
-                    StandardizePerSample = true,
+                    // AE: 전역 정규화 통계가 있으면 per-sample z-score 비활성화
+                    StandardizePerSample = isAe ? (meta?.GlobalMean == null) : true,
+                    GlobalMean          = isAe ? meta?.GlobalMean : null,
+                    GlobalStd           = isAe ? meta?.GlobalStd  : null,
                     Threshold           = threshold,
                     Session             = session,
                 };
@@ -1763,6 +1784,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
         }
 
+        /// <summary>AE 전역 정규화: 학습 시 저장한 채널별 mean/std 로 정규화합니다.</summary>
+        private static void GlobalNormalizeInPlace(float[,] seq, double[] mean, double[] std)
+        {
+            int T = seq.GetLength(0);
+            int C = seq.GetLength(1);
+            for (int c = 0; c < C; c++)
+            {
+                double m = (mean != null && c < mean.Length) ? mean[c] : 0.0;
+                double s = (std  != null && c < std.Length  && std[c] > 1e-8) ? std[c] : 1.0;
+                for (int t = 0; t < T; t++)
+                    seq[t, c] = (float)((seq[t, c] - m) / s);
+            }
+        }
+
         private bool TryOnnxInferOnce(int axis, string csvPath, out int predClass, out float[] probs, out string info)
         {
             predClass = -1; probs = null; info = null;
@@ -1838,7 +1873,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int T = seq.GetLength(0), C = seq.GetLength(1);
             if (C != om.C) { info = "channel mismatch"; return false; }
 
-            if (om.StandardizePerSample) ZScoreInPlace(seq);
+            // 정규화: GlobalMean/Std가 있으면 전역 정규화, 없으면 per-sample z-score
+            if (om.GlobalMean != null && om.GlobalStd != null)
+                GlobalNormalizeInPlace(seq, om.GlobalMean, om.GlobalStd);
+            else if (om.StandardizePerSample)
+                ZScoreInPlace(seq);
 
             // 2) DenseTensor(1,T,C)
             var tensor = new DenseTensor<float>(new[] { 1, T, C });
