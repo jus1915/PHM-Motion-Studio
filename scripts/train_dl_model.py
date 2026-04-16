@@ -290,10 +290,10 @@ def load_windows_from_dir(
     channels: List[str],
     label_column: str,
     class_names: List[str],
-    normalize: bool = True,
     window_size: int,
     stride: int,
     sensor_type: str = "",
+    normalize: bool = True,
 ) -> List[Tuple[np.ndarray, int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
