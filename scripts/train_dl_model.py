@@ -577,9 +577,10 @@ def train_ae(
     n_channels: int,
     mlflow_run=None,
 ) -> Tuple["AE1DCNN", float, int, float]:
-    """AE-CNN1D 모델을 학습하고 (model, best_val_mse, epochs, threshold)를 반환합니다.
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, threshold)를 반환합니다.
 
-    threshold = val 세트 복원 오차의 mean + 3 * std
+    손실 함수: MAE (nn.L1Loss) — C# 런타임의 MeanAbsoluteError와 동일한 지표.
+    threshold  = val 세트 샘플별 MAE 의 mean + 3σ
     """
     seed = int(params.get("seed", 42))
     torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
@@ -608,12 +609,13 @@ def train_ae(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
     )
-    criterion = nn.MSELoss()
+    # ★ MAE 손실 — C# MeanAbsoluteError와 동일한 지표
+    criterion = nn.L1Loss()
 
     print(f"[train_ae] 디바이스: {device} | 학습={len(train_idx)} 검증={len(val_idx)} | patience={patience}",
           file=sys.stderr)
 
-    best_val_mse  = float("inf")
+    best_val_mae  = float("inf")
     best_state: dict = {}
     no_improve    = 0
     epochs_trained = 0
@@ -637,17 +639,17 @@ def train_ae(
                 x_batch = x_batch.to(device)
                 val_sum += criterion(model(x_batch), x_batch).item() * x_batch.size(0)
                 val_n   += x_batch.size(0)
-        val_mse = val_sum / val_n if val_n > 0 else float("nan")
+        val_mae = val_sum / val_n if val_n > 0 else float("nan")
         epochs_trained = epoch
 
-        scheduler.step(val_mse)
+        scheduler.step(val_mae)
 
-        # C# 파서용 stdout JSON
+        # C# 파서용 stdout JSON (val_mse 키 유지로 C# UI 호환)
         print(json.dumps({"epoch": epoch, "loss": round(avg_loss, 6),
-                          "val_mse": round(val_mse, 6)}), flush=True)
+                          "val_mse": round(val_mae, 6)}), flush=True)
 
-        if val_mse < best_val_mse:
-            best_val_mse = val_mse
+        if val_mae < best_val_mae:
+            best_val_mae = val_mae
             best_state   = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             no_improve   = 0
         else:
@@ -662,26 +664,27 @@ def train_ae(
         model.load_state_dict(best_state)
     model.eval()
 
-    # 임계값 계산: val 세트 샘플별 MSE의 mean + 3σ
-    per_sample_errs: List[float] = []
+    # ★ 임계값 계산: val 세트 샘플별 MAE 의 mean + 3σ
+    # 샘플별 MAE = |recon - x|.mean(dim=(T,C))
+    per_sample_maes: List[float] = []
     with torch.no_grad():
         for x_batch in val_loader:
             x_batch = x_batch.to(device)
-            err = ((model(x_batch) - x_batch) ** 2).mean(dim=(1, 2))  # (B,)
-            per_sample_errs.extend(err.cpu().numpy().tolist())
+            mae_per = (model(x_batch) - x_batch).abs().mean(dim=(1, 2))  # (B,)
+            per_sample_maes.extend(mae_per.cpu().numpy().tolist())
 
-    if per_sample_errs:
-        err_arr   = np.array(per_sample_errs, dtype=np.float64)
+    if per_sample_maes:
+        err_arr   = np.array(per_sample_maes, dtype=np.float64)
         threshold = float(err_arr.mean() + 3.0 * err_arr.std())
     else:
-        threshold = float(best_val_mse * 2.0)
+        threshold = float(best_val_mae * 2.0)
 
     print(
-        f"[train_ae] 완료 — best_val_mse={best_val_mse:.6f}  "
+        f"[train_ae] 완료 — best_val_mae={best_val_mae:.6f}  "
         f"threshold={threshold:.6f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mse, epochs_trained, threshold
+    return model, best_val_mae, epochs_trained, threshold
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -978,7 +981,7 @@ def save_meta(
     }
 
     if is_ae:
-        meta["val_mse"]   = round(val_mse or 0.0, 6)
+        meta["val_mae"]   = round(val_mse or 0.0, 6)   # val_mse 인수가 실제로는 val_mae 값
         meta["threshold"] = round(threshold or 0.0, 6)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
