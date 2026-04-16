@@ -88,6 +88,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public double Threshold = 1.0;      // AE 스코어 임계값 (없으면 DashboardForm.DefaultThreshold)
             public double[] GlobalMean;         // AE 전역 정규화 — 채널별 mean (null이면 per-sample z-score)
             public double[] GlobalStd;          // AE 전역 정규화 — 채널별 std
+            public int      WindowSize = 256;   // AE 학습 윈도우 크기 — 추론 시 슬라이딩 윈도우에 사용
             public InferenceSession Session;
         }
 
@@ -1420,12 +1421,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public string   Kind;
             public string   YColumn;
             public string[] Channels;
-            public int      NChannels  = 1;
+            public int      NChannels   = 1;
             public string[] ClassNames;
             public bool     IsAe;
-            public double   Threshold  = -1;   // -1 = 없음(기본값 사용)
-            public double[] GlobalMean;         // AE 전역 정규화 통계
+            public double   Threshold   = -1;   // -1 = 없음(기본값 사용)
+            public double[] GlobalMean;          // AE 전역 정규화 통계
             public double[] GlobalStd;
+            public int      WindowSize  = 256;   // 학습 시 슬라이딩 윈도우 크기
         }
 
         private static OnnxMeta TryParseOnnxMeta(string onnxPath)
@@ -1481,6 +1483,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         var arr = new System.Collections.Generic.List<double>();
                         foreach (var v in gsp.EnumerateArray()) arr.Add(v.GetDouble());
                         m.GlobalStd = arr.ToArray();
+                    }
+                    if (root.TryGetProperty("window_size", out var wp))
+                    {
+                        int wv;
+                        if (wp.TryGetInt32(out wv) && wv > 0) m.WindowSize = wv;
                     }
                     return m;
                 }
@@ -1659,6 +1666,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     StandardizePerSample = isAe ? (meta?.GlobalMean == null) : true,
                     GlobalMean          = isAe ? meta?.GlobalMean : null,
                     GlobalStd           = isAe ? meta?.GlobalStd  : null,
+                    WindowSize          = (isAe && meta != null && meta.WindowSize > 0) ? meta.WindowSize : 256,
                     Threshold           = threshold,
                     Session             = session,
                 };
@@ -1874,46 +1882,79 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (C != om.C) { info = "channel mismatch"; return false; }
 
             // 정규화: GlobalMean/Std가 있으면 전역 정규화, 없으면 per-sample z-score
-            if (om.GlobalMean != null && om.GlobalStd != null)
+            bool useGlobal = om.GlobalMean != null && om.GlobalStd != null;
+            if (useGlobal)
                 GlobalNormalizeInPlace(seq, om.GlobalMean, om.GlobalStd);
             else if (om.StandardizePerSample)
                 ZScoreInPlace(seq);
 
-            // 2) DenseTensor(1,T,C)
-            var tensor = new DenseTensor<float>(new[] { 1, T, C });
-            for (int t = 0; t < T; t++)
-                for (int c = 0; c < C; c++)
-                    tensor[0, t, c] = seq[t, c];
+            // 2) 슬라이딩 윈도우 추론 — 학습과 동일한 window_size로 분할하여 최대 MAE 사용
+            //    CSV 전체를 한 번에 넣으면 AE 병목이 없어져 모든 신호를 완벽 재구성(낮은 MAE) → 감지 불가
+            int W      = om.WindowSize > 0 ? om.WindowSize : 256;
+            int stride = Math.Max(1, W / 2);  // 50% 오버랩
 
-            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(om.InputName, tensor) };
-
-            using (var results = om.Session.Run(inputs))
+            if (T < W)
             {
-                // 재구성 출력 텐서에서 값만 1D로 추출
-                var outNv = results.FirstOrDefault(v => v.Name == om.ReconOutputName) ?? results.First();
-                var reconVals = outNv.AsEnumerable<float>().ToArray(); // 플랫 벡터
-
-                // ★ 최소 수정: 길이를 T*C로 보정 (trim/pad)
-                int targetLen = T * C;
-                if (reconVals.Length != targetLen)
-                {
-                    var fixedVals = new float[targetLen];        // 부족분은 0으로 패딩
-                    int copy = Math.Min(reconVals.Length, targetLen);
-                    Array.Copy(reconVals, 0, fixedVals, 0, copy); // 길면 잘라냄, 짧으면 뒤를 0으로 둠
-                    reconVals = fixedVals;
-                }
-
-                // 플랫 → (T, C) 재구성 (오른쪽 패딩 기준)
-                float[,] recon = new float[T, C];
-                int idx = 0;
-                for (int t = 0; t < T; t++)
-                    for (int c = 0; c < C; c++)
-                        recon[t, c] = reconVals[idx++];
-
-                score = MeanAbsoluteError(seq, recon);
-                info = string.Format("AE({0})", Path.GetFileNameWithoutExtension(om.ModelPath));
-                return true;
+                // 시퀀스가 윈도우보다 짧으면 단일 추론
+                score = AeInferWindow(om, seq, 0, T);
+                info  = string.Format("AE({0}) single T={1}", Path.GetFileNameWithoutExtension(om.ModelPath), T);
+                return score >= 0;
             }
+
+            double maxMae = 0.0;
+            int    wCount = 0;
+            for (int start = 0; start <= T - W; start += stride)
+            {
+                double mae = AeInferWindow(om, seq, start, W);
+                if (mae < 0) continue;
+                if (mae > maxMae) maxMae = mae;
+                wCount++;
+            }
+
+            if (wCount == 0) { info = "no valid window"; return false; }
+
+            score = maxMae;
+            info  = string.Format("AE({0}) W={1} n={2} {3}",
+                Path.GetFileNameWithoutExtension(om.ModelPath), W, wCount,
+                useGlobal ? "global-norm" : "zscore");
+            return true;
+        }
+
+        /// <summary>seq の [start, start+length) スライスを AE に通して MAE を返します。失敗時は -1。</summary>
+        private double AeInferWindow(OnnxAxisModel om, float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            var tensor = new DenseTensor<float>(new[] { 1, length, C });
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    tensor[0, t, c] = seq[start + t, c];
+
+            var inputs = new List<NamedOnnxValue>
+                { NamedOnnxValue.CreateFromTensor(om.InputName, tensor) };
+
+            try
+            {
+                using (var results = om.Session.Run(inputs))
+                {
+                    var outNv    = results.FirstOrDefault(v => v.Name == om.ReconOutputName) ?? results.First();
+                    var reconFlat = outNv.AsEnumerable<float>().ToArray();
+
+                    int targetLen = length * C;
+                    if (reconFlat.Length < targetLen) return -1;
+
+                    float[,] orig  = new float[length, C];
+                    float[,] recon = new float[length, C];
+                    int idx = 0;
+                    for (int t = 0; t < length; t++)
+                        for (int c = 0; c < C; c++)
+                        {
+                            orig[t, c]  = seq[start + t, c];
+                            recon[t, c] = reconFlat[idx++];
+                        }
+                    return MeanAbsoluteError(orig, recon);
+                }
+            }
+            catch { return -1; }
         }
 
         private static float[] Softmax(IReadOnlyList<float> logits)
