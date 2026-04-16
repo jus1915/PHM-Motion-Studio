@@ -1421,6 +1421,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public int      NChannels  = 1;
             public string[] ClassNames;
             public bool     IsAe;
+            public double   Threshold  = -1;  // -1 = 없음(기본값 사용)
         }
 
         private static OnnxMeta TryParseOnnxMeta(string onnxPath)
@@ -1458,6 +1459,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     m.IsAe = session.ToUpper() == "AD"
                           || (m.Kind?.ToUpper().Contains("AD") ?? false)
                           || (m.ClassNames == null || m.ClassNames.Length == 0);
+                    if (root.TryGetProperty("threshold", out var tp))
+                    {
+                        double tv;
+                        if (tp.TryGetDouble(out tv)) m.Threshold = tv;
+                    }
                     return m;
                 }
             }
@@ -1499,9 +1505,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bool inferAe = meta != null ? meta.IsAe
                 : Path.GetFileNameWithoutExtension(onnxPath).IndexOf("ae", StringComparison.OrdinalIgnoreCase) >= 0;
 
-            // 5) Y 컬럼 추론
+            // 5) Y 컬럼 추론 — 다채널이면 channels 전체, 단채널이면 y_column
             string inferYCol;
-            if (meta?.YColumn != null)
+            if (meta?.Channels != null && meta.Channels.Length > 1)
+                inferYCol = string.Join(", ", meta.Channels);
+            else if (meta?.YColumn != null)
                 inferYCol = meta.YColumn;
             else if (Path.GetFileNameWithoutExtension(onnxPath).IndexOf("torque", StringComparison.OrdinalIgnoreCase) >= 0)
                 inferYCol = "Trq(%)";
@@ -1568,10 +1576,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // AE 임계값 (AE 모드에서만 표시, 유일한 편집 가능 필드)
             if (inferAe)
             {
+                double initThr = (meta != null && meta.Threshold > 0) ? meta.Threshold : DefaultThreshold;
                 lblThrLabel = Lbl("임계값(AE):");
                 tl.Controls.Add(lblThrLabel, 0, r);
-                numThr = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 1000,
-                    DecimalPlaces = 4, Value = (decimal)DefaultThreshold, Increment = 0.01m };
+                numThr = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100000,
+                    DecimalPlaces = 6, Value = (decimal)initThr, Increment = 0.001m };
                 tl.Controls.Add(numThr, 1, r++);
             }
 
@@ -1603,7 +1612,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 7) 등록 — 모든 값은 자동 추론된 값 사용
             int    axis      = inferAxis;
             bool   isAe      = inferAe;
-            string yCol      = inferYCol;
+            // inferYCol이 "x, y, z" 처럼 다채널인 경우 YColumn에는 첫 번째 채널명만 저장
+            string yCol      = inferYCol.Contains(",")
+                ? inferYCol.Split(',')[0].Trim()
+                : inferYCol;
             int    C         = inferC;
             string kind      = meta?.Kind ?? (isAe ? "AE-CNN1D" : "CNN1D-CLS");
             double threshold = isAe && numThr != null ? (double)numThr.Value : DefaultThreshold;
