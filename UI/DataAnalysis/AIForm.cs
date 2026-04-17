@@ -1286,6 +1286,14 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             root.Controls.Add(top2,              0, 0);
             root.Controls.Add(BuildAirflowPanel(), 0, 1);
             root.Controls.Add(botLayout,          0, 2);
+
+            // 서버 설정 변경 시 Airflow 패널 URL·DagId 동기화
+            Services.AppEvents.ServerSettingsChanged += s =>
+            {
+                if (IsDisposed) return;
+                if (InvokeRequired) { BeginInvoke(new Action(() => SyncAirflowPanel(s))); return; }
+                SyncAirflowPanel(s);
+            };
             tab.Controls.Add(root);
             return tab;
         }
@@ -1979,6 +1987,14 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // ════════════════════════════════════════════════════════════════════
         //  Airflow 연동 패널
         // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>서버 설정 저장 후 Airflow 패널 텍스트박스를 최신값으로 갱신합니다.</summary>
+        private void SyncAirflowPanel(Services.ServerSettings s)
+        {
+            if (_aflUrl   != null) _aflUrl.Text   = s.AirflowUrl   ?? "";
+            if (_aflDagId != null) _aflDagId.Text = s.AirflowDagId ?? "phm_retrain";
+            // User/Password 는 ServerSettings.Current 에서 직접 읽으므로 별도 TextBox 불필요
+        }
 
         private GroupBox BuildAirflowPanel()
         {

@@ -33,7 +33,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
         private void BuildUI()
         {
             Text            = "서버 연결 설정";
-            Size            = new Size(500, 580);
+            Size            = new Size(500, 610);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition   = FormStartPosition.CenterParent;
             MaximizeBox     = false;
@@ -48,7 +48,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));   // 일괄 변경
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 138));  // InfluxDB
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // MLflow
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));  // Airflow
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));  // Airflow
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 버튼
 
             // ── [0] IP 일괄 변경 ───────────────────────────────────────────────
