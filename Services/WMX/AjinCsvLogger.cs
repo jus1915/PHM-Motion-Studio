@@ -1,7 +1,9 @@
 ﻿using PHM_Project_DockPanel.Services;
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,8 +18,12 @@ namespace PHM_Project_DockPanel.Services.WMX
     /// </summary>
     public class AjinCsvLogger : IDisposable
     {
+        // ── Windows 멀티미디어 타이머 해상도 (winmm.dll) ───────────
+        [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint uPeriod);
+        [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint uPeriod);
+
         // ── 폴링 주기 ──────────────────────────────────────────────
-        public int IntervalMs { get; set; } = 10;   // 기본 10ms (100 Hz)
+        public int IntervalMs { get; set; } = 1;   // 기본 1ms (1000 Hz)
 
         // ── 외부 주입 ──────────────────────────────────────────────
         private readonly Func<int, double> _getPos;     // axis → actual pos(mm)
@@ -106,23 +112,31 @@ namespace PHM_Project_DockPanel.Services.WMX
             // 이전 위치 (차분 속도 계산용)
             double[] prevPos    = new double[_axes.Length];
             double[] prevCmdPos = new double[_axes.Length];
-            long prevTime = 0;
+            long prevTick = 0;
             bool first = true;
 
-            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var sw = Stopwatch.StartNew();
 
+            // Stopwatch 틱 기반 인터벌 (드리프트 없는 누적 타이밍)
+            long ticksPerInterval = (long)Math.Round(IntervalMs * 0.001 * Stopwatch.Frequency);
+            long nextTick         = sw.ElapsedTicks + ticksPerInterval;
+
+            // Windows 멀티미디어 타이머 해상도를 1ms로 설정 → Thread.Sleep(1) 정밀도 확보
+            timeBeginPeriod(1);
             try
             {
-                using (var writer = new StreamWriter(_filePath, false, Encoding.UTF8))
+                using (var writer = new StreamWriter(_filePath, false, Encoding.UTF8,
+                                                     bufferSize: 65536))  // 64KB 버퍼로 I/O 부담 감소
                 {
                     writer.WriteLine(header.ToString());
 
                     while (!token.IsCancellationRequested)
                     {
-                        long t = sw.ElapsedMilliseconds;
-                        double dtSec = first ? 0.0 : (t - prevTime) / 1000.0;
+                        long nowTick = sw.ElapsedTicks;
+                        long t       = nowTick * 1000L / Stopwatch.Frequency; // ms
+                        double dtSec = first ? 0.0 : (double)(nowTick - prevTick) / Stopwatch.Frequency;
 
-                        var line = new StringBuilder();
+                        var line = new StringBuilder(128);
                         line.Append(t.ToString(CultureInfo.InvariantCulture));
 
                         for (int i = 0; i < _axes.Length; i++)
@@ -131,7 +145,6 @@ namespace PHM_Project_DockPanel.Services.WMX
                             double pos = SafeGet(_getPos, ax);
                             double trq = SafeGet(_getTorque, ax);
 
-                            // getVel 콜백이 있으면 직접 사용, 없으면 위치 차분으로 계산
                             double vel = (_getVel != null)
                                 ? SafeGet(_getVel, ax)
                                 : ((first || dtSec <= 0) ? 0.0 : (pos - prevPos[i]) / dtSec);
@@ -149,13 +162,21 @@ namespace PHM_Project_DockPanel.Services.WMX
                         }
 
                         writer.WriteLine(line.ToString());
-                        prevTime = t;
-                        first = false;
+                        prevTick = nowTick;
+                        first    = false;
 
-                        // 정밀 슬립
-                        long elapsed = sw.ElapsedMilliseconds - t;
-                        int wait = IntervalMs - (int)elapsed;
-                        if (wait > 0) Thread.Sleep(wait);
+                        // ── 고정 인터벌 대기 ──────────────────────────────
+                        // timeBeginPeriod(1) 덕분에 Sleep(1)이 ~1ms 정밀도.
+                        // 남은 시간이 1ms 이상이면 Sleep(1), 이하면 SpinWait으로 정밀 대기.
+                        long remaining;
+                        while ((remaining = nextTick - sw.ElapsedTicks) > 0)
+                        {
+                            if (remaining * 1000L / Stopwatch.Frequency >= 2)
+                                Thread.Sleep(1);
+                            else
+                                Thread.SpinWait(20);
+                        }
+                        nextTick += ticksPerInterval;
                     }
 
                     writer.Flush();
@@ -163,6 +184,7 @@ namespace PHM_Project_DockPanel.Services.WMX
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) { _log($"[AjinLog] 폴링 오류: {ex.Message}"); }
+            finally { timeEndPeriod(1); }
         }
 
         private static double SafeGet(Func<int, double> fn, int ax)
