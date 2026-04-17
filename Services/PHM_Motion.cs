@@ -413,6 +413,11 @@ namespace PHM_Project_DockPanel.Services
                 return false;
             }
 
+            // ── 연속 수집 모드 즉시 활성화 ───────────────────────────────
+            // CSV 저장 성공 여부와 무관하게, 체크박스를 켠 순간부터
+            // 모션별(RunMotionWithLogging) 수집을 억제합니다.
+            _continuousLoggingActive = true;
+
             string labelTag  = string.IsNullOrEmpty(label) ? "unlabeled" : label;
             string today     = DateTime.Now.ToString("yyyyMMdd");
             string baseRoot  = ServerSettings.Current.ContinuousDataPath;
@@ -424,79 +429,84 @@ namespace PHM_Project_DockPanel.Services
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
             string baseName  = timestamp + "_AllAxes_Continuous";
 
-            // ── 저장 경로 접근성 사전 확인 ────────────────────────────────
-            try
-            {
-                Directory.CreateDirectory(rootDir);
-            }
-            catch (Exception ex)
-            {
-                string hint = baseRoot.StartsWith(@"\\")
-                    ? $"\n\n[해결 방법] 서버 PC({baseRoot})에서 폴더를 Windows 공유(우클릭→공유)하거나\n"
-                      + "연결 설정의 '연속 수집 데이터 저장 경로'를 로컬 경로로 변경하세요."
-                    : "";
-                AppEvents.RaiseLog($"[연속 수집] 저장 경로 생성 실패: {ex.Message}{hint}");
-                return false;
-            }
-
-            bool anyStarted = false;
-
             // ── InfluxDB label 태그 설정 (연속 수집 기간 동안 유지) ──────────
             if (_accelInfluxPublisher != null)
                 _accelInfluxPublisher.Label = labelTag;
 
-            // ── DAQ 가속도 ────────────────────────────────────────────────
-            if (logAccel && _accelLogger != null)
+            // ── 저장 경로 접근성 사전 확인 ────────────────────────────────
+            bool pathOk = false;
+            try
             {
-                try
+                Directory.CreateDirectory(rootDir);
+                pathOk = true;
+            }
+            catch (Exception ex)
+            {
+                string hint = baseRoot.StartsWith(@"\\")
+                    ? $"\n[해결 방법] 서버 PC에서 해당 폴더를 Windows 공유(우클릭→공유)하거나\n"
+                      + "연결 설정의 '연속 수집 데이터 저장 경로'를 로컬 경로로 변경하세요."
+                    : "";
+                AppEvents.RaiseLog($"[연속 수집] ⚠ 저장 경로 접근 실패 — CSV는 저장되지 않습니다.\n"
+                                 + $"  경로: {rootDir}\n  오류: {ex.Message}{hint}");
+            }
+
+            bool anyStarted = false;
+
+            if (pathOk)
+            {
+                // ── DAQ 가속도 ────────────────────────────────────────────
+                if (logAccel && _accelLogger != null)
                 {
-                    Directory.CreateDirectory(accelDir);
-                    bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);
-                    if (ok)
+                    try
                     {
-                        anyStarted = true;
-                        AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 → " + accelDir);
+                        Directory.CreateDirectory(accelDir);
+                        bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);
+                        if (ok)
+                        {
+                            anyStarted = true;
+                            AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 → " + accelDir);
+                        }
+                        else AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 실패");
                     }
-                    else AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 실패");
-                }
-                catch (Exception ex)
-                {
-                    AppEvents.RaiseLog("[연속 수집] DAQ 오류: " + ex.Message);
-                }
-            }
-
-            // ── 토크 (Ajin / Simulation 폴링 로거) ───────────────────────
-            if (logTorque && _ajinLogger != null &&
-                (_controller.IsAjin || _controller.IsSimulationMode))
-            {
-                try
-                {
-                    Directory.CreateDirectory(torqueDir);
-                    int axisCount = Math.Max(1, _axisConfigs?.Length ?? 1);
-                    int[] allAxes = new int[axisCount];
-                    for (int i = 0; i < axisCount; i++) allAxes[i] = i;
-                    bool ok = _ajinLogger.Start(allAxes, torqueDir, baseName);
-                    if (ok)
+                    catch (Exception ex)
                     {
-                        anyStarted = true;
-                        AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 → " + torqueDir);
+                        AppEvents.RaiseLog("[연속 수집] DAQ 오류: " + ex.Message);
                     }
-                    else AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 실패");
                 }
-                catch (Exception ex)
+
+                // ── 토크 (Ajin / Simulation 폴링 로거) ───────────────────
+                if (logTorque && _ajinLogger != null &&
+                    (_controller.IsAjin || _controller.IsSimulationMode))
                 {
-                    AppEvents.RaiseLog("[연속 수집] 토크 오류: " + ex.Message);
+                    try
+                    {
+                        Directory.CreateDirectory(torqueDir);
+                        int axisCount = Math.Max(1, _axisConfigs?.Length ?? 1);
+                        int[] allAxes = new int[axisCount];
+                        for (int i = 0; i < axisCount; i++) allAxes[i] = i;
+                        bool ok = _ajinLogger.Start(allAxes, torqueDir, baseName);
+                        if (ok)
+                        {
+                            anyStarted = true;
+                            AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 → " + torqueDir);
+                        }
+                        else AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 실패");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppEvents.RaiseLog("[연속 수집] 토크 오류: " + ex.Message);
+                    }
+                }
+                else if (logTorque && !_controller.IsAjin && !_controller.IsSimulationMode)
+                {
+                    AppEvents.RaiseLog("[연속 수집] WMX3 토크 로거는 연속 수집을 지원하지 않습니다.");
                 }
             }
-            else if (logTorque && !_controller.IsAjin && !_controller.IsSimulationMode)
-            {
-                AppEvents.RaiseLog("[연속 수집] WMX3 토크 로거는 연속 수집을 지원하지 않습니다.");
-            }
 
-            if (anyStarted)
-                _continuousLoggingActive = true;
+            if (!anyStarted)
+                AppEvents.RaiseLog("[연속 수집] 모드 활성화 — 모션별 수집 억제 중 (CSV 저장 없음)");
 
-            return anyStarted;
+            return true;  // 플래그 활성화 성공 → 항상 true 반환
         }
 
         /// <summary>연속 수집을 중지하고 CSV를 닫습니다.</summary>
