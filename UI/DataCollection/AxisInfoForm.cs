@@ -398,9 +398,13 @@ namespace PHM_Project_DockPanel.Windows
                 }
 
                 string label = _cmbLabel?.Text?.Trim() ?? "";
+                // UI 스레드에서 미리 캡처 — Task.Run 내부에서 UI 컨트롤 접근 시
+                // 크로스 스레드로 인해 .Checked 가 false 반환되는 문제 방지
+                bool snapAccel  = _chkAccelCollect.Checked;
+                bool snapTorque = _chkTorqueCollect.Checked;
 
                 bool ok = await System.Threading.Tasks.Task.Run(
-                    () => _motion.StartContinuousLogging(label));
+                    () => _motion.StartContinuousLogging(label, snapAccel, snapTorque));
 
                 if (!ok)
                 {

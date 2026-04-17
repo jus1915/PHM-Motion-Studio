@@ -398,12 +398,14 @@ namespace PHM_Project_DockPanel.Services
         /// 모션 트리거 없이 DAQ/토크 로거를 연속으로 시작합니다.
         /// _isAccelEnabled / _isTorqueEnabled 플래그를 그대로 존중합니다.
         /// </summary>
-        public bool StartContinuousLogging(string label = "")
+        /// <param name="forceAccel">null이면 _isAccelEnabled 델리게이트 사용. UI 스레드 외부에서 호출 시 미리 캡처한 값을 전달하세요.</param>
+        /// <param name="forceTorque">null이면 _isTorqueEnabled 델리게이트 사용.</param>
+        public bool StartContinuousLogging(string label = "", bool? forceAccel = null, bool? forceTorque = null)
         {
             if (_continuousLoggingActive) return true;
 
-            bool logAccel  = ShouldLogAccel();
-            bool logTorque = ShouldLogTorque();
+            bool logAccel  = forceAccel  ?? ShouldLogAccel();
+            bool logTorque = forceTorque ?? ShouldLogTorque();
 
             if (!logAccel && !logTorque)
             {
