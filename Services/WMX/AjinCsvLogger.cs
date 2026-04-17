@@ -100,25 +100,16 @@ namespace PHM_Project_DockPanel.Services.WMX
         // ── 폴링 루프 ─────────────────────────────────────────────
         private void PollLoop(CancellationToken token)
         {
-            // 헤더
-            bool hasCmdPos = _getCmdPos != null;
-            var header = new StringBuilder("Timestamp_ms");
+            // 헤더: time_s(초) + 축별 토크만 — 가속도 CSV 컬럼명(time_s)과 통일
+            var header = new StringBuilder("time_s");
             foreach (int ax in _axes)
-            {
-                header.Append($",Ax{ax}_Pos(mm),Ax{ax}_Vel(mm/s),Ax{ax}_Trq(%)");
-                if (hasCmdPos) header.Append($",Ax{ax}_CmdPos(mm),Ax{ax}_CmdVel(mm/s)");
-            }
-
-            // 이전 위치 (차분 속도 계산용)
-            double[] prevPos    = new double[_axes.Length];
-            double[] prevCmdPos = new double[_axes.Length];
-            long prevTick = 0;
-            bool first = true;
+                header.Append($",Ax{ax}_Trq(%)");
 
             var sw = Stopwatch.StartNew();
 
             // Stopwatch 틱 기반 인터벌 (드리프트 없는 누적 타이밍)
             long ticksPerInterval = (long)Math.Round(IntervalMs * 0.001 * Stopwatch.Frequency);
+            long ticksPer1ms      = Stopwatch.Frequency / 1000;
             long nextTick         = sw.ElapsedTicks + ticksPerInterval;
 
             // 폴링 스레드 우선순위 상향 → OS 스케줄러에 의한 선점 최소화
@@ -136,51 +127,30 @@ namespace PHM_Project_DockPanel.Services.WMX
                     while (!token.IsCancellationRequested)
                     {
                         long nowTick = sw.ElapsedTicks;
-                        long t       = nowTick * 1000L / Stopwatch.Frequency; // ms
-                        double dtSec = first ? 0.0 : (double)(nowTick - prevTick) / Stopwatch.Frequency;
+                        double t_s   = (double)nowTick / Stopwatch.Frequency;   // 초 단위 (가속도와 동일)
 
-                        var line = new StringBuilder(128);
-                        line.Append(t.ToString(CultureInfo.InvariantCulture));
+                        var line = new StringBuilder(64);
+                        line.Append(t_s.ToString("F6", CultureInfo.InvariantCulture));
 
                         for (int i = 0; i < _axes.Length; i++)
                         {
-                            int ax = _axes[i];
-                            double pos = SafeGet(_getPos, ax);
+                            int    ax  = _axes[i];
                             double trq = SafeGet(_getTorque, ax);
-
-                            double vel = (_getVel != null)
-                                ? SafeGet(_getVel, ax)
-                                : ((first || dtSec <= 0) ? 0.0 : (pos - prevPos[i]) / dtSec);
-
-                            line.Append($",{pos:F4},{vel:F4},{trq:F4}");
+                            line.Append($",{trq:F4}");
                             TorqueSampled?.Invoke(Device ?? _fileSuffix, ax, trq, DateTime.UtcNow);
-                            if (hasCmdPos)
-                            {
-                                double cmdPos = SafeGet(_getCmdPos, ax);
-                                double cmdVel = (first || dtSec <= 0) ? 0.0 : (cmdPos - prevCmdPos[i]) / dtSec;
-                                line.Append($",{cmdPos:F4},{cmdVel:F4}");
-                                prevCmdPos[i] = cmdPos;
-                            }
-                            prevPos[i] = pos;
                         }
 
                         writer.WriteLine(line.ToString());
-                        prevTick = nowTick;
-                        first    = false;
 
                         // ── 고정 인터벌 대기 ──────────────────────────────
-                        // ① 남은 시간 > 1ms  → Sleep(1) 으로 CPU 양보
-                        //    timeBeginPeriod(1) 보장으로 ~1ms 후 복귀.
-                        //    오버슈트 시 remaining < 0 → 즉시 탈출 (tick 누적이 다음 주기 보정).
-                        // ② 남은 시간 ≤ 1ms  → 순수 tight spin (SpinWait 없음)
-                        //    Stopwatch 틱 단위 정밀 대기로 nextTick 정확히 통과.
-                        long ticksPer1ms = Stopwatch.Frequency / 1000;
+                        // ① remaining > 1ms → Sleep(1) 으로 CPU 양보
+                        // ② remaining ≤ 1ms → 순수 tight spin → nextTick 정확히 통과
                         long remaining;
                         while ((remaining = nextTick - sw.ElapsedTicks) > 0)
                         {
                             if (remaining > ticksPer1ms)
                                 Thread.Sleep(1);
-                            // else: tight spin — 아무것도 하지 않고 조건 재확인
+                            // else: tight spin
                         }
                         nextTick += ticksPerInterval;
                     }
