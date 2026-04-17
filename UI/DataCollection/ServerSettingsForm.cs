@@ -18,7 +18,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
         // MLflow
         private TextBox _txtMlflowUrl;
         // Airflow
-        private TextBox _txtAirflowUrl;
+        private TextBox _txtAirflowUrl, _txtAirflowUser, _txtAirflowPassword, _txtAirflowDagId;
         // 일괄 변경
         private TextBox _txtBulkIp;
 
@@ -33,7 +33,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
         private void BuildUI()
         {
             Text            = "서버 연결 설정";
-            Size            = new Size(500, 520);
+            Size            = new Size(500, 580);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition   = FormStartPosition.CenterParent;
             MaximizeBox     = false;
@@ -48,7 +48,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));   // 일괄 변경
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 138));  // InfluxDB
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // MLflow
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // Airflow
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));  // Airflow
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 버튼
 
             // ── [0] IP 일괄 변경 ───────────────────────────────────────────────
@@ -82,8 +82,12 @@ namespace PHM_Project_DockPanel.UI.DataCollection
 
             // ── [3] Airflow ───────────────────────────────────────────────────
             var gbAirflow = new GroupBox { Text = "Airflow", Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 4) };
-            var tlAirflow = MakeTl(1);
-            tlAirflow.Controls.Add(Lbl("URL:"), 0, 0); _txtAirflowUrl = Txt(); tlAirflow.Controls.Add(_txtAirflowUrl, 1, 0);
+            var tlAirflow = MakeTl(4);
+            int ra = 0;
+            tlAirflow.Controls.Add(Lbl("URL:"),      0, ra); _txtAirflowUrl      = Txt();                  tlAirflow.Controls.Add(_txtAirflowUrl,      1, ra++);
+            tlAirflow.Controls.Add(Lbl("User:"),     0, ra); _txtAirflowUser     = Txt();                  tlAirflow.Controls.Add(_txtAirflowUser,     1, ra++);
+            tlAirflow.Controls.Add(Lbl("Password:"), 0, ra); _txtAirflowPassword = Txt(password: true);    tlAirflow.Controls.Add(_txtAirflowPassword, 1, ra++);
+            tlAirflow.Controls.Add(Lbl("DAG ID:"),   0, ra); _txtAirflowDagId    = Txt();                  tlAirflow.Controls.Add(_txtAirflowDagId,    1, ra++);
             gbAirflow.Controls.Add(tlAirflow);
             root.Controls.Add(gbAirflow, 0, 3);
 
@@ -110,8 +114,11 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             _txtInfluxToken.Text  = s.InfluxToken  ?? "";
             _txtInfluxOrg.Text    = s.InfluxOrg    ?? "";
             _txtInfluxBucket.Text = s.InfluxBucket ?? "";
-            _txtMlflowUrl.Text    = s.MlflowUrl    ?? "";
-            _txtAirflowUrl.Text   = s.AirflowUrl   ?? "";
+            _txtMlflowUrl.Text        = s.MlflowUrl        ?? "";
+            _txtAirflowUrl.Text       = s.AirflowUrl       ?? "";
+            _txtAirflowUser.Text      = s.AirflowUser      ?? "";
+            _txtAirflowPassword.Text  = s.AirflowPassword  ?? "";
+            _txtAirflowDagId.Text     = s.AirflowDagId     ?? "phm_retrain";
         }
 
         // ── 저장 & 적용 ────────────────────────────────────────────────────────
@@ -122,8 +129,11 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             s.InfluxToken  = _txtInfluxToken.Text.Trim();
             s.InfluxOrg    = _txtInfluxOrg.Text.Trim();
             s.InfluxBucket = _txtInfluxBucket.Text.Trim();
-            s.MlflowUrl    = _txtMlflowUrl.Text.Trim();
-            s.AirflowUrl   = _txtAirflowUrl.Text.Trim();
+            s.MlflowUrl        = _txtMlflowUrl.Text.Trim();
+            s.AirflowUrl       = _txtAirflowUrl.Text.Trim();
+            s.AirflowUser      = _txtAirflowUser.Text.Trim();
+            s.AirflowPassword  = _txtAirflowPassword.Text.Trim();
+            s.AirflowDagId     = _txtAirflowDagId.Text.Trim();
             s.Save(_settingsPath);
 
             AppEvents.RaiseServerSettingsChanged(s);
