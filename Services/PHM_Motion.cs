@@ -30,6 +30,9 @@ namespace PHM_Project_DockPanel.Services
         private readonly Func<bool> _isAccelEnabled;   // 가속도 수집 여부
         private readonly Func<bool> _isTorqueEnabled;  // 토크 수집 여부
 
+        // ▶ 연속 수집 상태
+        private bool _continuousLoggingActive;
+
         public ControllerManager Controller => _controller;
         public AxisConfig[] AxisConfigs => _axisConfigs;
 
@@ -146,9 +149,15 @@ namespace PHM_Project_DockPanel.Services
             if (values.Length != axes.Length)
                 throw new ArgumentException("values length must be 1 or equal to axes length.");
 
-            bool logAccel = ShouldLogAccel();
+            bool logAccel  = ShouldLogAccel();
             bool logTorque = ShouldLogTorque();
-            bool anyLog = (logAccel || logTorque) && _axisConfigs != null;
+            bool anyLog    = (logAccel || logTorque) && _axisConfigs != null;
+
+            // 연속 수집 중이면 모션별 파일 생성 억제 (NI-DAQ 채널 충돌 방지)
+            if (_continuousLoggingActive)
+            {
+                logAccel = false; logTorque = false; anyLog = false;
+            }
 
             var status = _controller.GetStatus();
             var active = new List<int>();
@@ -383,6 +392,106 @@ namespace PHM_Project_DockPanel.Services
                 return ta + td;
             }
         }
+
+        // ======================= 연속 수집 =======================
+
+        /// <summary>
+        /// 모션 트리거 없이 DAQ/토크 로거를 연속으로 시작합니다.
+        /// _isAccelEnabled / _isTorqueEnabled 플래그를 그대로 존중합니다.
+        /// </summary>
+        public bool StartContinuousLogging(string label = "")
+        {
+            if (_continuousLoggingActive) return true;
+
+            bool logAccel  = ShouldLogAccel();
+            bool logTorque = ShouldLogTorque();
+
+            if (!logAccel && !logTorque)
+            {
+                AppEvents.RaiseLog("[연속 수집] 가속도 또는 토크 수집 체크박스를 먼저 활성화하세요.");
+                return false;
+            }
+
+            string labelTag  = string.IsNullOrEmpty(label) ? "unlabeled" : label;
+            string today     = DateTime.Now.ToString("yyyyMMdd");
+            string baseRoot  = @"C:\Data\PHM_Logs\Signals";
+            string rootDir   = Path.Combine(baseRoot, today + "_Continuous", labelTag);
+            string accelDir  = Path.Combine(rootDir, "Accel");
+            string torqueDir = Path.Combine(rootDir, "Torque");
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            string baseName  = timestamp + "_AllAxes_Continuous";
+
+            bool anyStarted = false;
+
+            // ── DAQ 가속도 ────────────────────────────────────────────────
+            if (logAccel && _accelLogger != null)
+            {
+                Directory.CreateDirectory(accelDir);
+                _accelLogger.Label = (labelTag == "unlabeled") ? "" : labelTag;
+                try
+                {
+                    bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);
+                    if (ok)
+                    {
+                        anyStarted = true;
+                        AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 → " + accelDir);
+                    }
+                    else AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 실패");
+                }
+                catch (Exception ex)
+                {
+                    AppEvents.RaiseLog("[연속 수집] DAQ 오류: " + ex.Message);
+                }
+            }
+
+            // ── 토크 (Ajin / Simulation 폴링 로거) ───────────────────────
+            if (logTorque && _ajinLogger != null &&
+                (_controller.IsAjin || _controller.IsSimulationMode))
+            {
+                Directory.CreateDirectory(torqueDir);
+                int axisCount = Math.Max(1, _axisConfigs?.Length ?? 1);
+                int[] allAxes = new int[axisCount];
+                for (int i = 0; i < axisCount; i++) allAxes[i] = i;
+                try
+                {
+                    bool ok = _ajinLogger.Start(allAxes, torqueDir, baseName);
+                    if (ok)
+                    {
+                        anyStarted = true;
+                        AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 → " + torqueDir);
+                    }
+                    else AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 실패");
+                }
+                catch (Exception ex)
+                {
+                    AppEvents.RaiseLog("[연속 수집] 토크 오류: " + ex.Message);
+                }
+            }
+            else if (logTorque && !_controller.IsAjin && !_controller.IsSimulationMode)
+            {
+                AppEvents.RaiseLog("[연속 수집] WMX3 토크 로거는 연속 수집을 지원하지 않습니다.");
+            }
+
+            if (anyStarted)
+                _continuousLoggingActive = true;
+
+            return anyStarted;
+        }
+
+        /// <summary>연속 수집을 중지하고 CSV를 닫습니다.</summary>
+        public void StopContinuousLogging()
+        {
+            if (!_continuousLoggingActive) return;
+
+            try { if (_accelLogger?.IsRunning  == true) _accelLogger.Stop();  } catch { }
+            try { if (_ajinLogger?.IsLogging    == true) _ajinLogger.Stop();   } catch { }
+
+            _continuousLoggingActive = false;
+            AppEvents.RaiseLog("[연속 수집] 종료");
+        }
+
+        /// <summary>현재 연속 수집 중 여부.</summary>
+        public bool IsContinuousLogging => _continuousLoggingActive;
 
         string ResolveRobotIdForActiveAxes(IList<int> activeAxes)
         {

@@ -35,6 +35,7 @@ namespace PHM_Project_DockPanel.Windows
         private CheckBox _chkAccelCollect;     // 가속도 수집
         private CheckBox _chkTorqueCollect;    // 토크 수집
         private CheckBox _chkRealtime;
+        private CheckBox _chkContCollect;      // 연속 수집
         private ComboBox _cmbLabel;
         private Label _lblLabelCaption;
 
@@ -156,17 +157,21 @@ namespace PHM_Project_DockPanel.Windows
                 Padding = new Padding(0)
             };
 
-            _chkAccelCollect = new CheckBox { Text = "가속도 수집", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
-            _chkTorqueCollect = new CheckBox { Text = "토크 수집", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
-            _chkRealtime = new CheckBox { Text = "실시간 데이터 전송", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkAccelCollect  = new CheckBox { Text = "가속도 수집",      AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkTorqueCollect = new CheckBox { Text = "토크 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkRealtime      = new CheckBox { Text = "실시간 데이터 전송", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkContCollect   = new CheckBox { Text = "연속 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0),
+                                               ForeColor = System.Drawing.Color.DarkSlateBlue };
 
             _chkRealtime.CheckedChanged += (s, e) =>
             {
                 bool enabled = _chkRealtime.Checked;
                 UpdateRealtimeStatusLabel(enabled);
-                _cmbLabel.Enabled = enabled;
+                _cmbLabel.Enabled = enabled || _chkContCollect.Checked;
                 AppEvents.RaiseAccelRealtimeToggled(enabled); // 로그 출력 안 함
             };
+
+            _chkContCollect.CheckedChanged += OnContCollectCheckedChanged;
 
             // 레이블 콤보박스
             _lblLabelCaption = new Label
@@ -204,6 +209,7 @@ namespace PHM_Project_DockPanel.Windows
             rightControlPanel.Controls.Add(_chkRealtime);
             rightControlPanel.Controls.Add(_lblLabelCaption);
             rightControlPanel.Controls.Add(_cmbLabel);
+            rightControlPanel.Controls.Add(_chkContCollect);
             rightControlPanel.Controls.Add(btnConnect);
             rightControlPanel.Controls.Add(btnDisconnect);
 
@@ -379,6 +385,61 @@ namespace PHM_Project_DockPanel.Windows
         }
 
 
+        private async void OnContCollectCheckedChanged(object sender, EventArgs e)
+        {
+            if (_chkContCollect.Checked)
+            {
+                // 수집 대상이 하나도 없으면 즉시 해제
+                if (!_chkAccelCollect.Checked && !_chkTorqueCollect.Checked)
+                {
+                    AppEvents.RaiseLog("[연속 수집] 가속도 또는 토크 수집을 먼저 체크하세요.");
+                    _chkContCollect.Checked = false;
+                    return;
+                }
+
+                string label = _cmbLabel?.Text?.Trim() ?? "";
+
+                bool ok = await System.Threading.Tasks.Task.Run(
+                    () => _motion.StartContinuousLogging(label));
+
+                if (!ok)
+                {
+                    _chkContCollect.Checked = false;
+                    return;
+                }
+
+                // 수집 중에는 수집 대상 체크박스와 레이블 변경 불가
+                _chkAccelCollect.Enabled  = false;
+                _chkTorqueCollect.Enabled = false;
+                _cmbLabel.Enabled         = _chkRealtime.Checked; // 실시간 전송은 유지
+                UpdateContCollectStatusLabel(true);
+            }
+            else
+            {
+                await System.Threading.Tasks.Task.Run(() => _motion.StopContinuousLogging());
+
+                _chkAccelCollect.Enabled  = true;
+                _chkTorqueCollect.Enabled = true;
+                _cmbLabel.Enabled         = _chkRealtime.Checked;
+                UpdateContCollectStatusLabel(false);
+            }
+        }
+
+        private void UpdateContCollectStatusLabel(bool running)
+        {
+            if (_lblDaqStatus == null) return;
+            if (running)
+            {
+                _lblDaqStatus.Text      = "연속 수집 중...";
+                _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateBlue;
+            }
+            else
+            {
+                _lblDaqStatus.Text      = "DAQ 상태: 대기 중";
+                _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateGray;
+            }
+        }
+
         // 레거시-신규 동기화
         private void SyncCombinedFromChildren()
         {
@@ -483,7 +544,8 @@ namespace PHM_Project_DockPanel.Windows
                 UpdateCheckedAxesLabel();
                 SetActionButtonsEnabled(false);
 
-                if (_chkRealtime.Checked) _chkRealtime.Checked = false;
+                if (_chkRealtime.Checked)    _chkRealtime.Checked    = false;
+                if (_chkContCollect?.Checked == true) _chkContCollect.Checked = false;
 
                 AppEvents.RaiseRequestClearSimulator();
                 AppEvents.RaiseLog("Controller disconnected.");
