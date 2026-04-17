@@ -424,6 +424,21 @@ namespace PHM_Project_DockPanel.Services
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
             string baseName  = timestamp + "_AllAxes_Continuous";
 
+            // ── 저장 경로 접근성 사전 확인 ────────────────────────────────
+            try
+            {
+                Directory.CreateDirectory(rootDir);
+            }
+            catch (Exception ex)
+            {
+                string hint = baseRoot.StartsWith(@"\\")
+                    ? $"\n\n[해결 방법] 서버 PC({baseRoot})에서 폴더를 Windows 공유(우클릭→공유)하거나\n"
+                      + "연결 설정의 '연속 수집 데이터 저장 경로'를 로컬 경로로 변경하세요."
+                    : "";
+                AppEvents.RaiseLog($"[연속 수집] 저장 경로 생성 실패: {ex.Message}{hint}");
+                return false;
+            }
+
             bool anyStarted = false;
 
             // ── InfluxDB label 태그 설정 (연속 수집 기간 동안 유지) ──────────
@@ -433,9 +448,9 @@ namespace PHM_Project_DockPanel.Services
             // ── DAQ 가속도 ────────────────────────────────────────────────
             if (logAccel && _accelLogger != null)
             {
-                Directory.CreateDirectory(accelDir);
                 try
                 {
+                    Directory.CreateDirectory(accelDir);
                     bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);
                     if (ok)
                     {
@@ -454,12 +469,12 @@ namespace PHM_Project_DockPanel.Services
             if (logTorque && _ajinLogger != null &&
                 (_controller.IsAjin || _controller.IsSimulationMode))
             {
-                Directory.CreateDirectory(torqueDir);
-                int axisCount = Math.Max(1, _axisConfigs?.Length ?? 1);
-                int[] allAxes = new int[axisCount];
-                for (int i = 0; i < axisCount; i++) allAxes[i] = i;
                 try
                 {
+                    Directory.CreateDirectory(torqueDir);
+                    int axisCount = Math.Max(1, _axisConfigs?.Length ?? 1);
+                    int[] allAxes = new int[axisCount];
+                    for (int i = 0; i < axisCount; i++) allAxes[i] = i;
                     bool ok = _ajinLogger.Start(allAxes, torqueDir, baseName);
                     if (ok)
                     {
