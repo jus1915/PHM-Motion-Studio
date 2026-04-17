@@ -436,12 +436,47 @@ namespace PHM_Project_DockPanel.Windows
             {
                 _lblDaqStatus.Text      = "연속 수집 중...";
                 _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateBlue;
+
+                // 추론 결과 이벤트 구독
+                AppEvents.InferenceResultReceived -= OnInferenceResult;
+                AppEvents.InferenceResultReceived += OnInferenceResult;
             }
             else
             {
+                AppEvents.InferenceResultReceived -= OnInferenceResult;
+
                 _lblDaqStatus.Text      = "DAQ 상태: 대기 중";
                 _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateGray;
             }
+        }
+
+        private void OnInferenceResult(string sensorType, PHM_Project_DockPanel.Services.Core.InferenceResult result)
+        {
+            if (_lblDaqStatus == null || result == null) return;
+
+            // UI 스레드 마샬링
+            if (_lblDaqStatus.InvokeRequired)
+            {
+                _lblDaqStatus.BeginInvoke(
+                    new Action<string, PHM_Project_DockPanel.Services.Core.InferenceResult>(OnInferenceResult),
+                    sensorType, result);
+                return;
+            }
+
+            if (result.IsError)
+            {
+                _lblDaqStatus.Text      = $"[{sensorType}] 추론 오류";
+                _lblDaqStatus.ForeColor = System.Drawing.Color.Gray;
+                return;
+            }
+
+            string tag   = sensorType == "accel" ? "가속" : "토크";
+            string state = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
+            string cls   = !string.IsNullOrEmpty(result.ClassName) ? $" ({result.ClassName})" : "";
+            _lblDaqStatus.Text      = $"[{tag}] {state}{cls}  {result.AnomalyScore:F3}";
+            _lblDaqStatus.ForeColor = result.IsAnomaly
+                ? System.Drawing.Color.OrangeRed
+                : System.Drawing.Color.DarkGreen;
         }
 
         // 레거시-신규 동기화

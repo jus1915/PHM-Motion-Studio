@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using PHM_Project_DockPanel.Services.Core;
 
 namespace PHM_Project_DockPanel.Services
 {
@@ -86,5 +87,14 @@ namespace PHM_Project_DockPanel.Services
 
         public static void RaisePassiveMonitorSuspend() => PassiveMonitorSuspendRequested?.Invoke();
         public static void RaisePassiveMonitorResume()  => PassiveMonitorResumeRequested?.Invoke();
+
+        // ── 서버 추론 결과 ────────────────────────────────────────────────────
+        /// <summary>
+        /// ContinuousInferenceService 가 추론 결과를 수신했을 때 발생합니다.
+        /// sensorType = "accel" | "torque"
+        /// </summary>
+        public static event Action<string, InferenceResult> InferenceResultReceived;
+        public static void RaiseInferenceResult(string sensorType, InferenceResult result)
+            => InferenceResultReceived?.Invoke(sensorType, result);
     }
 }

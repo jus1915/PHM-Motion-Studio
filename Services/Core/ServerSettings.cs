@@ -26,6 +26,10 @@ namespace PHM_Project_DockPanel.Services
         public string AirflowPassword { get; set; } = "admin";
         public string AirflowDagId    { get; set; } = "phm_retrain";
 
+        // ── 추론 서버 ──────────────────────────────────────────────────────────
+        /// <summary>FastAPI PHM 추론 서버 URL. 비어있으면 서버 추론 비활성화.</summary>
+        public string InferenceServerUrl { get; set; } = "http://localhost:8000";
+
         // ── 연속 수집 데이터 저장 경로 ────────────────────────────────────────
         /// <summary>
         /// 연속 수집(실시간 수집) 시 CSV 파일을 저장할 루트 경로.

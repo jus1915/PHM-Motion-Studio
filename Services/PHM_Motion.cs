@@ -1,5 +1,6 @@
 ﻿using PHM_Project_DockPanel.Controller;
 using PHM_Project_DockPanel.DebugTools;
+using PHM_Project_DockPanel.Services.Core;
 using PHM_Project_DockPanel.Services.WMX;
 using PHM_Project_DockPanel.Services.DAQ;
 using System;
@@ -32,6 +33,7 @@ namespace PHM_Project_DockPanel.Services
 
         // ▶ 연속 수집 상태
         private bool _continuousLoggingActive;
+        private ContinuousInferenceService _inferenceService;
 
         public ControllerManager Controller => _controller;
         public AxisConfig[] AxisConfigs => _axisConfigs;
@@ -506,6 +508,16 @@ namespace PHM_Project_DockPanel.Services
             if (!anyStarted)
                 AppEvents.RaiseLog("[연속 수집] 모드 활성화 — 모션별 수집 억제 중 (CSV 저장 없음)");
 
+            // ── 추론 서비스 시작 ─────────────────────────────────────────────
+            string inferUrl = ServerSettings.Current.InferenceServerUrl;
+            if (!string.IsNullOrWhiteSpace(inferUrl))
+            {
+                _inferenceService?.Dispose();
+                _inferenceService = new ContinuousInferenceService(
+                    inferUrl, _accelLogger, _ajinLogger);
+                _inferenceService.Start();
+            }
+
             return true;  // 플래그 활성화 성공 → 항상 true 반환
         }
 
@@ -520,6 +532,11 @@ namespace PHM_Project_DockPanel.Services
             // ── InfluxDB label 태그 초기화 ───────────────────────────────
             if (_accelInfluxPublisher != null)
                 _accelInfluxPublisher.Label = "";
+
+            // ── 추론 서비스 중지 ─────────────────────────────────────────────
+            _inferenceService?.Stop();
+            _inferenceService?.Dispose();
+            _inferenceService = null;
 
             _continuousLoggingActive = false;
             AppEvents.RaiseLog("[연속 수집] 종료");

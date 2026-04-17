@@ -17,6 +17,8 @@ namespace PHM_Project_DockPanel.UI.DataCollection
         private TextBox _txtInfluxUrl, _txtInfluxToken, _txtInfluxOrg, _txtInfluxBucket;
         // MLflow
         private TextBox _txtMlflowUrl;
+        // 추론 서버
+        private TextBox _txtInferenceUrl;
         // Airflow
         private TextBox _txtAirflowUrl, _txtAirflowUser, _txtAirflowPassword, _txtAirflowDagId;
         // 연속 수집 경로
@@ -35,7 +37,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
         private void BuildUI()
         {
             Text            = "서버 연결 설정";
-            Size            = new Size(500, 680);
+            Size            = new Size(500, 748);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition   = FormStartPosition.CenterParent;
             MaximizeBox     = false;
@@ -45,11 +47,12 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             {
                 Dock = DockStyle.Fill, ColumnCount = 1,
                 Padding = new Padding(12, 10, 12, 8),
-                RowCount = 6,
+                RowCount = 7,
             };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));   // 일괄 변경
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 138));  // InfluxDB
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // MLflow
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // 추론 서버
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));  // Airflow
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));   // 연속 수집 경로
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 버튼
@@ -83,7 +86,14 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             gbMlflow.Controls.Add(tlMlflow);
             root.Controls.Add(gbMlflow, 0, 2);
 
-            // ── [3] Airflow ───────────────────────────────────────────────────
+            // ── [3] 추론 서버 ─────────────────────────────────────────────────
+            var gbInf = new GroupBox { Text = "추론 서버 (PHM Inference)", Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 4) };
+            var tlInf = MakeTl(1);
+            tlInf.Controls.Add(Lbl("URL:"), 0, 0); _txtInferenceUrl = Txt(); tlInf.Controls.Add(_txtInferenceUrl, 1, 0);
+            gbInf.Controls.Add(tlInf);
+            root.Controls.Add(gbInf, 0, 3);
+
+            // ── [4] Airflow ───────────────────────────────────────────────────
             var gbAirflow = new GroupBox { Text = "Airflow", Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 4) };
             var tlAirflow = MakeTl(4);
             int ra = 0;
@@ -92,9 +102,9 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             tlAirflow.Controls.Add(Lbl("Password:"), 0, ra); _txtAirflowPassword = Txt(password: true);    tlAirflow.Controls.Add(_txtAirflowPassword, 1, ra++);
             tlAirflow.Controls.Add(Lbl("DAG ID:"),   0, ra); _txtAirflowDagId    = Txt();                  tlAirflow.Controls.Add(_txtAirflowDagId,    1, ra++);
             gbAirflow.Controls.Add(tlAirflow);
-            root.Controls.Add(gbAirflow, 0, 3);
+            root.Controls.Add(gbAirflow, 0, 4);
 
-            // ── [4] 연속 수집 데이터 저장 경로 ───────────────────────────────
+            // ── [5] 연속 수집 데이터 저장 경로 ───────────────────────────────
             var gbDataPath = new GroupBox { Text = "연속 수집 데이터 저장 경로", Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 4) };
             var tlDataPath = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
             tlDataPath.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40));   // 레이블
@@ -117,9 +127,9 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             };
             tlDataPath.Controls.Add(btnBrowse, 2, 0);
             gbDataPath.Controls.Add(tlDataPath);
-            root.Controls.Add(gbDataPath, 0, 4);
+            root.Controls.Add(gbDataPath, 0, 5);
 
-            // ── [5] 버튼 ──────────────────────────────────────────────────────
+            // ── [6] 버튼 ──────────────────────────────────────────────────────
             var btnRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 4, 0, 0) };
             var btnCancel = new Button { Text = "닫기",      Width = 80, Height = 28, DialogResult = DialogResult.Cancel };
             var btnSave   = new Button { Text = "💾 저장 & 적용", Width = 120, Height = 28,
@@ -127,7 +137,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             btnSave.Click   += BtnSave_Click;
             btnRow.Controls.Add(btnCancel);
             btnRow.Controls.Add(btnSave);
-            root.Controls.Add(btnRow, 0, 5);
+            root.Controls.Add(btnRow, 0, 6);
 
             Controls.Add(root);
             AcceptButton = btnSave;
@@ -146,8 +156,9 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             _txtAirflowUrl.Text       = s.AirflowUrl       ?? "";
             _txtAirflowUser.Text      = s.AirflowUser      ?? "";
             _txtAirflowPassword.Text  = s.AirflowPassword  ?? "";
-            _txtAirflowDagId.Text     = s.AirflowDagId     ?? "phm_retrain";
-            _txtContinuousDataPath.Text = s.ContinuousDataPath ?? @"C:\Data\PHM_Logs\Signals";
+            _txtAirflowDagId.Text       = s.AirflowDagId       ?? "phm_retrain";
+            _txtInferenceUrl.Text       = s.InferenceServerUrl  ?? "http://localhost:8000";
+            _txtContinuousDataPath.Text = s.ContinuousDataPath  ?? @"C:\Data\PHM_Logs\Signals";
         }
 
         // ── 저장 & 적용 ────────────────────────────────────────────────────────
@@ -162,8 +173,9 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             s.AirflowUrl       = _txtAirflowUrl.Text.Trim();
             s.AirflowUser      = _txtAirflowUser.Text.Trim();
             s.AirflowPassword  = _txtAirflowPassword.Text.Trim();
-            s.AirflowDagId     = _txtAirflowDagId.Text.Trim();
-            s.ContinuousDataPath = _txtContinuousDataPath.Text.Trim();
+            s.AirflowDagId        = _txtAirflowDagId.Text.Trim();
+            s.InferenceServerUrl  = _txtInferenceUrl.Text.Trim();
+            s.ContinuousDataPath  = _txtContinuousDataPath.Text.Trim();
             s.Save(_settingsPath);
 
             AppEvents.RaiseServerSettingsChanged(s);
