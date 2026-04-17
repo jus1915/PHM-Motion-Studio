@@ -121,6 +121,9 @@ namespace PHM_Project_DockPanel.Services.WMX
             long ticksPerInterval = (long)Math.Round(IntervalMs * 0.001 * Stopwatch.Frequency);
             long nextTick         = sw.ElapsedTicks + ticksPerInterval;
 
+            // 폴링 스레드 우선순위 상향 → OS 스케줄러에 의한 선점 최소화
+            Thread.CurrentThread.Priority = ThreadPriority.Highest;
+
             // Windows 멀티미디어 타이머 해상도를 1ms로 설정 → Thread.Sleep(1) 정밀도 확보
             timeBeginPeriod(1);
             try
