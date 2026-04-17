@@ -26,6 +26,13 @@ namespace PHM_Project_DockPanel.Services
         public string AirflowPassword { get; set; } = "admin";
         public string AirflowDagId    { get; set; } = "phm_retrain";
 
+        // ── 연속 수집 데이터 저장 경로 ────────────────────────────────────────
+        /// <summary>
+        /// 연속 수집(실시간 수집) 시 CSV 파일을 저장할 루트 경로.
+        /// 서버 PC 공유 폴더나 네트워크 드라이브를 지정하면 Docker 볼륨과 직접 연동됩니다.
+        /// </summary>
+        public string ContinuousDataPath { get; set; } = @"C:\Data\PHM_Logs\Signals";
+
         // ── 싱글톤 ────────────────────────────────────────────────────────────
         public static ServerSettings Current { get; private set; } = new ServerSettings();
 

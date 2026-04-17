@@ -415,7 +415,9 @@ namespace PHM_Project_DockPanel.Services
 
             string labelTag  = string.IsNullOrEmpty(label) ? "unlabeled" : label;
             string today     = DateTime.Now.ToString("yyyyMMdd");
-            string baseRoot  = @"C:\Data\PHM_Logs\Signals";
+            string baseRoot  = ServerSettings.Current.ContinuousDataPath;
+            if (string.IsNullOrWhiteSpace(baseRoot))
+                baseRoot = @"C:\Data\PHM_Logs\Signals";
             string rootDir   = Path.Combine(baseRoot, today + "_Continuous", labelTag);
             string accelDir  = Path.Combine(rootDir, "Accel");
             string torqueDir = Path.Combine(rootDir, "Torque");

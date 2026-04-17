@@ -19,6 +19,8 @@ namespace PHM_Project_DockPanel.UI.DataCollection
         private TextBox _txtMlflowUrl;
         // Airflow
         private TextBox _txtAirflowUrl, _txtAirflowUser, _txtAirflowPassword, _txtAirflowDagId;
+        // 연속 수집 경로
+        private TextBox _txtContinuousDataPath;
         // 일괄 변경
         private TextBox _txtBulkIp;
 
@@ -33,7 +35,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
         private void BuildUI()
         {
             Text            = "서버 연결 설정";
-            Size            = new Size(500, 610);
+            Size            = new Size(500, 680);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition   = FormStartPosition.CenterParent;
             MaximizeBox     = false;
@@ -43,12 +45,13 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             {
                 Dock = DockStyle.Fill, ColumnCount = 1,
                 Padding = new Padding(12, 10, 12, 8),
-                RowCount = 5,
+                RowCount = 6,
             };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));   // 일괄 변경
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 138));  // InfluxDB
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // MLflow
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));  // Airflow
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));   // 연속 수집 경로
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 버튼
 
             // ── [0] IP 일괄 변경 ───────────────────────────────────────────────
@@ -91,7 +94,32 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             gbAirflow.Controls.Add(tlAirflow);
             root.Controls.Add(gbAirflow, 0, 3);
 
-            // ── [4] 버튼 ──────────────────────────────────────────────────────
+            // ── [4] 연속 수집 데이터 저장 경로 ───────────────────────────────
+            var gbDataPath = new GroupBox { Text = "연속 수집 데이터 저장 경로", Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 4) };
+            var tlDataPath = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
+            tlDataPath.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40));   // 레이블
+            tlDataPath.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 경로 텍스트박스
+            tlDataPath.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));   // 찾아보기 버튼
+            tlDataPath.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            tlDataPath.Controls.Add(Lbl("경로:"), 0, 0);
+            _txtContinuousDataPath = Txt();
+            tlDataPath.Controls.Add(_txtContinuousDataPath, 1, 0);
+            var btnBrowse = new Button { Text = "📁", Dock = DockStyle.Fill, FlatStyle = FlatStyle.Flat };
+            btnBrowse.Click += (s, e) =>
+            {
+                using (var dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "연속 수집 CSV 저장 폴더를 선택하세요.\n(서버 PC라면 네트워크 경로 또는 매핑된 드라이브를 입력하세요)";
+                    dlg.SelectedPath = _txtContinuousDataPath.Text.Trim();
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                        _txtContinuousDataPath.Text = dlg.SelectedPath;
+                }
+            };
+            tlDataPath.Controls.Add(btnBrowse, 2, 0);
+            gbDataPath.Controls.Add(tlDataPath);
+            root.Controls.Add(gbDataPath, 0, 4);
+
+            // ── [5] 버튼 ──────────────────────────────────────────────────────
             var btnRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 4, 0, 0) };
             var btnCancel = new Button { Text = "닫기",      Width = 80, Height = 28, DialogResult = DialogResult.Cancel };
             var btnSave   = new Button { Text = "💾 저장 & 적용", Width = 120, Height = 28,
@@ -99,7 +127,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             btnSave.Click   += BtnSave_Click;
             btnRow.Controls.Add(btnCancel);
             btnRow.Controls.Add(btnSave);
-            root.Controls.Add(btnRow, 0, 4);
+            root.Controls.Add(btnRow, 0, 5);
 
             Controls.Add(root);
             AcceptButton = btnSave;
@@ -119,6 +147,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             _txtAirflowUser.Text      = s.AirflowUser      ?? "";
             _txtAirflowPassword.Text  = s.AirflowPassword  ?? "";
             _txtAirflowDagId.Text     = s.AirflowDagId     ?? "phm_retrain";
+            _txtContinuousDataPath.Text = s.ContinuousDataPath ?? @"C:\Data\PHM_Logs\Signals";
         }
 
         // ── 저장 & 적용 ────────────────────────────────────────────────────────
@@ -134,6 +163,7 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             s.AirflowUser      = _txtAirflowUser.Text.Trim();
             s.AirflowPassword  = _txtAirflowPassword.Text.Trim();
             s.AirflowDagId     = _txtAirflowDagId.Text.Trim();
+            s.ContinuousDataPath = _txtContinuousDataPath.Text.Trim();
             s.Save(_settingsPath);
 
             AppEvents.RaiseServerSettingsChanged(s);
