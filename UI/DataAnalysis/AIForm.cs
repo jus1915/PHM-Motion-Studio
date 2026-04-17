@@ -133,6 +133,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private RadioButton      _dlRdoCls, _dlRdoAe;   // DL 모델 유형: 분류(CLS) / AE
         private Label            _dlClassListLbl;        // "결함 클래스:" ↔ "정상 클래스:"
 
+        // ── Airflow 패널 ─────────────────────────────────────────────────────
+        private TextBox _aflUrl, _aflDagId;
+        private Button  _aflBtnTrigger, _aflBtnStatus;
+        private Label   _aflStatusLbl;
+        private string  _aflLastRunId;
+
         public AIForm()
         {
             Text = "AI";
@@ -1224,9 +1230,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private TabPage BuildDlTab()
         {
             var tab = new TabPage("DL 학습");
-            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));  // 설정 패널
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));   // Airflow 패널
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 로그 영역
 
             // ── 상단: 설정 2열 ────────────────────────────────────────────
             var top2 = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(6, 4, 6, 0) };
@@ -1276,8 +1283,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             botLayout.Controls.Add(btnRow,   0, 1);
             botLayout.Controls.Add(_dlLog,   0, 2);
 
-            root.Controls.Add(top2,      0, 0);
-            root.Controls.Add(botLayout, 0, 1);
+            root.Controls.Add(top2,              0, 0);
+            root.Controls.Add(BuildAirflowPanel(), 0, 1);
+            root.Controls.Add(botLayout,          0, 2);
             tab.Controls.Add(root);
             return tab;
         }
@@ -1297,16 +1305,23 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tl.Controls.Add(Lbl("데이터 폴더:"), 0, row);
             _dlDataDir = new TextBox { Dock = DockStyle.Fill, Text = @"C:\Data\PHM_Logs\Signals" };
             var dirRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-            _dlDataDir.Width = 160;
+            _dlDataDir.Width = 150;
             dirRow.Controls.Add(_dlDataDir);
             var btnBrowseDir = new Button { Text = "…", Width = 26, Height = 22 };
             btnBrowseDir.Click += (s, e) => {
                 using (var fbd = new FolderBrowserDialog { SelectedPath = _dlDataDir.Text })
                     if (fbd.ShowDialog() == DialogResult.OK) { _dlDataDir.Text = fbd.SelectedPath; ScanDataFolder(); }
             };
-            var btnScan = new Button { Text = "🔍", Width = 30, Height = 22, Font = new Font(Font.FontFamily, 8.5f) };
+            var btnScan = new Button { Text = "🔍", Width = 28, Height = 22, Font = new Font(Font.FontFamily, 8.5f) };
             btnScan.Click += (s, e) => ScanDataFolder();
-            dirRow.Controls.AddRange(new Control[] { btnBrowseDir, btnScan });
+            // 연속 수집 폴더 바로가기
+            var btnContDir = new Button { Text = "📁수집", Width = 52, Height = 22, Font = new Font(Font.FontFamily, 8f),
+                BackColor = Color.FromArgb(0, 100, 160), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            btnContDir.Click += (s, e) => {
+                _dlDataDir.Text = @"C:\Data\PHM_Logs\Signals";
+                if (System.IO.Directory.Exists(_dlDataDir.Text)) ScanDataFolder();
+            };
+            dirRow.Controls.AddRange(new Control[] { btnBrowseDir, btnScan, btnContDir });
             tl.Controls.Add(dirRow, 1, row++);
 
             // 신호 타입 (Accel / Torque)
@@ -1328,13 +1343,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _dlChZ = new CheckBox { Text = "z", Checked = true, AutoSize = true };
             accelFlow.Controls.AddRange(new Control[] { _dlChX, _dlChY, _dlChZ });
 
-            // Torque 채널 패널
+            // Torque 채널 패널 (토크 CSV는 Trq(%) 만 저장)
             var trqFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Name = "trqFlow", Visible = false };
-            var trqCols = new[] { "Pos(mm)", "Vel(mm/s)", "Trq(%)", "CmdPos(mm)", "CmdVel(mm/s)" };
+            var trqCols = new[] { "Trq(%)" };
             _dlChTrq = new CheckBox[trqCols.Length];
             for (int i = 0; i < trqCols.Length; i++)
             {
-                _dlChTrq[i] = new CheckBox { Text = trqCols[i], Checked = (i == 2), AutoSize = true, Margin = new Padding(0,2,6,0) };
+                _dlChTrq[i] = new CheckBox { Text = trqCols[i], Checked = true, AutoSize = true, Margin = new Padding(0,2,6,0) };
                 trqFlow.Controls.Add(_dlChTrq[i]);
             }
 
@@ -1477,7 +1492,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 _dlRdoTorque.Checked = true;
                 if (_dlChTrq != null)
                 {
-                    var trqSuffixes = new[] { "Pos(mm)", "Vel(mm/s)", "Trq(%)", "CmdPos(mm)", "CmdVel(mm/s)" };
+                    // 토크 CSV 헤더: time_s, Ax{n}_Trq(%) — "Trq(%)" 접미사 매칭
+                    var trqSuffixes = new[] { "Trq(%)" };
                     for (int i = 0; i < _dlChTrq.Length && i < trqSuffixes.Length; i++)
                     {
                         string sfx = trqSuffixes[i];
@@ -1958,6 +1974,189 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _dlLog.SelectionColor  = color ?? Color.LightGreen;
             _dlLog.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + text + "\n");
             _dlLog.ScrollToCaret();
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        //  Airflow 연동 패널
+        // ════════════════════════════════════════════════════════════════════
+
+        private GroupBox BuildAirflowPanel()
+        {
+            var grp = new GroupBox
+            {
+                Text = "Airflow 주기 재학습",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(8, 2, 8, 2),
+                ForeColor = Color.FromArgb(0, 140, 220),
+            };
+
+            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 8, RowCount = 1 };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));   // "URL:"
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));    // URL textbox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));   // "DAG:"
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));  // DAG ID textbox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // Trigger button
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));   // Status button
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));    // Status label
+
+            var lblUrl = new Label { Text = "URL:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText };
+            _aflUrl = new TextBox { Dock = DockStyle.Fill,
+                Text = Services.ServerSettings.Current.AirflowUrl ?? "http://localhost:8080" };
+
+            var lblDag = new Label { Text = "DAG:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText };
+            _aflDagId = new TextBox { Dock = DockStyle.Fill,
+                Text = Services.ServerSettings.Current.AirflowDagId ?? "phm_retrain" };
+
+            _aflBtnTrigger = new Button
+            {
+                Text = "▶ 지금 트리거", Height = 24,
+                BackColor = Color.FromArgb(0, 120, 60), ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
+                Dock = DockStyle.Fill, Margin = new Padding(2, 4, 2, 4),
+            };
+            _aflBtnTrigger.Click += async (s, e) => await TriggerAirflowAsync();
+
+            _aflBtnStatus = new Button
+            {
+                Text = "🔄 상태 조회", Height = 24,
+                Dock = DockStyle.Fill, Margin = new Padding(2, 4, 2, 4),
+            };
+            _aflBtnStatus.Click += async (s, e) => await RefreshAirflowStatusAsync();
+
+            _aflStatusLbl = new Label
+            {
+                Text = "—", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft,
+                ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8.5f),
+            };
+
+            tl.Controls.Add(lblUrl,          0, 0);
+            tl.Controls.Add(_aflUrl,          1, 0);
+            tl.Controls.Add(lblDag,          2, 0);
+            tl.Controls.Add(_aflDagId,        3, 0);
+            tl.Controls.Add(_aflBtnTrigger,   4, 0);
+            tl.Controls.Add(_aflBtnStatus,    5, 0);
+            tl.Controls.Add(_aflStatusLbl,    6, 0);
+
+            grp.Controls.Add(tl);
+            return grp;
+        }
+
+        /// <summary>
+        /// 현재 DL 탭 설정을 params로 패키징해 Airflow DAG를 즉시 트리거합니다.
+        /// </summary>
+        private async System.Threading.Tasks.Task TriggerAirflowAsync()
+        {
+            string dataDir    = _dlDataDir?.Text?.Trim() ?? "";
+            string outputPath = _dlOutputPath?.Text?.Trim() ?? "";
+            string dagId      = _aflDagId?.Text?.Trim() ?? "phm_retrain";
+            string airflowUrl = _aflUrl?.Text?.Trim()
+                                ?? Services.ServerSettings.Current.AirflowUrl;
+
+            if (!System.IO.Directory.Exists(dataDir))
+            {
+                MessageBox.Show("데이터 폴더가 없습니다:\n" + dataDir, "오류",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            var paramsObj = BuildDlParams(dataDir, outputPath);
+            if (paramsObj == null)
+            {
+                MessageBox.Show("학습 설정이 올바르지 않습니다. 채널/클래스/학습률을 확인하세요.",
+                    "설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            _aflBtnTrigger.Enabled = false;
+            _aflStatusLbl.ForeColor = Color.DodgerBlue;
+            _aflStatusLbl.Text = "트리거 중…";
+
+            var s2 = Services.ServerSettings.Current;
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                var trigResult = await client.TriggerDagAsync(dagId, paramsObj);
+                if (trigResult.Ok)
+                {
+                    _aflLastRunId           = trigResult.RunId;
+                    _aflStatusLbl.Text      = $"queued — {trigResult.RunId}";
+                    _aflStatusLbl.ForeColor = Color.LightGreen;
+                    AppendDlLog($"[Airflow] DAG 트리거 성공: {trigResult.RunId}", Color.LightGreen);
+                }
+                else
+                {
+                    _aflStatusLbl.Text      = "트리거 실패: " + trigResult.Error;
+                    _aflStatusLbl.ForeColor = Color.OrangeRed;
+                    AppendDlLog($"[Airflow] 트리거 실패: {trigResult.Error}", Color.OrangeRed);
+                }
+            }
+
+            _aflBtnTrigger.Enabled = true;
+        }
+
+        /// <summary>마지막으로 트리거된 DAG 실행 상태를 조회합니다.</summary>
+        private async System.Threading.Tasks.Task RefreshAirflowStatusAsync()
+        {
+            string dagId      = _aflDagId?.Text?.Trim() ?? "phm_retrain";
+            string airflowUrl = _aflUrl?.Text?.Trim()
+                                ?? Services.ServerSettings.Current.AirflowUrl;
+
+            _aflBtnStatus.Enabled   = false;
+            _aflStatusLbl.ForeColor = Color.DodgerBlue;
+            _aflStatusLbl.Text      = "조회 중…";
+
+            var s2 = Services.ServerSettings.Current;
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                if (!string.IsNullOrEmpty(_aflLastRunId))
+                {
+                    var stRes = await client.GetDagRunStatusAsync(dagId, _aflLastRunId);
+                    if (stRes.State != null)
+                    {
+                        _aflStatusLbl.Text      = $"{stRes.State} — {_aflLastRunId}";
+                        _aflStatusLbl.ForeColor = StateColor(stRes.State);
+                    }
+                    else
+                    {
+                        _aflStatusLbl.Text      = "오류: " + stRes.Error;
+                        _aflStatusLbl.ForeColor = Color.OrangeRed;
+                    }
+                }
+                else
+                {
+                    // run_id 없으면 최신 실행 조회
+                    var latRes = await client.GetLatestDagRunAsync(dagId);
+                    if (latRes.State != null)
+                    {
+                        _aflLastRunId           = latRes.RunId;
+                        _aflStatusLbl.Text      = string.IsNullOrEmpty(latRes.RunId)
+                            ? "실행 이력 없음"
+                            : $"{latRes.State} — {latRes.RunId}";
+                        _aflStatusLbl.ForeColor = StateColor(latRes.State ?? "none");
+                    }
+                    else
+                    {
+                        _aflStatusLbl.Text      = "오류: " + latRes.Error;
+                        _aflStatusLbl.ForeColor = Color.OrangeRed;
+                    }
+                }
+            }
+
+            _aflBtnStatus.Enabled = true;
+        }
+
+        private static Color StateColor(string state)
+        {
+            switch (state?.ToLowerInvariant())
+            {
+                case "success":  return Color.LightGreen;
+                case "running":  return Color.DodgerBlue;
+                case "queued":   return Color.Cyan;
+                case "failed":
+                case "upstream_failed": return Color.OrangeRed;
+                default:         return Color.Gray;
+            }
         }
     }
 }

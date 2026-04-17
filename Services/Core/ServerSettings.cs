@@ -21,7 +21,10 @@ namespace PHM_Project_DockPanel.Services
         public string MlflowUrl    { get; set; } = "http://localhost:5000";
 
         // ── Airflow ───────────────────────────────────────────────────────────
-        public string AirflowUrl   { get; set; } = "http://localhost:8080";
+        public string AirflowUrl      { get; set; } = "http://localhost:8080";
+        public string AirflowUser     { get; set; } = "admin";
+        public string AirflowPassword { get; set; } = "admin";
+        public string AirflowDagId    { get; set; } = "phm_retrain";
 
         // ── 싱글톤 ────────────────────────────────────────────────────────────
         public static ServerSettings Current { get; private set; } = new ServerSettings();
