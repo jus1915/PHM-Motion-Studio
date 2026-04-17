@@ -169,15 +169,18 @@ namespace PHM_Project_DockPanel.Services.WMX
                         first    = false;
 
                         // ── 고정 인터벌 대기 ──────────────────────────────
-                        // timeBeginPeriod(1) 덕분에 Sleep(1)이 ~1ms 정밀도.
-                        // 남은 시간이 1ms 이상이면 Sleep(1), 이하면 SpinWait으로 정밀 대기.
+                        // ① 남은 시간 > 1ms  → Sleep(1) 으로 CPU 양보
+                        //    timeBeginPeriod(1) 보장으로 ~1ms 후 복귀.
+                        //    오버슈트 시 remaining < 0 → 즉시 탈출 (tick 누적이 다음 주기 보정).
+                        // ② 남은 시간 ≤ 1ms  → 순수 tight spin (SpinWait 없음)
+                        //    Stopwatch 틱 단위 정밀 대기로 nextTick 정확히 통과.
+                        long ticksPer1ms = Stopwatch.Frequency / 1000;
                         long remaining;
                         while ((remaining = nextTick - sw.ElapsedTicks) > 0)
                         {
-                            if (remaining * 1000L / Stopwatch.Frequency >= 2)
+                            if (remaining > ticksPer1ms)
                                 Thread.Sleep(1);
-                            else
-                                Thread.SpinWait(20);
+                            // else: tight spin — 아무것도 하지 않고 조건 재확인
                         }
                         nextTick += ticksPerInterval;
                     }
