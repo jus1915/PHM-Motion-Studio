@@ -35,6 +35,9 @@ namespace PHM_Project_DockPanel.Services.Core
         // 추론 주기 (ms)
         private const int IntervalMs = 2000;
 
+        // 동일 오류 반복 로그 억제
+        private string _lastErrorMsg = null;
+
         public bool IsRunning => _loopTask != null && !_loopTask.IsCompleted;
 
         public ContinuousInferenceService(
@@ -116,6 +119,20 @@ namespace PHM_Project_DockPanel.Services.Core
 
                 var result = await _client.PredictAsync(
                     window, WindowSize, nCh, sensorType, ct).ConfigureAwait(false);
+
+                if (result.IsError)
+                {
+                    // 같은 오류 메시지는 한 번만 로그 출력 (2초 반복 억제)
+                    if (result.Error != _lastErrorMsg)
+                    {
+                        _lastErrorMsg = result.Error;
+                        AppEvents.RaiseLog($"[추론 서비스] {sensorType} 오류: {result.Error}");
+                    }
+                }
+                else
+                {
+                    _lastErrorMsg = null; // 정상 응답이면 리셋
+                }
 
                 AppEvents.RaiseInferenceResult(sensorType, result);
             }
