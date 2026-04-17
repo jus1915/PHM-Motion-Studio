@@ -273,7 +273,6 @@ namespace PHM_Project_DockPanel.Services
                         AppEvents.RaisePassiveMonitorSuspend();
                         await Task.Delay(300); // DAQmx 리소스 해제 대기
 
-                        _accelLogger.Label = AppState.CurrentLabel;
                         try { startedAccelCsvRun = _accelLogger.Start(active.ToArray(), accelDir, baseName, 0); }
                         catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (DAQ CSV) {ex.Message}"); }
                     }
@@ -427,7 +426,6 @@ namespace PHM_Project_DockPanel.Services
             if (logAccel && _accelLogger != null)
             {
                 Directory.CreateDirectory(accelDir);
-                _accelLogger.Label = (labelTag == "unlabeled") ? "" : labelTag;
                 try
                 {
                     bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);

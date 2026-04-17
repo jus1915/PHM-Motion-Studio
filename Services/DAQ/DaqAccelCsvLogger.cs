@@ -170,8 +170,6 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public string[] CsvPathByModule { get { return _csvPathByMod; } }
         public string[] LastCsvPaths { get { return _lastCsvPathByMod; } }
 
-        /// <summary>CSV의 Label 컬럼에 기록할 레이블. Start() 전에 설정하세요.</summary>
-        public string Label { get; set; } = "";
 
         public bool Start(int[] axisIndices, string filePath, string filename, uint durationMs = 5000)
         {
@@ -242,7 +240,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     // UTF-8, 4KB 내부 버퍼
                     _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = false };
                     // 헤더
-                    _swByMod[m].WriteLine("time_s,x,y,z,Label");
+                    _swByMod[m].WriteLine("time_s,x,y,z");
                 }
 
                 _reader = new AnalogMultiChannelReader(_aiTask.Stream)
@@ -379,7 +377,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         gx -= off.X; gy -= off.Y; gz -= off.Z;
 
                         if (_swByMod[m] != null)
-                            _swByMod[m].WriteLine(t.ToString("F6") + "," + gx.ToString("G6") + "," + gy.ToString("G6") + "," + gz.ToString("G6") + "," + Label);
+                            _swByMod[m].WriteLine(t.ToString("F6") + "," + gx.ToString("G6") + "," + gy.ToString("G6") + "," + gz.ToString("G6"));
                     }
                 }
 
