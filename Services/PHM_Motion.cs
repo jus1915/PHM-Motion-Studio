@@ -422,6 +422,10 @@ namespace PHM_Project_DockPanel.Services
 
             bool anyStarted = false;
 
+            // ── InfluxDB label 태그 설정 (연속 수집 기간 동안 유지) ──────────
+            if (_accelInfluxPublisher != null)
+                _accelInfluxPublisher.Label = labelTag;
+
             // ── DAQ 가속도 ────────────────────────────────────────────────
             if (logAccel && _accelLogger != null)
             {
@@ -483,6 +487,10 @@ namespace PHM_Project_DockPanel.Services
 
             try { if (_accelLogger?.IsRunning  == true) _accelLogger.Stop();  } catch { }
             try { if (_ajinLogger?.IsLogging    == true) _ajinLogger.Stop();   } catch { }
+
+            // ── InfluxDB label 태그 초기화 ───────────────────────────────
+            if (_accelInfluxPublisher != null)
+                _accelInfluxPublisher.Label = "";
 
             _continuousLoggingActive = false;
             AppEvents.RaiseLog("[연속 수집] 종료");
