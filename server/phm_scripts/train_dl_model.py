@@ -278,7 +278,7 @@ def _read_signal_csv(
 
         for row in reader:
             # Idle 구간 스킵
-            if op_col and row.get(op_col, "").strip().lower() == "idle":
+            if op_col and (row.get(op_col) or "").strip().lower() == "idle":
                 continue
             try:
                 vals = [float(row[c]) for c in actual_channels]
