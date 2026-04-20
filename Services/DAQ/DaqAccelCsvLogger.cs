@@ -359,6 +359,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 int modulesInBuffer = Math.Min(_modules.Length, ch / 3);
 
                 double rate = (_rate > 0) ? _rate : AccelRate;
+                string opNow = GetOperation?.Invoke() ?? "Pos";
 
                 for (int i = 0; i < n; i++)
                 {
