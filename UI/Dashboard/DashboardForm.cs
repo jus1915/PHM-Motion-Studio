@@ -20,6 +20,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 // PHM 프로젝트 내부 기능
 using PHM_Project_DockPanel.Services.Core;
 using PHM_Project_DockPanel.Services; // SignalFeatures
+using PHM_Project_DockPanel.Services.DAQ;
 
 namespace PHM_Project_DockPanel.UI.Dashboard
 {
@@ -85,6 +86,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public bool IsAutoencoder;          // AE 여부
             public string ReconOutputName = "recon"; // (T,C) 또는 (1,T,C)
             public double Threshold = 1.0;      // AE 스코어 임계값 (없으면 DashboardForm.DefaultThreshold)
+            public double   RmsMean    = -1;    // AE 정상 데이터 RMS 평균 (-1=없음)
+            public double   RmsThr     = -1;    // AE RMS 임계값 (mean+2σ)
+            public int      WindowSize = 256;   // AE 학습 윈도우 크기 — 추론 시 슬라이딩 윈도우에 사용
             public InferenceSession Session;
         }
 
@@ -307,16 +311,40 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 기존: AE/일반 통합
         private readonly Dictionary<int, OnnxAxisModel> _axisOnnx = new Dictionary<int, OnnxAxisModel>();
 
-            // 추가: 축별 "분류" ONNX
+        // 추가: 축별 "분류" ONNX
         private readonly Dictionary<int, OnnxAxisModel> _axisOnnxCls = new Dictionary<int, OnnxAxisModel>();
+
+        // sklearn 피처 기반 ONNX (AIForm에서 학습·저장한 모델)
+        private class OnnxSklModel
+        {
+            public int AxisId;
+            public string ModelPath;
+            public string Session;            // "AD" or "FD"
+            public string ModelType;          // "knn", "isoforest", "ocsvm", "svm", "rf", "gbm", "mlp"
+            public string[] Features;         // 피처 키 목록 (추출 순서)
+            public string YColumn;            // CSV Y 컬럼명
+            public double Threshold;          // C# kNN 임계값
+            public double ScoreThreshold;     // decision_function 기반 임계값 (0이면 미산출 → label만 사용)
+            public string[] ClassNames;       // FD 클래스명
+            public InferenceSession OnnxSession;
+            // knn AD 전용: C# kNN 거리 스코어링 (AI Form 평가와 동일한 값)
+            public double[][] TrainVectors;   // 학습 벡터 (raw, 표준화 전)
+            public int K = 5;
+            public bool Standardize;
+            public double[] Mean;
+            public double[] Std;
+        }
+        private readonly Dictionary<int, OnnxSklModel> _axisSklModels = new Dictionary<int, OnnxSklModel>();
         #endregion
 
         // UI
         private KpiCard cardDanger, cardWarning, cardCycles;
-        private Chart chartLine, chartDonut;
+        private Chart chartLine;
         private DataGridView grid;
-        private Button btnLoadModelSingle, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnStart, btnStop;
+        private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnQuickFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
+        private static readonly string MruFile = Path.Combine(DefaultLogsPath, "recent_watch_folders.txt");
+        private const int MruMaxCount = 5;
         private DataGridView gridModelPaths;
         private TableLayoutPanel sampleGrid;                       // rightBottom 안에서 그리드 역할
         private readonly Dictionary<int, Chart> sampleCharts =     // 축별 Chart 캐시
@@ -327,10 +355,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private string _watchFolder;
         private FileSystemWatcher _watcher;
         private readonly Dictionary<int, AxisModel> _axisModels = new Dictionary<int, AxisModel>();
+
+        // 전역 모델 — 축별 모델이 없는 축에 폴백으로 적용
+        private PersistedKnnModel _globalKnnModel;
+        private string _globalKnnModelPath;
+        private OnnxAxisModel _globalOnnxAe;
+
         private readonly HashSet<string> _processing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, CancellationTokenSource> _debouncers = new Dictionary<string, CancellationTokenSource>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, long> _lastProcessedLen = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private readonly object _sync = new object();
+
+        // DB 모니터링 상태
+        private bool _isDbMode = false;
+        private InfluxDbDataSource _influxSource;
+        private CancellationTokenSource _influxPollCts;
 
         // 통계
         private int cntDanger, cntWarning, cycles;
@@ -348,6 +387,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private const bool GAUGE_SORT_DESC = false;   // true면 확률 내림차순으로 정렬해 보여줌
         private Button btnTestProbs;              // ← 추가
         private readonly Random _rng = new Random(); // ← 추가
+
+        // ── 서버 실시간 추론 UI ──────────────────────────────────────────────────
+        private Label _lblLiveAccelStatus, _lblLiveTorqueStatus;
+        private Label _lblLiveAccelScore,  _lblLiveTorqueScore;
+        private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
+            = new ConcurrentQueue<Tuple<string, DateTime, double>>();
+
+        // DB 모드 UI 컨트롤
+        private RadioButton rbtnCsvMode, rbtnDbMode;
+        private Panel pnlCsvSource, pnlDbSource;
+        private ComboBox cmbDbDevice, cmbDbLabel;
+        private DateTimePicker dtpDbFrom, dtpDbTo;
+        private Button btnDbRefresh, btnDbFullRange;
 
         // Preprocessing과 동일한 시간 컬럼 후보
         private static readonly string[] TimeColumnCandidates = { "time_s", "cycle" };
@@ -506,6 +558,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         public DashboardForm()
         {
             this.Text = "실시간 대시보드";
+            this.MinimumSize = new Size(1000, 600);
             BuildUI();
             _notifier = new NotifyIcon
             {
@@ -513,16 +566,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Icon = SystemIcons.Warning, // 필요시 커스텀 아이콘 가능
                 Text = "PHM 알림"
             };
+
+            // 서버 실시간 추론 결과 구독
+            AppEvents.InferenceResultReceived += OnLiveInferenceResult;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            AppEvents.InferenceResultReceived -= OnLiveInferenceResult;
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
             base.OnFormClosing(e);
         }
 
-        private static void DownsampleMinMax(IReadOnlyList<double> xs, IReadOnlyList<double> ys, int maxPoints,
+        private static void DownsampleMinMax(IList<double> xs, IList<double> ys, int maxPoints,
             out double[] dx, out double[] dy)
         {
             int n = Math.Min(xs.Count, ys.Count);
@@ -588,99 +645,218 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 상단
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 하단 
 
-            // ====== Left Sidebar (Toolbar를 왼쪽으로) ======
-            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 200 }; // 고정 폭
+            // ====== Left Sidebar ======
+            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 250 };
             var left = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents = false,
                 AutoScroll = false,
-                Padding = new Padding(4, 4, 4, 30), // ← Bottom 12px (오른쪽과 통일)
+                Padding = new Padding(4, 4, 4, 30),
                 Margin = Padding.Empty
             };
             left.SuspendLayout();
-            int ctrlWidth = leftWrap.Width - 8;      // ← 여유 최소화
-            int btnH = 28;                           // ← 버튼 높이 고정(컴팩트)
+            // left.Padding.Horizontal(=8) + 컨트롤 Margin.Horizontal(=4) 를 빼서 수평 스크롤 없음
+            int ctrlWidth = leftWrap.Width - 12;
+            int btnH = 28;
 
-            btnLoadModelSingle = new Button { Text = "축별 모델 추가", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnLoadModelSingle.Click += (s, e) => LoadAxisModelSingle();
-
-            btnLoadModelFolder = new Button { Text = "모델 폴더 일괄", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnLoadModelFolder.Click += (s, e) => LoadAxisModelsFromFolder();
-
-            btnLoadOnnxModelSingle = new Button { Text = "ONNX 모델 추가", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
-
-            btnSelectFolder = new Button { Text = "CSV 폴더", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnSelectFolder.Click += (s, e) => SelectFolder();
-
-            btnStart = new Button { Text = "시작", Width = ctrlWidth, Height = btnH, Margin = new Padding(2) };
-            btnStart.Click += (s, e) => StartWatch();
-
-            btnStop = new Button { Text = "중지", Width = ctrlWidth, Height = btnH, Margin = new Padding(2), Enabled = false };
-            btnStop.Click += (s, e) => StopWatch();
-
-            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Margin = new Padding(2, 6, 2, 0) };
-            lblStatus = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth, 0), Margin = new Padding(2, 4, 2, 0) };
-
-            var gbAging = new GroupBox
+            // ── [A] 모델 로드 GroupBox ──────────────────────────────────────────
+            var gbModels = new GroupBox
             {
-                Text = "설비 노후도 분포",
-                AutoSize = false,           // ★
-                MinimumSize = new Size(120, 100),
-                Margin = new Padding(2, 6, 2, 6),
-                Padding = new Padding(6)
+                Text = "모델 로드", Width = ctrlWidth,
+                Padding = new Padding(6, 4, 6, 6),
+                Margin = new Padding(2, 2, 2, 4),
+                AutoSize = true
             };
-            gbAging.Width = ctrlWidth;
+            var tlModels = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3,
+                AutoSize = true, Margin = Padding.Empty
+            };
+            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            for (int i = 0; i < 2; i++) tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
+            tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
 
-            chartDonut = new Chart { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            btnLoadSklModel        = new Button { Text = "SKL ONNX",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 235, 255) };
+            btnLoadOnnxModelSingle = new Button { Text = "DL ONNX",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
+            btnLoadModelFolder     = new Button { Text = "폴더 일괄",  Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
+            var btnGlobalKnn       = new Button { Text = "전역 KNN",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
+            var btnGlobalAe        = new Button { Text = "전역 AE",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
 
-            var ca2 = new ChartArea("d");
-            chartDonut.ChartAreas.Add(ca2);
-            var donut = new Series("Aging") { ChartType = SeriesChartType.Doughnut };
-            donut.Points.AddXY("양호", 75);
-            donut.Points.AddXY("주의", 15);
-            donut.Points.AddXY("위험", 10);
-            chartDonut.Series.Add(donut);
-            gbAging.Controls.Add(chartDonut);
+            btnLoadSklModel.Click        += (s, e) => LoadSklOnnxModel();
+            btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
+            btnLoadModelFolder.Click     += (s, e) => LoadAxisModelsFromFolder();
+            btnGlobalKnn.Click           += (s, e) => LoadGlobalKnnModel();
+            btnGlobalAe.Click            += (s, e) => LoadGlobalOnnxAeModel();
 
-            left.Controls.AddRange(new Control[] {
-                btnLoadModelSingle, btnLoadModelFolder, btnLoadOnnxModelSingle, btnSelectFolder, btnStart, btnStop, lblFolder, lblStatus, gbAging
+            tlModels.Controls.Add(btnLoadSklModel,        0, 0);
+            tlModels.Controls.Add(btnLoadOnnxModelSingle, 1, 0);
+            tlModels.Controls.Add(btnLoadModelFolder,     0, 1);
+            tlModels.Controls.Add(btnGlobalKnn,           1, 1);
+            tlModels.SetColumnSpan(btnGlobalAe, 2);
+            tlModels.Controls.Add(btnGlobalAe,            0, 2);
+            gbModels.Controls.Add(tlModels);
+
+            // ── [B] 데이터 소스 GroupBox ────────────────────────────────────────
+            var gbSource = new GroupBox
+            {
+                Text = "데이터 소스", Width = ctrlWidth,
+                Padding = new Padding(6, 4, 6, 6),
+                Margin = new Padding(2, 4, 2, 4),
+                AutoSize = true
+            };
+            var tlSource = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1,
+                AutoSize = true, Margin = Padding.Empty
+            };
+            tlSource.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+            // 모드 선택 행
+            int rbW = ctrlWidth / 2 - 2;
+            rbtnCsvMode = new RadioButton { Text = "CSV 폴더 감시",  Checked = true,  Width = rbW, Height = 22, Left = 0,        Top = 2, AutoSize = false };
+            rbtnDbMode  = new RadioButton { Text = "DB 모니터링",    Checked = false, Width = rbW, Height = 22, Left = rbW + 4,  Top = 2, AutoSize = false };
+            var pnlMode = new Panel { Height = 26, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
+            pnlMode.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode });
+            rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourceMode(false); };
+            rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourceMode(true);  };
+
+            // CSV 소스
+            pnlCsvSource = new Panel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
+            int folderBtnW = ctrlWidth - 38;
+            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = folderBtnW, Height = btnH, Left = 0, Top = 0 };
+            btnSelectFolder.Click += (s, e) => SelectFolder();
+            btnQuickFolder = new Button { Text = "▾", Width = 24, Height = btnH, Left = folderBtnW + 2, Top = 0 };
+            btnQuickFolder.Click += (s, e) => ShowFolderQuickMenu();
+            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth - 12, 0), Top = btnH + 4, Left = 0, ForeColor = Color.Gray };
+            pnlCsvSource.Height = btnH + 24;
+            pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, btnQuickFolder, lblFolder });
+
+            // DB 소스
+            int lblW = 52, dbH = 24, dbGap = 4, dbY = 0;
+            pnlDbSource = new Panel { Width = ctrlWidth - 12, Margin = Padding.Empty, Visible = false };
+
+            var lblDevice = new Label  { Text = "장치:",  AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbDevice   = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
+            btnDbRefresh  = new Button { Text = "↺", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
+            btnDbRefresh.Click += (s, e) => RefreshDbDevices();
+            dbY += dbH + dbGap;
+
+            var lblLabelDb = new Label { Text = "레이블:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
+            dbY += dbH + dbGap;
+
+            var lblFrom = new Label { Text = "시작:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbFrom = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now.AddHours(-1) };
+            btnDbFullRange = new Button { Text = "↔", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
+            btnDbFullRange.Click += async (s, e) => await FillDbFullRangeAsync();
+            dbY += dbH + dbGap;
+
+            var lblTo = new Label { Text = "종료:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbTo = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now };
+            dbY += dbH + dbGap;
+
+            pnlDbSource.Height = dbY + 2;
+            pnlDbSource.Controls.AddRange(new Control[] {
+                lblDevice, cmbDbDevice, btnDbRefresh,
+                lblLabelDb, cmbDbLabel,
+                lblFrom, dtpDbFrom, btnDbFullRange,
+                lblTo, dtpDbTo,
             });
-            left.ResumeLayout(false);
-            // === 축별 모델 경로 표 ===
+
+            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 모드 선택
+            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 소스 패널
+            tlSource.Controls.Add(pnlMode,      0, 0);
+            tlSource.Controls.Add(pnlCsvSource, 0, 1);
+            tlSource.Controls.Add(pnlDbSource,  0, 1);
+            gbSource.Controls.Add(tlSource);
+
+            // ── [C] 시작/중지 ───────────────────────────────────────────────────
+            btnStart = new Button
+            {
+                Text = "▶  진단 시작", Width = ctrlWidth, Height = btnH + 2,
+                Margin = new Padding(2, 6, 2, 2),
+                BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
+                Font = new Font(this.Font, FontStyle.Bold)
+            };
+            btnStop = new Button
+            {
+                Text = "■  중지", Width = ctrlWidth, Height = btnH,
+                Margin = new Padding(2, 0, 2, 2), Enabled = false,
+                BackColor = Color.FromArgb(196, 43, 28), ForeColor = Color.White, FlatStyle = FlatStyle.Flat
+            };
+            btnStart.Click += (s, e) => StartWatch();
+            btnStop.Click  += (s, e) => StopWatch();
+
+            lblStatus = new Label
+            {
+                AutoSize = true, MaximumSize = new Size(ctrlWidth, 0),
+                Margin = new Padding(2, 2, 2, 6), ForeColor = Color.Gray
+            };
+
+            // ── [D] 축별 모델 경로 ─────────────────────────────────────────────
             var gbModelPaths = new GroupBox
             {
-                Text = "축별 모델 경로",
-                Width = ctrlWidth,
-                Height = 160,
-                Padding = new Padding(6),
-                Margin = new Padding(2, 6, 2, 50) // ← Bottom 12px
+                Text = "로드된 모델", Width = ctrlWidth,
+                Padding = new Padding(6), Margin = new Padding(2, 4, 2, 4),
+                MinimumSize = new Size(120, 80)
             };
-            gbModelPaths.Width = ctrlWidth;
             gridModelPaths = new DataGridView
             {
-                Dock = DockStyle.Fill,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
+                Dock = DockStyle.Fill, ReadOnly = true,
+                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                RowHeadersVisible = false
+                RowHeadersVisible = false, BorderStyle = BorderStyle.None,
+                ColumnHeadersHeight = 22, RowTemplate = { Height = 20 }
             };
-            var colAxis = new DataGridViewTextBoxColumn { Name = "Axis", HeaderText = "Axis", FillWeight = 25, ReadOnly = true };
-            var colPath = new DataGridViewTextBoxColumn { Name = "Path", HeaderText = "Model File", FillWeight = 75, ReadOnly = true };
+            var colAxis = new DataGridViewTextBoxColumn { Name = "Axis", HeaderText = "축", FillWeight = 20, ReadOnly = true };
+            var colPath = new DataGridViewTextBoxColumn { Name = "Path", HeaderText = "모델 파일", FillWeight = 80, ReadOnly = true };
             gridModelPaths.Columns.AddRange(new DataGridViewColumn[] { colAxis, colPath });
-
             gbModelPaths.Controls.Add(gridModelPaths);
-            left.Controls.Add(gbModelPaths);
 
-            // 사이드바 리사이즈 시 그룹박스 폭을 자동 맞춤
-            leftWrap.Resize += (s, e2) =>
+            // ── [E] 서버 실시간 추론 현황 ────────────────────────────────────────
+            var gbLive = new GroupBox
             {
-                gbModelPaths.Width = leftWrap.ClientSize.Width - 16; // 좌우 패딩 감안
-                gbAging.Width = leftWrap.ClientSize.Width - 16;
+                Text = "서버 실시간 추론", Width = ctrlWidth,
+                Padding = new Padding(6, 4, 6, 6),
+                Margin = new Padding(2, 4, 2, 4),
+                AutoSize = true
             };
+            var tlLive = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2,
+                AutoSize = true, Margin = Padding.Empty
+            };
+            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 50));   // 센서명
+            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));   // 상태
+            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 점수/클래스
+            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+
+            var lblAccelTag  = new Label { Text = "가속도",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
+            var lblTorqueTag = new Label { Text = "토크",    Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
+            _lblLiveAccelStatus  = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
+            _lblLiveTorqueStatus = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
+            _lblLiveAccelScore   = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+            _lblLiveTorqueScore  = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+
+            tlLive.Controls.Add(lblAccelTag,           0, 0);
+            tlLive.Controls.Add(_lblLiveAccelStatus,   1, 0);
+            tlLive.Controls.Add(_lblLiveAccelScore,    2, 0);
+            tlLive.Controls.Add(lblTorqueTag,          0, 1);
+            tlLive.Controls.Add(_lblLiveTorqueStatus,  1, 1);
+            tlLive.Controls.Add(_lblLiveTorqueScore,   2, 1);
+            gbLive.Controls.Add(tlLive);
+
+            left.Controls.AddRange(new Control[] {
+                gbModels, gbSource,
+                btnStart, btnStop, lblStatus,
+                gbLive,
+                gbModelPaths
+            });
+            left.ResumeLayout(false);
 
             // 초기 표시
             RefreshModelPathList();
@@ -733,9 +909,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
 
-            cardDanger = new KpiCard { Title = "위험 건수", ValueText = "0 건", DeltaText = "—", Footnote = "지난 주 대비 —", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(130, 180) };
-            cardWarning = new KpiCard { Title = "경고 건수", ValueText = "0 건", DeltaText = "—", Footnote = "지난 주 대비 —", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(130, 180) };
-            cardCycles = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "지난 주 대비 —", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(130, 180) };
+            cardDanger  = new KpiCard { Title = "위험 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
+            cardWarning = new KpiCard { Title = "경고 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
+            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
             kpiPanel.Controls.Add(cardDanger, 0, 0);
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles, 2, 0);
@@ -1009,42 +1185,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 if (leftWrap == null || left == null) return;
 
-                // 1) 버튼/라벨 고정 높이 합
+                // 고정 높이 컨트롤 합산
                 int fixedH = 0;
-                Control[] fixedControls = new Control[] {
-        btnLoadModelSingle, btnLoadModelFolder, btnLoadOnnxModelSingle,
-        btnSelectFolder, btnStart, btnStop, lblFolder, lblStatus
-    };
+                Control[] fixedControls = { gbModels, gbSource, btnStart, btnStop, lblStatus };
                 foreach (var c in fixedControls)
                 {
                     if (c == null || !c.Visible) continue;
                     fixedH += c.Height + c.Margin.Vertical;
                 }
-                fixedH += left.Padding.Vertical; // 패딩도 포함
+                fixedH += left.Padding.Vertical;
 
-                // 2) 사용 가능한 높이
-                int availH = Math.Max(0, leftWrap.ClientSize.Height - fixedH);
+                // 남은 공간을 gbModelPaths에 할당
+                int availH = Math.Max(gbModelPaths.MinimumSize.Height,
+                                      leftWrap.ClientSize.Height - fixedH);
+                gbModelPaths.Height = availH;
 
-                // 3) 두 그룹박스에 분배 (6:4 예시, 최소값 보장)
-                int hAging = Math.Max(gbAging.MinimumSize.Height, (int)(availH * 0.6));
-                int hGrid = Math.Max(gbModelPaths.MinimumSize.Height, availH - hAging);
-
-                // 너무 커서 잘리면 균등 분배로 보정
-                int used = hAging + hGrid;
-                if (used > availH && availH > 0)
-                {
-                    hAging = availH / 2;
-                    hGrid = availH - hAging;
-                    hAging = Math.Max(gbAging.MinimumSize.Height, hAging);
-                    hGrid = Math.Max(gbModelPaths.MinimumSize.Height, hGrid);
-                }
-
-                gbAging.Height = hAging;
-                gbModelPaths.Height = hGrid;
-
-                // 폭도 보정
                 int w = Math.Max(160, leftWrap.ClientSize.Width - left.Padding.Horizontal);
-                gbAging.Width = w;
                 gbModelPaths.Width = w;
 
                 left.PerformLayout();
@@ -1052,21 +1208,31 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             leftWrap.Resize += (s, e) =>
             {
-                int w = Math.Max(180, leftWrap.ClientSize.Width - 8);
+                int w = Math.Max(180, leftWrap.ClientSize.Width - 12);
 
-                Control[] toResize = new Control[]
-                {
-                btnLoadModelSingle, btnLoadModelFolder, btnLoadOnnxModelSingle,
-                btnSelectFolder, btnStart, btnStop
-                };
-
-                foreach (Control c in toResize)
+                // 최상위 컨트롤 폭 조정
+                foreach (Control c in new Control[] { gbModels, gbSource, btnStart, btnStop, gbModelPaths })
                     if (c != null) c.Width = w;
 
-                gbAging.Width = w;
-                gbModelPaths.Width = w;
+                // pnlCsvSource 내부
+                if (btnSelectFolder != null)
+                {
+                    btnSelectFolder.Width = w - 38;
+                    if (btnQuickFolder != null) btnQuickFolder.Left = btnSelectFolder.Right + 2;
+                    lblFolder.MaximumSize = new Size(w - 12, 0);
+                }
 
-                LayoutLeftAuto(); // 높이 재분배
+                // pnlDbSource 내부 너비 조정
+                if (pnlDbSource != null)
+                {
+                    int lw = 52, inner = w - 12;
+                    if (cmbDbDevice  != null) { cmbDbDevice.Width  = inner - lw - 28; btnDbRefresh.Left  = inner - 24; }
+                    if (cmbDbLabel   != null)   cmbDbLabel.Width   = inner - lw - 2;
+                    if (dtpDbFrom    != null) { dtpDbFrom.Width    = inner - lw - 28; btnDbFullRange.Left = inner - 24; }
+                    if (dtpDbTo      != null)   dtpDbTo.Width      = inner - lw - 2;
+                }
+
+                LayoutLeftAuto();
             };
             this.Resize += (s, e) => LayoutLeftAuto();
 
@@ -1292,142 +1458,291 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             ReflowGaugeHeights(); // ★ 추가
         }
 
-        private void LoadOnnxModelSingle()
+        // ── DL ONNX 단일 등록 ────────────────────────────────────────────────────
+        // _meta.json 자동 파싱 → 단일 확인 폼 → 등록 (기존 7단계 InputBox 대체)
+
+        private sealed class OnnxMeta
         {
+            public string   Kind;
+            public string   YColumn;
+            public string[] Channels;
+            public int      NChannels   = 1;
+            public string[] ClassNames;
+            public bool     IsAe;
+            public double   Threshold   = -1;   // -1 = 없음(기본값 사용)
+            public double   RmsMean     = -1;   // AE 정상 RMS 평균
+            public double   RmsThr      = -1;   // AE RMS 임계값
+            public int      WindowSize  = 256;   // 학습 시 슬라이딩 윈도우 크기
+        }
+
+        private static OnnxMeta TryParseOnnxMeta(string onnxPath)
+        {
+            string metaPath = Path.Combine(
+                Path.GetDirectoryName(onnxPath) ?? ".",
+                Path.GetFileNameWithoutExtension(onnxPath) + "_meta.json");
+            if (!File.Exists(metaPath)) return null;
             try
             {
-                // 1) 축 번호
-                int axis;
-                using (var ibAxis = new InputBox("축 번호 입력", "이 ONNX를 연결할 축 번호(0,1,2,...)를 입력하세요:"))
+                using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(metaPath)))
                 {
-                    if (ibAxis.ShowDialog() != DialogResult.OK) return;
-                    if (!int.TryParse(ibAxis.InputText, out axis) || axis < 0)
-                    { MessageBox.Show("유효한 축 번호가 아닙니다."); return; }
-                }
-
-                // 2) 역할(AE/CLS)
-                string role = "AE"; // 기본 AE
-                using (var ibRole = new InputBox("모델 역할", "AE(오토인코더) 또는 CLS(분류) 중 입력하세요. (기본 AE)"))
-                {
-                    if (ibRole.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(ibRole.InputText))
-                        role = ibRole.InputText.Trim().ToUpperInvariant();
-                }
-                bool isAe = role != "CLS";
-
-                // 3) Y 컬럼 (기본: FBTRQ{axis})
-                string yColDefault = "FBTRQ" + axis;
-                string yCol = yColDefault;
-                using (var ibY = new InputBox("Y 컬럼명", $"CSV의 Y 컬럼명을 입력하세요. (예: {yColDefault})"))
-                {
-                    if (ibY.ShowDialog() != DialogResult.OK) return;
-                    if (string.IsNullOrWhiteSpace(ibY.InputText))
-                    { MessageBox.Show("Y 컬럼명이 비었습니다."); return; }
-                    yCol = ibY.InputText.Trim();
-                }
-
-                // 4) 입력 채널 수 C (기본 1)
-                int C = 1;
-                using (var ibC = new InputBox("입력 채널 수(C)", "모델 입력 채널 수를 입력하세요. (예: 1 또는 3)"))
-                {
-                    if (ibC.ShowDialog() != DialogResult.OK) return;
-                    if (!int.TryParse(ibC.InputText, out C) || C <= 0)
-                    { MessageBox.Show("유효한 채널 수가 아닙니다."); return; }
-                }
-
-                // 5) ONNX 파일 선택
-                string filePath;
-                using (var ofd = new OpenFileDialog { Filter = "ONNX Model (*.onnx)|*.onnx|All files (*.*)|*.*" })
-                {
-                    if (ofd.ShowDialog() != DialogResult.OK) return;
-                    filePath = ofd.FileName;
-                }
-
-                // 6) (CLS 전용) 표시용 Kind 라벨
-                string kind = isAe ? "AE-CNN1D" : "LSTM";
-                if (!isAe)
-                {
-                    using (var ibKind = new InputBox("모델 종류 라벨", "표시용 라벨(LSTM/CNN1D 등)을 입력하세요. (기본 LSTM)"))
+                    var root = doc.RootElement;
+                    var m = new OnnxMeta();
+                    if (root.TryGetProperty("kind",      out var kp)) m.Kind    = kp.GetString();
+                    if (root.TryGetProperty("y_column",  out var yp)) m.YColumn = yp.GetString();
+                    if (root.TryGetProperty("n_channels",out var nc)) m.NChannels = nc.GetInt32();
+                    if (root.TryGetProperty("channels",  out var cp) &&
+                        cp.ValueKind == System.Text.Json.JsonValueKind.Array)
                     {
-                        if (ibKind.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(ibKind.InputText))
-                            kind = ibKind.InputText.Trim();
+                        var list = new System.Collections.Generic.List<string>();
+                        foreach (var c in cp.EnumerateArray()) list.Add(c.GetString() ?? "");
+                        m.Channels  = list.ToArray();
+                        m.NChannels = list.Count;
                     }
+                    if (root.TryGetProperty("class_names", out var cn) &&
+                        cn.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var list = new System.Collections.Generic.List<string>();
+                        foreach (var n in cn.EnumerateArray()) list.Add(n.GetString() ?? "");
+                        m.ClassNames = list.ToArray();
+                    }
+                    string session = "";
+                    if (root.TryGetProperty("session", out var sp)) session = sp.GetString() ?? "";
+                    m.IsAe = session.ToUpper() == "AD"
+                          || (m.Kind?.ToUpper().Contains("AD") ?? false)
+                          || (m.ClassNames == null || m.ClassNames.Length == 0);
+                    if (root.TryGetProperty("threshold", out var tp))
+                    {
+                        double tv;
+                        if (tp.TryGetDouble(out tv)) m.Threshold = tv;
+                    }
+                    if (root.TryGetProperty("rms_mean", out var rmp))
+                    {
+                        double rv; if (rmp.TryGetDouble(out rv)) m.RmsMean = rv;
+                    }
+                    if (root.TryGetProperty("rms_thr", out var rtp))
+                    {
+                        double rv; if (rtp.TryGetDouble(out rv)) m.RmsThr = rv;
+                    }
+                    if (root.TryGetProperty("window_size", out var wp))
+                    {
+                        int wv;
+                        if (wp.TryGetInt32(out wv) && wv > 0) m.WindowSize = wv;
+                    }
+                    return m;
                 }
+            }
+            catch { return null; }
+        }
 
-                // 7) 세션 생성
+        private void LoadOnnxModelSingle()
+        {
+            // 1) ONNX 파일 선택
+            string onnxPath;
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "DL ONNX 모델 선택",
+                Filter = "ONNX 모델 (*.onnx)|*.onnx|모든 파일 (*.*)|*.*",
+            })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+                onnxPath = ofd.FileName;
+            }
+
+            // 2) _meta.json 자동 파싱
+            var meta = TryParseOnnxMeta(onnxPath);
+
+            // 3) 파일명 + 상위 폴더에서 축 번호 추론 (axis0, axis_0, axis-0, ...)
+            int inferAxis = 0;
+            var axisMatch = System.Text.RegularExpressions.Regex.Match(
+                Path.GetFileNameWithoutExtension(onnxPath), @"(?i)axis[\s_-]?(\d+)");
+            if (axisMatch.Success)
+                int.TryParse(axisMatch.Groups[1].Value, out inferAxis);
+            else
+            {
+                // 상위 디렉토리명에서 재시도
+                string dirName = Path.GetFileName(Path.GetDirectoryName(onnxPath) ?? "") ?? "";
+                var dirMatch = System.Text.RegularExpressions.Regex.Match(dirName, @"(?i)axis[\s_-]?(\d+)");
+                if (dirMatch.Success) int.TryParse(dirMatch.Groups[1].Value, out inferAxis);
+            }
+
+            // 4) AE 추론
+            bool inferAe = meta != null ? meta.IsAe
+                : Path.GetFileNameWithoutExtension(onnxPath).IndexOf("ae", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            // 5) Y 컬럼 추론 — 다채널이면 channels 전체, 단채널이면 y_column
+            string inferYCol;
+            if (meta?.Channels != null && meta.Channels.Length > 1)
+                inferYCol = string.Join(", ", meta.Channels);
+            else if (meta?.YColumn != null)
+                inferYCol = meta.YColumn;
+            else if (Path.GetFileNameWithoutExtension(onnxPath).IndexOf("torque", StringComparison.OrdinalIgnoreCase) >= 0)
+                inferYCol = "Trq(%)";
+            else
+                inferYCol = "x";
+
+            // 6) 채널 수 추론
+            int inferC = meta?.NChannels > 0 ? meta.NChannels : 1;
+
+            // ── 단일 등록 폼 (모든 필드 읽기 전용, AE 임계값만 편집 가능) ────
+            NumericUpDown numThr = null;
+            Label         lblThrLabel;
+
+            // 읽기 전용 값 레이블 헬퍼
+            Label ValLbl(string text, bool highlight = false) => new Label
+            {
+                Text = text, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = highlight ? Color.FromArgb(0, 100, 180) : Color.FromArgb(30, 30, 30),
+                Font = highlight ? new Font(Font.FontFamily, Font.Size, FontStyle.Bold) : Font,
+            };
+
+            var form = new Form
+            {
+                Text = "DL ONNX 모델 등록",
+                Size = new Size(420, 300),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition   = FormStartPosition.CenterParent,
+                MaximizeBox = false, MinimizeBox = false,
+            };
+            int rowCount = inferAe ? 7 : 6;
+            var tl = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = rowCount,
+                Padding = new Padding(14, 10, 14, 8),
+            };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < rowCount - 1; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            int r = 0;
+
+            // 파일명
+            tl.Controls.Add(Lbl("파일:"), 0, r);
+            tl.Controls.Add(ValLbl(Path.GetFileName(onnxPath)), 1, r++);
+
+            // 축 번호 (읽기 전용)
+            tl.Controls.Add(Lbl("축 번호:"), 0, r);
+            tl.Controls.Add(ValLbl(inferAxis.ToString(), highlight: true), 1, r++);
+
+            // 역할 (읽기 전용)
+            tl.Controls.Add(Lbl("역할:"), 0, r);
+            tl.Controls.Add(ValLbl(inferAe ? "오토인코더 (AE)" : "분류 (CLS)", highlight: true), 1, r++);
+
+            // Y 컬럼 (읽기 전용)
+            tl.Controls.Add(Lbl("Y 컬럼:"), 0, r);
+            tl.Controls.Add(ValLbl(inferYCol, highlight: true), 1, r++);
+
+            // 채널 수 (읽기 전용)
+            tl.Controls.Add(Lbl("채널 수(C):"), 0, r);
+            tl.Controls.Add(ValLbl(inferC.ToString(), highlight: true), 1, r++);
+
+            // AE 임계값 (AE 모드에서만 표시, 유일한 편집 가능 필드)
+            if (inferAe)
+            {
+                double initThr = (meta != null && meta.Threshold > 0) ? meta.Threshold : DefaultThreshold;
+                lblThrLabel = Lbl("임계값(AE):");
+                tl.Controls.Add(lblThrLabel, 0, r);
+                numThr = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100000,
+                    DecimalPlaces = 6, Value = (decimal)initThr, Increment = 0.001m };
+                tl.Controls.Add(numThr, 1, r++);
+            }
+
+            // meta 정보 + 버튼
+            string metaText = meta != null
+                ? $"✔ _meta.json 로드 — {(meta.IsAe ? "AE" : "분류")} | 클래스: {string.Join(", ", meta.ClassNames ?? new string[0])} | 채널: {string.Join(",", meta.Channels ?? new string[0])}"
+                : "⚠ _meta.json 없음 — 파일명으로 자동 추론";
+            var lblMeta = new Label { Text = metaText, AutoSize = false, Dock = DockStyle.Fill,
+                ForeColor = meta != null ? Color.DarkGreen : Color.DarkOrange,
+                TextAlign = ContentAlignment.TopLeft };
+
+            var btnOk     = new Button { Text = "등록", Width = 80, Height = 26, DialogResult = DialogResult.OK };
+            var btnCancel = new Button { Text = "취소", Width = 80, Height = 26, DialogResult = DialogResult.Cancel };
+            var btnFlow   = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 30, FlowDirection = FlowDirection.RightToLeft };
+            btnFlow.Controls.Add(btnCancel);
+            btnFlow.Controls.Add(btnOk);
+            var bottomPanel = new Panel { Dock = DockStyle.Fill };
+            bottomPanel.Controls.Add(btnFlow);
+            bottomPanel.Controls.Add(lblMeta);
+            tl.SetColumnSpan(bottomPanel, 2);
+            tl.Controls.Add(bottomPanel, 0, r);
+
+            form.Controls.Add(tl);
+            form.AcceptButton = btnOk;
+            form.CancelButton = btnCancel;
+
+            if (form.ShowDialog(this) != DialogResult.OK) return;
+
+            // 7) 등록 — 모든 값은 자동 추론된 값 사용
+            int    axis      = inferAxis;
+            bool   isAe      = inferAe;
+            // inferYCol이 "x, y, z" 처럼 다채널인 경우 YColumn에는 첫 번째 채널명만 저장
+            string yCol      = inferYCol.Contains(",")
+                ? inferYCol.Split(',')[0].Trim()
+                : inferYCol;
+            int    C         = inferC;
+            string kind      = meta?.Kind ?? (isAe ? "AE-CNN1D" : "CNN1D-CLS");
+            double threshold = isAe && numThr != null ? (double)numThr.Value : DefaultThreshold;
+
+            try
+            {
                 InferenceSession session;
-                try
-                {
-                    session = new InferenceSession(filePath);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show("ONNX 로드 실패: " + ex.Message);
-                    return;
-                }
+                try { session = new InferenceSession(onnxPath); }
+                catch (Exception ex) { MessageBox.Show("ONNX 로드 실패: " + ex.Message); return; }
 
-                // 8) 모델 객체 구성
                 var om = new OnnxAxisModel
                 {
-                    AxisId = axis,
-                    ModelPath = filePath,
-                    YColumn = yCol,
-                    C = C,
-                    Kind = kind,
-                    InputName = "input",
-                    OutputName = isAe ? null : "logits",   // 분류 기본 출력 이름
-                    ReconOutputName = isAe ? "recon" : null, // AE 기본 출력 이름
-                    IsAutoencoder = isAe,
-                    StandardizePerSample = true,
-                    Session = session
+                    AxisId              = axis,
+                    ModelPath           = onnxPath,
+                    YColumn             = yCol,
+                    C                   = C,
+                    Kind                = kind,
+                    InputName           = "input",
+                    OutputName          = isAe ? null    : "logits",
+                    ReconOutputName     = isAe ? "recon" : null,
+                    IsAutoencoder       = isAe,
+                    StandardizePerSample = true,   // AE도 per-sample z-score 사용 (형태 학습)
+                    RmsMean             = (isAe && meta != null) ? meta.RmsMean : -1,
+                    RmsThr              = (isAe && meta != null) ? meta.RmsThr  : -1,
+                    WindowSize          = (isAe && meta != null && meta.WindowSize > 0) ? meta.WindowSize : 256,
+                    Threshold           = threshold,
+                    Session             = session,
                 };
 
-                // 9) AE 임계값(옵션)
-                if (isAe)
-                {
-                    using (var ibThr = new InputBox("AE 임계값", $"AE 임계값을 입력하세요. (기본 {DefaultThreshold:0.###})"))
-                    {
-                        double thr;
-                        if (ibThr.ShowDialog() == DialogResult.OK &&
-                            double.TryParse(ibThr.InputText, NumberStyles.Float, CultureInfo.InvariantCulture, out thr) &&
-                            thr > 0)
-                            om.Threshold = thr;
-                        else
-                            om.Threshold = DefaultThreshold;
-                    }
-                }
-
-                // 10) 기존 세션 정리 후 등록
                 if (isAe)
                 {
                     OnnxAxisModel old;
-                    if (_axisOnnx.TryGetValue(axis, out old) && old != null && old.Session != null)
-                    { try { old.Session.Dispose(); } catch { } }
+                    if (_axisOnnx.TryGetValue(axis, out old) && old?.Session != null)
+                        try { old.Session.Dispose(); } catch { }
                     _axisOnnx[axis] = om;
-
-                    AppendEventLog($"[ONNX-AE] 축 {axis} 연결: {Path.GetFileName(filePath)} (Y={yCol}, C={C}, thr={om.Threshold:0.###})");
+                    AppendEventLog($"[ONNX-AE] 축 {axis}: {Path.GetFileName(onnxPath)}  Y={yCol}  C={C}  thr={threshold:0.###}");
                 }
                 else
                 {
                     OnnxAxisModel oldCls;
-                    if (_axisOnnxCls.TryGetValue(axis, out oldCls) && oldCls != null && oldCls.Session != null)
-                    { try { oldCls.Session.Dispose(); } catch { } }
+                    if (_axisOnnxCls.TryGetValue(axis, out oldCls) && oldCls?.Session != null)
+                        try { oldCls.Session.Dispose(); } catch { }
                     _axisOnnxCls[axis] = om;
 
-                    // 분류 클래스 수에 맞춰 게이지 시드
-                    int k = GetNumClassesFromOnnx(session, om.OutputName ?? "logits", (_clsLabels?.Length ?? 4));
+                    int k = GetNumClassesFromOnnx(session, om.OutputName ?? "logits",
+                        meta?.ClassNames?.Length ?? _clsLabels?.Length ?? 4);
+                    if (meta?.ClassNames != null && meta.ClassNames.Length == k)
+                        _clsLabels = meta.ClassNames;
                     SeedAxisGauge(axis, k);
-
-                    AppendEventLog($"[ONNX-CLS] 축 {axis} 연결: {Path.GetFileName(filePath)} (Y={yCol}, C={C}, Kind={kind})");
+                    AppendEventLog($"[ONNX-CLS] 축 {axis}: {Path.GetFileName(onnxPath)}  클래스=[{string.Join(",", meta?.ClassNames ?? new[] { "?" })}]  C={C}");
                 }
 
-                // 11) 좌측 표 갱신
                 RefreshModelPathList();
             }
             catch (Exception ex)
             {
-                MessageBox.Show("LoadOnnxModelSingle 오류: " + ex.Message);
+                MessageBox.Show("모델 등록 오류: " + ex.Message);
             }
         }
+
+        private static Label Lbl(string text) =>
+            new Label { Text = text, AutoSize = false, Dock = DockStyle.Fill,
+                        TextAlign = ContentAlignment.MiddleLeft };
 
         private void DisposeOnnxSessions()
         {
@@ -1435,10 +1750,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 try { kv.Value?.Session?.Dispose(); } catch { }
             _axisOnnx.Clear();
 
-            // ★ 누락된 분류 세션도 정리
             foreach (var kv in _axisOnnxCls.ToList())
                 try { kv.Value?.Session?.Dispose(); } catch { }
             _axisOnnxCls.Clear();
+
+            foreach (var kv in _axisSklModels.ToList())
+                try { kv.Value?.OnnxSession?.Dispose(); } catch { }
+            _axisSklModels.Clear();
         }
 
         private static float[,] BuildSequenceFromCsvSingleChannel(string filePath, string yColumn)
@@ -1512,6 +1830,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
         }
 
+        /// <summary>AE 전역 정규화: 학습 시 저장한 채널별 mean/std 로 정규화합니다.</summary>
+        private static void GlobalNormalizeInPlace(float[,] seq, double[] mean, double[] std)
+        {
+            int T = seq.GetLength(0);
+            int C = seq.GetLength(1);
+            for (int c = 0; c < C; c++)
+            {
+                double m = (mean != null && c < mean.Length) ? mean[c] : 0.0;
+                double s = (std  != null && c < std.Length  && std[c] > 1e-8) ? std[c] : 1.0;
+                for (int t = 0; t < T; t++)
+                    seq[t, c] = (float)((seq[t, c] - m) / s);
+            }
+        }
+
         private bool TryOnnxInferOnce(int axis, string csvPath, out int predClass, out float[] probs, out string info)
         {
             predClass = -1; probs = null; info = null;
@@ -1557,12 +1889,26 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             return true;
         }
 
+        // 전역 모델(또는 임의 OnnxAxisModel)을 직접 지정해서 AE 스코어 계산
+        private bool TryOnnxAeScoreOnce(int axis, string csvPath, OnnxAxisModel om, out double score, out string info)
+        {
+            score = 0; info = null;
+            if (om == null || om.Session == null || !om.IsAutoencoder) { info = "no ae"; return false; }
+            return TryOnnxAeScoreCore(axis, csvPath, om, out score, out info);
+        }
+
         private bool TryOnnxAeScoreOnce(int axis, string csvPath, out double score, out string info)
         {
             score = 0; info = null;
             OnnxAxisModel om;
             if (!_axisOnnx.TryGetValue(axis, out om) || om == null || om.Session == null || !om.IsAutoencoder)
             { info = "no ae"; return false; }
+            return TryOnnxAeScoreCore(axis, csvPath, om, out score, out info);
+        }
+
+        private bool TryOnnxAeScoreCore(int axis, string csvPath, OnnxAxisModel om, out double score, out string info)
+        {
+            score = 0; info = null;
 
             // 1) 입력 시퀀스 생성
             float[,] seq = (om.C > 1)
@@ -1573,43 +1919,128 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int T = seq.GetLength(0), C = seq.GetLength(1);
             if (C != om.C) { info = "channel mismatch"; return false; }
 
-            if (om.StandardizePerSample) ZScoreInPlace(seq);
+            // 2) 슬라이딩 윈도우 추론
+            //    학습과 동일한 window_size로 분할 → 각 윈도우별 (z-score 후) MAE 계산 → 최대값 사용
+            int W      = om.WindowSize > 0 ? om.WindowSize : 256;
+            int stride = Math.Max(1, W / 2);  // 50% 오버랩
 
-            // 2) DenseTensor(1,T,C)
-            var tensor = new DenseTensor<float>(new[] { 1, T, C });
-            for (int t = 0; t < T; t++)
-                for (int c = 0; c < C; c++)
-                    tensor[0, t, c] = seq[t, c];
+            // RMS 계산은 z-score 전 원본 값으로 (진폭 보존)
+            double windowRmsMax = 0.0;
 
-            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(om.InputName, tensor) };
-
-            using (var results = om.Session.Run(inputs))
+            if (T < W)
             {
-                // 재구성 출력 텐서에서 값만 1D로 추출
-                var outNv = results.FirstOrDefault(v => v.Name == om.ReconOutputName) ?? results.First();
-                var reconVals = outNv.AsEnumerable<float>().ToArray(); // 플랫 벡터
-
-                // ★ 최소 수정: 길이를 T*C로 보정 (trim/pad)
-                int targetLen = T * C;
-                if (reconVals.Length != targetLen)
-                {
-                    var fixedVals = new float[targetLen];        // 부족분은 0으로 패딩
-                    int copy = Math.Min(reconVals.Length, targetLen);
-                    Array.Copy(reconVals, 0, fixedVals, 0, copy); // 길면 잘라냄, 짧으면 뒤를 0으로 둠
-                    reconVals = fixedVals;
-                }
-
-                // 플랫 → (T, C) 재구성 (오른쪽 패딩 기준)
-                float[,] recon = new float[T, C];
-                int idx = 0;
-                for (int t = 0; t < T; t++)
-                    for (int c = 0; c < C; c++)
-                        recon[t, c] = reconVals[idx++];
-
-                score = MeanAbsoluteError(seq, recon);
-                info = string.Format("AE({0})", Path.GetFileNameWithoutExtension(om.ModelPath));
-                return true;
+                double rawRms = ComputeRms(seq, 0, T);
+                if (om.StandardizePerSample) ZScoreInPlace(seq);
+                double mae = AeInferWindow(om, seq, 0, T);
+                score = CompositeAeScore(mae, rawRms, om);
+                info  = string.Format("AE W={0} single", T);
+                return score >= 0;
             }
+
+            double maxMae = 0.0;
+            int    wCount = 0;
+            for (int start = 0; start <= T - W; start += stride)
+            {
+                // raw RMS (정규화 전)
+                double rawRms = ComputeRms(seq, start, W);
+                if (rawRms > windowRmsMax) windowRmsMax = rawRms;
+
+                // z-score 슬라이스 복사 후 추론
+                double mae = AeInferWindowZScore(om, seq, start, W);
+                if (mae < 0) continue;
+                if (mae > maxMae) maxMae = mae;
+                wCount++;
+            }
+
+            if (wCount == 0) { info = "no valid window"; return false; }
+
+            score = CompositeAeScore(maxMae, windowRmsMax, om);
+            info  = string.Format("AE W={0} n={1} mae={2:F4} rms={3:F4}",
+                W, wCount, maxMae, windowRmsMax);
+            return true;
+        }
+
+        /// <summary>RAW 슬라이스의 전채널 RMS를 계산합니다.</summary>
+        private static double ComputeRms(float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            double sum = 0.0; long n = 0;
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                {
+                    double v = seq[start + t, c];
+                    sum += v * v; n++;
+                }
+            return n > 0 ? Math.Sqrt(sum / n) : 0.0;
+        }
+
+        /// <summary>복합 스코어 = max(mae_ratio, rms_ratio) — 각 비율이 1을 넘으면 이상.</summary>
+        private static double CompositeAeScore(double mae, double rms, OnnxAxisModel om)
+        {
+            if (mae < 0) return -1;
+            double maeRatio = om.Threshold > 0 ? mae / om.Threshold : mae;
+            double rmsRatio = (om.RmsThr > 0 && rms > 0)
+                ? Math.Max(0.0, (rms - om.RmsMean) / (om.RmsThr - om.RmsMean + 1e-9))
+                : 0.0;
+            // 최종 스코어: mae 직접 반환, rms 이상은 mae를 스케일업하여 표현
+            // score = mae * (1 + rms_excess) — threshold와 같은 단위 유지
+            double rmsExcess = Math.Max(0.0, rmsRatio - 1.0);
+            return mae * (1.0 + rmsExcess * 2.0);
+        }
+
+        /// <summary>슬라이스를 z-score 후 AE에 통과해 MAE를 반환합니다. 실패 시 -1.</summary>
+        private double AeInferWindowZScore(OnnxAxisModel om, float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            // 슬라이스 복사 + z-score
+            float[,] win = new float[length, C];
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    win[t, c] = seq[start + t, c];
+            ZScoreInPlace(win);
+
+            return AeInferWindow(om, win, 0, length);
+        }
+
+        /// <summary>이미 정규화된 seq의 [start, start+length) 슬라이스를 AE에 통과해 MAE를 반환합니다. 실패 시 -1.</summary>
+        private double AeInferWindow(OnnxAxisModel om, float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            var tensor = new DenseTensor<float>(new[] { 1, length, C });
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    tensor[0, t, c] = seq[start + t, c];
+
+            var inputs = new List<NamedOnnxValue>
+                { NamedOnnxValue.CreateFromTensor(om.InputName, tensor) };
+            try
+            {
+                using (var results = om.Session.Run(inputs))
+                {
+                    var outNv     = results.FirstOrDefault(v => v.Name == om.ReconOutputName) ?? results.First();
+                    var reconFlat = outNv.AsEnumerable<float>().ToArray();
+                    if (reconFlat.Length < length * C) return -1;
+
+                    float[,] recon = new float[length, C];
+                    int idx = 0;
+                    for (int t = 0; t < length; t++)
+                        for (int c = 0; c < C; c++)
+                            recon[t, c] = reconFlat[idx++];
+                    return MeanAbsoluteError(seq.GetLength(0) == length ? seq
+                        : ExtractSlice(seq, start, length), recon);
+                }
+            }
+            catch { return -1; }
+        }
+
+        private static float[,] ExtractSlice(float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            var s = new float[length, C];
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    s[t, c] = seq[start + t, c];
+            return s;
         }
 
         private static float[] Softmax(IReadOnlyList<float> logits)
@@ -1806,6 +2237,118 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             return s;
         }
 
+        // ── 인메모리 배열로 샘플 차트 렌더링 (DB 모드용) ─────────────────────
+        private void RenderSampleChartFromArrays(
+            int axis, string yLabel,
+            IList<double> xsSec, IList<double> yMain,
+            IList<double> chX, IList<double> chY, IList<double> chZ,
+            bool hasAccel)
+        {
+            try
+            {
+                if (yMain == null || yMain.Count == 0) return;
+
+                const int MaxDisplayPoints = 4000;
+                DownsampleMinMax(xsSec, yMain, MaxDisplayPoints, out var dx, out var dy);
+                if (dy == null || dy.Length == 0) return;
+
+                double[] dx1 = null, dy1 = null, dx2 = null, dy2 = null, dx3 = null, dy3 = null;
+                if (hasAccel && chX != null && chX.Count > 0)
+                {
+                    DownsampleMinMax(xsSec, chX, MaxDisplayPoints, out dx1, out dy1);
+                    DownsampleMinMax(xsSec, chY, MaxDisplayPoints, out dx2, out dy2);
+                    DownsampleMinMax(xsSec, chZ, MaxDisplayPoints, out dx3, out dy3);
+                }
+
+                BeginInvoke(new Action(() =>
+                {
+                    var chart = EnsureSampleChartForAxis(axis);
+                    if (chart == null || chart.IsDisposed) return;
+
+                    chart.BeginInit();
+                    try
+                    {
+                        var area = chart.ChartAreas["s"];
+
+                        var sMain = chart.Series["Sample"];
+                        sMain.Points.DataBindXY(dx, dy);
+
+                        area.AxisX.Title = "Time (s)";
+                        area.AxisY.Title = hasAccel ? "Accel |a|" : yLabel;
+                        area.AxisY.LabelStyle.Format = "0.0";
+                        area.AxisX.LabelStyle.Format = "0.###";
+                        area.AxisX.Minimum = double.NaN; area.AxisX.Maximum = double.NaN;
+                        area.AxisY.Minimum = double.NaN; area.AxisY.Maximum = double.NaN;
+                        area.RecalculateAxesScale();
+
+                        chart.Titles.Clear();
+                        chart.Titles.Add(hasAccel
+                            ? $"Axis {axis} · |{yLabel}| (magnitude) [DB]"
+                            : $"Axis {axis} · {yLabel} [DB]");
+
+                        if (hasAccel)
+                        {
+                            var sX = EnsureSeries(chart, "ax");
+                            var sY = EnsureSeries(chart, "ay");
+                            var sZ = EnsureSeries(chart, "az");
+                            sX.Points.DataBindXY(dx1 ?? Array.Empty<double>(), dy1 ?? Array.Empty<double>());
+                            sY.Points.DataBindXY(dx2 ?? Array.Empty<double>(), dy2 ?? Array.Empty<double>());
+                            sZ.Points.DataBindXY(dx3 ?? Array.Empty<double>(), dy3 ?? Array.Empty<double>());
+                        }
+                        else
+                        {
+                            foreach (var name in new[] { "ax", "ay", "az" })
+                            {
+                                var s = chart.Series.FindByName(name);
+                                if (s != null) s.Points.Clear();
+                            }
+                        }
+                    }
+                    finally { chart.EndInit(); }
+                }));
+            }
+            catch { /* swallow */ }
+        }
+
+        // ── InfluxDB 세그먼트를 샘플 차트에 렌더링 ───────────────────────────
+        private void RenderSegmentChart(SignalSegment seg, string yColumn, int axis)
+        {
+            if (seg == null || seg.Time == null || seg.Time.Length == 0) return;
+
+            var xsSec = (IList<double>)seg.Time;
+
+            bool isAccel = yColumn != null &&
+                           (yColumn.Equals("x", StringComparison.OrdinalIgnoreCase) ||
+                            yColumn.Equals("y", StringComparison.OrdinalIgnoreCase) ||
+                            yColumn.Equals("z", StringComparison.OrdinalIgnoreCase));
+
+            IList<double> yMain, chX = null, chY = null, chZ = null;
+            if (isAccel)
+            {
+                // magnitude  |a| = sqrt(X²+Y²+Z²)
+                double[] mag = new double[seg.Time.Length];
+                double[] xa = seg.X ?? Array.Empty<double>();
+                double[] ya = seg.Y ?? Array.Empty<double>();
+                double[] za = seg.Z ?? Array.Empty<double>();
+                for (int i = 0; i < mag.Length; i++)
+                {
+                    double vx = i < xa.Length ? xa[i] : 0;
+                    double vy = i < ya.Length ? ya[i] : 0;
+                    double vz = i < za.Length ? za[i] : 0;
+                    mag[i] = Math.Sqrt(vx * vx + vy * vy + vz * vz);
+                }
+                yMain = mag;
+                chX = seg.X; chY = seg.Y; chZ = seg.Z;
+            }
+            else
+            {
+                yMain = seg.GetChannel(yColumn) ?? Array.Empty<double>();
+            }
+
+            RenderSampleChartFromArrays(axis, yColumn ?? "signal",
+                xsSec, yMain, chX, chY, chZ, isAccel);
+        }
+
         private const int MaxEventLogLines = 400;
 
         private void AppendEventLog(string line)
@@ -1938,25 +2481,348 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         #region 모델 로드/표시
         private void LoadAxisModelSingle()
         {
-            using (InputBox dlgAxis = new InputBox("축 번호 입력", "모델을 연결할 축 번호(0,1,2,...)를 입력하세요:"))
+            using (OpenFileDialog ofd = new OpenFileDialog { Filter = "PHM Model (*.json)|*.json|All files (*.*)|*.*" })
             {
-                if (dlgAxis.ShowDialog() != DialogResult.OK) return;
-                int axis;
-                if (!int.TryParse(dlgAxis.InputText, out axis) || axis < 0)
-                { MessageBox.Show("유효한 축 번호가 아닙니다."); return; }
+                if (ofd.ShowDialog() != DialogResult.OK) return;
 
-                using (OpenFileDialog ofd = new OpenFileDialog { Filter = "PHM Model (*.json)|*.json|All files (*.*)|*.*" })
+                PersistedKnnModel model; string err;
+                if (!TryLoadModelFromPath(ofd.FileName, out model, out err))
+                { MessageBox.Show("모델 로드 실패: " + err); return; }
+
+                const int GlobalKey = 0;
+                _axisModels[GlobalKey] = new AxisModel { AxisId = GlobalKey, ModelPath = ofd.FileName, Model = model };
+                RefreshModelPathList();
+                MessageBox.Show("KNN 모델 로드 완료 (전체 축 적용)\n" + Path.GetFileName(ofd.FileName));
+            }
+        }
+
+        /// <summary>
+        /// AIForm에서 학습·저장한 sklearn ONNX 모델(.onnx + _meta.json)을 로드합니다.
+        /// </summary>
+        private void LoadSklOnnxModel()
+        {
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "SKL ONNX 모델 선택 (AIForm 저장)",
+                Filter = "ONNX 모델 (*.onnx)|*.onnx|모든 파일 (*.*)|*.*",
+                InitialDirectory = Path.Combine(DefaultLogsPath, "Models")
+            })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+                string onnxPath = ofd.FileName;
+
+                // 1) 사이드카 _meta.json 읽기
+                string metaPath = Path.Combine(
+                    Path.GetDirectoryName(onnxPath) ?? "",
+                    Path.GetFileNameWithoutExtension(onnxPath) + "_meta.json");
+
+                string session = "AD";
+                string modelType = "";
+                string[] features = Array.Empty<string>();
+                string yColumn = "";
+                double threshold = 0.5;
+                double scoreThreshold = 0.0;
+                int knn_k = 5;
+                bool knn_standardize = false;
+                double[] knn_mean = null;
+                double[] knn_std = null;
+                double[][] knn_trainVectors = null;
+                string[] classNames = new[] { "Normal", "Anomaly" };
+
+                if (File.Exists(metaPath))
                 {
-                    if (ofd.ShowDialog() != DialogResult.OK) return;
-
-                    PersistedKnnModel model; string err;
-                    if (!TryLoadModelFromPath(ofd.FileName, out model, out err))
-                    { MessageBox.Show("모델 로드 실패: " + err); return; }
-
-                    _axisModels[axis] = new AxisModel { AxisId = axis, ModelPath = ofd.FileName, Model = model };
-                    RefreshModelPathList();
-                    MessageBox.Show("축 " + axis + " 모델 연결 완료\n" + Path.GetFileName(ofd.FileName));                    
+                    try
+                    {
+                        var metaDoc = JsonDocument.Parse(File.ReadAllText(metaPath));
+                        var root = metaDoc.RootElement;
+                        if (root.TryGetProperty("session", out var sProp)) session = sProp.GetString() ?? "AD";
+                        if (root.TryGetProperty("model_type", out var mtProp)) modelType = mtProp.GetString() ?? "";
+                        if (root.TryGetProperty("y_column", out var ycProp)) yColumn = ycProp.GetString() ?? "";
+                        if (root.TryGetProperty("threshold", out var thrProp) && thrProp.TryGetDouble(out double thrVal)) threshold = thrVal;
+                        if (root.TryGetProperty("score_threshold", out var stProp) && stProp.ValueKind != JsonValueKind.Null && stProp.TryGetDouble(out double stVal)) scoreThreshold = stVal;
+                        if (root.TryGetProperty("k", out var kProp) && kProp.TryGetInt32(out int kVal)) knn_k = kVal;
+                        if (root.TryGetProperty("standardize", out var szProp)) knn_standardize = szProp.GetBoolean();
+                        if (root.TryGetProperty("mean", out var meanProp) && meanProp.ValueKind == JsonValueKind.Array)
+                            knn_mean = meanProp.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+                        if (root.TryGetProperty("std", out var stdProp) && stdProp.ValueKind == JsonValueKind.Array)
+                            knn_std = stdProp.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+                        if (root.TryGetProperty("train_vectors", out var tvProp) && tvProp.ValueKind == JsonValueKind.Array)
+                            knn_trainVectors = tvProp.EnumerateArray()
+                                .Select(row => row.EnumerateArray().Select(e => e.GetDouble()).ToArray())
+                                .ToArray();
+                        if (root.TryGetProperty("features", out var fProp) && fProp.ValueKind == JsonValueKind.Array)
+                            features = fProp.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray();
+                        if (root.TryGetProperty("class_names", out var cnProp) && cnProp.ValueKind == JsonValueKind.Array)
+                            classNames = cnProp.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray();
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"_meta.json 읽기 오류: {ex.Message}\n메타 정보를 수동으로 입력합니다.");
+                    }
                 }
+                else
+                {
+                    MessageBox.Show($"_meta.json 파일이 없습니다 ({Path.GetFileName(metaPath)}).\n기본값(AD, 피처 없음)으로 로드합니다.\nAIForm에서 저장된 모델인지 확인하세요.");
+                }
+
+                // 2) 전체 축 공용 모델 — 축 선택 없이 GlobalKey=0에 저장
+                const int axis = 0;
+
+                // 3) 피처가 없으면 경고
+                if (features.Length == 0)
+                {
+                    MessageBox.Show("피처 목록이 비어 있습니다. _meta.json을 확인하세요.\n모델을 등록하지만 스코어링이 작동하지 않을 수 있습니다.", "경고", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+
+                // 4) ONNX 세션 생성
+                InferenceSession sess;
+                try { sess = new InferenceSession(onnxPath); }
+                catch (Exception ex)
+                { MessageBox.Show("ONNX 세션 생성 실패: " + ex.Message); return; }
+
+                // 기존 세션 교체
+                if (_axisSklModels.TryGetValue(axis, out var old) && old?.OnnxSession != null)
+                    try { old.OnnxSession.Dispose(); } catch { }
+
+                _axisSklModels[axis] = new OnnxSklModel
+                {
+                    AxisId         = axis,
+                    ModelPath      = onnxPath,
+                    Session        = session.ToUpperInvariant(),
+                    ModelType      = modelType,
+                    Features       = features,
+                    YColumn        = yColumn,
+                    Threshold      = threshold > 0 ? threshold : 0.5,
+                    ScoreThreshold = scoreThreshold,
+                    ClassNames     = classNames,
+                    OnnxSession    = sess,
+                    TrainVectors   = knn_trainVectors,
+                    K              = knn_k,
+                    Standardize    = knn_standardize,
+                    Mean           = knn_mean,
+                    Std            = knn_std,
+                };
+
+                RefreshModelPathList();
+                string featStr = features.Length > 0 ? string.Join(", ", features) : "(없음)";
+                MessageBox.Show(
+                    $"SKL ONNX 모델 등록 완료 (전체 축 적용)\n" +
+                    $"파일: {Path.GetFileName(onnxPath)}\n" +
+                    $"세션: {session}  알고리즘: {modelType}\n" +
+                    $"YColumn: {yColumn}  피처({features.Length}): {featStr}");
+            }
+        }
+
+        /// <summary>
+        /// sklearn ONNX 모델로 스코어링합니다.
+        /// AD: label=-1→이상 / scores 출력(decision function)을 rawScore로 반환
+        /// FD: label=클래스인덱스 / probabilities[pred]를 rawScore로 반환
+        /// </summary>
+        private bool TrySklOnnxScore(OnnxSklModel skl, string csvPath,
+            out bool isAnomaly, out int predClass, out float[] probabilities, out double rawScore, out string info)
+            => TrySklOnnxScore(skl, csvPath, skl?.YColumn, out isAnomaly, out predClass, out probabilities, out rawScore, out info);
+
+        private bool TrySklOnnxScore(OnnxSklModel skl, string csvPath, string yColumn,
+            out bool isAnomaly, out int predClass, out float[] probabilities, out double rawScore, out string info)
+        {
+            isAnomaly = false; predClass = -1; probabilities = null; rawScore = 0.0; info = "";
+            if (skl?.OnnxSession == null || skl.Features == null || skl.Features.Length == 0) return false;
+            if (string.IsNullOrWhiteSpace(yColumn)) return false;
+
+            double[] vec = BuildFeatureVectorFromCsv(csvPath, yColumn, skl.Features);
+            if (vec == null || vec.Length != skl.Features.Length) return false;
+
+            return TrySklOnnxScoreFromVec(skl, vec, out isAnomaly, out predClass, out probabilities, out rawScore, out info);
+        }
+
+        /// <summary>
+        /// CSV 헤더에서 토크 컬럼을 찾습니다.
+        /// "torque" 컬럼이 없으면 "Ax{axis}_Trq(%)" 또는 "AXIS{axis}_FBKTRQ" 패턴을 탐색합니다.
+        /// </summary>
+        private static string ResolveTorqueColumn(string[] headers, int axis)
+        {
+            if (headers == null) return null;
+            // 정확히 "torque" 컬럼이 있으면 그대로
+            string exact = headers.FirstOrDefault(h => string.Equals(h?.Trim(), "torque", StringComparison.OrdinalIgnoreCase));
+            if (exact != null) return exact;
+            // AjinCsvLogger: "Ax0_Trq(%)"
+            string ajin = headers.FirstOrDefault(h =>
+                h != null && System.Text.RegularExpressions.Regex.IsMatch(h.Trim(),
+                    $@"^Ax{axis}_Trq", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+            if (ajin != null) return ajin;
+            // WmxTorqueLogger: "AXIS0_FBKTRQ"
+            string wmx = headers.FirstOrDefault(h =>
+                h != null && System.Text.RegularExpressions.Regex.IsMatch(h.Trim(),
+                    $@"^AXIS{axis}_FBKTRQ", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+            if (wmx != null) return wmx;
+            // 축 무관하게 첫 번째 매칭
+            return headers.FirstOrDefault(h =>
+                h != null && System.Text.RegularExpressions.Regex.IsMatch(h.Trim(),
+                    @"Trq|torque|FBKTRQ", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+        }
+
+        private bool TrySklOnnxScoreFromVec(OnnxSklModel skl, double[] vec,
+            out bool isAnomaly, out int predClass, out float[] probabilities, out double rawScore, out string info)
+        {
+            isAnomaly = false; predClass = -1; probabilities = null; rawScore = 0.0; info = "";
+            if (skl == null || vec == null || vec.Length == 0) return false;
+
+            // ★ knn AD: 학습 벡터가 있으면 C# kNN 거리로 rawScore 계산
+            if (skl.Session == "AD" && skl.ModelType == "knn" &&
+                skl.TrainVectors != null && skl.TrainVectors.Length > 0)
+            {
+                rawScore = SignalFeatures.ScoreKnn(vec, skl.TrainVectors, skl.K,
+                                                   skl.Standardize, skl.Mean, skl.Std);
+                double thr = skl.Threshold > 0 ? skl.Threshold : 1.0;
+                isAnomaly = rawScore >= thr;
+                info = $"KNN AD  score={rawScore:F4}  thr={thr:F4}  =>  {(isAnomaly ? "이상" : "정상")}";
+                return true;
+            }
+
+            // 2) float 텐서 구성 (knn 외 모든 모델)
+            var inputData = new DenseTensor<float>(new[] { 1, vec.Length });
+            for (int i = 0; i < vec.Length; i++) inputData[0, i] = (float)vec[i];
+
+            // ONNX 모델 입력 이름 자동 탐색
+            string inputName = "float_input";
+            try
+            {
+                var meta = skl.OnnxSession.InputMetadata;
+                if (meta.Count > 0) inputName = meta.Keys.First();
+            }
+            catch { }
+
+            var inputs = new List<NamedOnnxValue>
+            {
+                NamedOnnxValue.CreateFromTensor(inputName, inputData)
+            };
+
+            // 3) 추론
+            IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results;
+            try { results = skl.OnnxSession.Run(inputs); }
+            catch (Exception ex) { info = "ONNX Run 오류: " + ex.Message; return false; }
+
+            using (results)
+            {
+                // "label" 출력 파싱
+                var labelVal = results.FirstOrDefault(r => r.Name == "label");
+                if (labelVal != null)
+                {
+                    try
+                    {
+                        // sklearn ONNX: label은 int64 또는 string
+                        if (labelVal.ElementType == TensorElementType.Int64)
+                        {
+                            var lt = labelVal.AsTensor<long>();
+                            long lbl = lt[0];
+                            if (skl.Session == "AD")
+                                isAnomaly = lbl == -1L;
+                            else
+                            {
+                                predClass = (int)lbl;
+                                isAnomaly = predClass != 0;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // "probabilities" 또는 "output_probability" 출력 파싱 (FD 분류기)
+                var probVal = results.FirstOrDefault(r => r.Name == "probabilities" || r.Name == "output_probability");
+                if (probVal != null)
+                {
+                    try
+                    {
+                        var pt = probVal.AsTensor<float>();
+                        probabilities = new float[pt.Length];
+                        for (int i = 0; i < pt.Length; i++) probabilities[i] = pt[i];
+                        // FD rawScore: 예측 클래스의 확률
+                        if (predClass >= 0 && predClass < probabilities.Length)
+                            rawScore = probabilities[predClass];
+                    }
+                    catch { }
+                }
+
+                // "scores" 출력 파싱 (AD 이상탐지: decision_function 값)
+                // sklearn outlier detectors: 음수일수록 이상, 양수일수록 정상
+                // skl2onnx는 scores를 shape (1,1)로 출력
+                var scoresVal = results.FirstOrDefault(r => r.Name == "scores");
+                if (scoresVal != null && skl.Session == "AD")
+                {
+                    try
+                    {
+                        var st = scoresVal.AsTensor<float>();
+                        float s = st[0];  // decision function 값 (음수=이상, 양수=정상)
+                        rawScore = -s;    // 대시보드 관례: 값이 클수록 이상 → 부호 반전
+                    }
+                    catch { }
+                }
+            }
+
+            string labelStr = skl.Session == "AD"
+                ? (isAnomaly ? "이상" : "정상")
+                : (predClass >= 0 && skl.ClassNames != null && predClass < skl.ClassNames.Length ? skl.ClassNames[predClass] : predClass.ToString());
+
+            info = $"{skl.ModelType?.ToUpperInvariant()} {skl.Session}  score={rawScore:F4}  =>  {labelStr}";
+            return true;
+        }
+
+        // ── 전역 KNN 모델 로드 ───────────────────────────────────────────────
+        private void LoadGlobalKnnModel()
+        {
+            using (var ofd = new OpenFileDialog { Filter = "PHM Model (*.json)|*.json|All files (*.*)|*.*", Title = "전역 KNN 모델 선택" })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+                PersistedKnnModel model; string err;
+                if (!TryLoadModelFromPath(ofd.FileName, out model, out err))
+                { MessageBox.Show("전역 KNN 로드 실패: " + err); return; }
+                _globalKnnModel = model;
+                _globalKnnModelPath = ofd.FileName;
+                MessageBox.Show("전역 KNN 모델 로드 완료\n" + Path.GetFileName(ofd.FileName)
+                    + "\nYColumn=" + (model.YColumn ?? "(없음)"));
+            }
+        }
+
+        // ── 전역 AE(ONNX) 모델 로드 ─────────────────────────────────────────
+        private void LoadGlobalOnnxAeModel()
+        {
+            using (var ofd = new OpenFileDialog { Filter = "ONNX 모델 (*.onnx)|*.onnx|All files (*.*)|*.*", Title = "전역 AE ONNX 모델 선택" })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+                try
+                {
+                    var session = new InferenceSession(ofd.FileName);
+                    if (_globalOnnxAe?.Session != null) try { _globalOnnxAe.Session.Dispose(); } catch { }
+                    _globalOnnxAe = new OnnxAxisModel
+                    {
+                        AxisId = -1,
+                        ModelPath = ofd.FileName,
+                        Kind = "AE-GLOBAL",
+                        YColumn = "x",   // 기본값; 파일명 규칙 적용 시 변경 가능
+                        C = 3,
+                        InputName = "input",
+                        ReconOutputName = "recon",
+                        IsAutoencoder = true,
+                        StandardizePerSample = true,
+                        Threshold = DefaultThreshold,
+                        Session = session
+                    };
+                    // 파일명에서 YColumn, C, Threshold 파싱 (선택 규칙)
+                    string name = Path.GetFileNameWithoutExtension(ofd.FileName);
+                    var yMatch = Regex.Match(name, @"y=(?<y>[A-Za-z0-9_]+)", RegexOptions.IgnoreCase);
+                    if (yMatch.Success) _globalOnnxAe.YColumn = yMatch.Groups["y"].Value;
+                    var cMatch = Regex.Match(name, @"c=(?<c>\d+)", RegexOptions.IgnoreCase);
+                    if (cMatch.Success && int.TryParse(cMatch.Groups["c"].Value, out int tmpC) && tmpC > 0)
+                        _globalOnnxAe.C = tmpC;
+                    var thrMatch = Regex.Match(name, @"thr=(?<t>[-+]?\d*\.?\d+)", RegexOptions.IgnoreCase);
+                    if (thrMatch.Success && double.TryParse(thrMatch.Groups["t"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double thr) && thr > 0)
+                        _globalOnnxAe.Threshold = thr;
+
+                    MessageBox.Show("전역 AE 모델 로드 완료\n" + Path.GetFileName(ofd.FileName)
+                        + "\nYColumn=" + _globalOnnxAe.YColumn + "  C=" + _globalOnnxAe.C
+                        + "  Thr=" + _globalOnnxAe.Threshold);
+                }
+                catch (Exception ex) { MessageBox.Show("전역 AE 로드 실패: " + ex.Message); }
             }
         }
 
@@ -2151,11 +3017,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     gridModelPaths.Rows[r].Cells["Path"].ToolTipText = om.ModelPath;
                 }
 
+                foreach (var kv in _axisSklModels.OrderBy(k => k.Key))
+                {
+                    var sm = kv.Value;
+                    string file = string.IsNullOrEmpty(sm.ModelPath) ? "" : Path.GetFileName(sm.ModelPath);
+                    string tag = sm.Session == "AD" ? "SKL-AD" : "SKL-FD";
+                    int r = gridModelPaths.Rows.Add("전체", $"{file}  ({tag}/{sm.ModelType?.ToUpperInvariant()})");
+                    gridModelPaths.Rows[r].Cells["Path"].ToolTipText = sm.ModelPath;
+                }
+
                 foreach (var kv in _axisModels.OrderBy(k => k.Key))
                 {
                     var am = kv.Value;
                     string file = string.IsNullOrEmpty(am.ModelPath) ? "" : Path.GetFileName(am.ModelPath);
-                    int r = gridModelPaths.Rows.Add(kv.Key, $"{file}  (KNN/JSON)");
+                    int r = gridModelPaths.Rows.Add("전체", $"{file}  (KNN/JSON)");
                     gridModelPaths.Rows[r].Cells["Path"].ToolTipText = am.ModelPath;
                 }
 
@@ -2173,18 +3048,98 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 if (!string.IsNullOrEmpty(_watchFolder) && Directory.Exists(_watchFolder)) fbd.SelectedPath = _watchFolder;
                 if (fbd.ShowDialog() == DialogResult.OK)
+                    SetWatchFolder(fbd.SelectedPath);
+            }
+        }
+
+        private void SetWatchFolder(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            _watchFolder = path;
+            lblFolder.Text = "폴더: " + _watchFolder;
+            lock (_sync)
+            {
+                _processing.Clear();
+                foreach (KeyValuePair<string, CancellationTokenSource> kv in _debouncers) { try { kv.Value.Cancel(); } catch { } kv.Value.Dispose(); }
+                _debouncers.Clear();
+                _lastProcessedLen.Clear();
+            }
+            AddRecentFolder(path);
+        }
+
+        private void ShowFolderQuickMenu()
+        {
+            var cms = new ContextMenuStrip();
+
+            // ── 고정 폴더 ─────────────────────────────────────────────
+            string signalsRoot = Path.Combine(DefaultLogsPath, "Signals");
+            AddFolderMenuItem(cms, "📂 Signals (기본)", signalsRoot);
+            AddFolderMenuItem(cms, "📂 PHM_Logs", DefaultLogsPath);
+
+            // ── Signals 하위 Axis* 폴더 ──────────────────────────────
+            if (Directory.Exists(signalsRoot))
+            {
+                var axisDirs = Directory.GetDirectories(signalsRoot)
+                    .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
+                        Path.GetFileName(d), @"[Aa]xis\d+"))
+                    .OrderBy(d => d).ToArray();
+                if (axisDirs.Length > 0)
                 {
-                    _watchFolder = fbd.SelectedPath;
-                    lblFolder.Text = "폴더: " + _watchFolder;
-                    lock (_sync)
-                    {
-                        _processing.Clear();
-                        foreach (KeyValuePair<string, CancellationTokenSource> kv in _debouncers) { try { kv.Value.Cancel(); } catch { } kv.Value.Dispose(); }
-                        _debouncers.Clear();
-                        _lastProcessedLen.Clear();
-                    }
+                    cms.Items.Add(new ToolStripSeparator());
+                    foreach (var d in axisDirs)
+                        AddFolderMenuItem(cms, "  📂 " + Path.GetFileName(d), d);
                 }
             }
+
+            // ── 최근 폴더 ─────────────────────────────────────────────
+            var recent = LoadRecentFolders();
+            if (recent.Count > 0)
+            {
+                cms.Items.Add(new ToolStripSeparator());
+                cms.Items.Add(new ToolStripMenuItem("최근 폴더") { Enabled = false });
+                foreach (var r in recent)
+                    AddFolderMenuItem(cms, "  🕐 " + r, r);
+                cms.Items.Add(new ToolStripSeparator());
+                var clearItem = new ToolStripMenuItem("🗑 최근 기록 지우기");
+                clearItem.Click += (s2, e2) => { try { File.Delete(MruFile); } catch { } };
+                cms.Items.Add(clearItem);
+            }
+
+            cms.Show(btnQuickFolder, new System.Drawing.Point(0, btnQuickFolder.Height));
+        }
+
+        private void AddFolderMenuItem(ContextMenuStrip cms, string label, string path)
+        {
+            var item = new ToolStripMenuItem(label) { Enabled = Directory.Exists(path) };
+            item.Click += (s, e) => SetWatchFolder(path);
+            cms.Items.Add(item);
+        }
+
+        private List<string> LoadRecentFolders()
+        {
+            try
+            {
+                if (!File.Exists(MruFile)) return new List<string>();
+                return File.ReadAllLines(MruFile)
+                    .Where(l => !string.IsNullOrWhiteSpace(l) && Directory.Exists(l))
+                    .Distinct()
+                    .Take(MruMaxCount)
+                    .ToList();
+            }
+            catch { return new List<string>(); }
+        }
+
+        private void AddRecentFolder(string path)
+        {
+            try
+            {
+                var list = LoadRecentFolders();
+                list.Remove(path);
+                list.Insert(0, path);
+                try { Directory.CreateDirectory(DefaultLogsPath); } catch { }
+                File.WriteAllLines(MruFile, list.Take(MruMaxCount));
+            }
+            catch { }
         }
 
         private void StartWatch()
@@ -2192,11 +3147,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bool hasKnn = _axisModels != null && _axisModels.Count > 0;
             bool hasAe = _axisOnnx != null && _axisOnnx.Values.Any(om => om?.Session != null && om.IsAutoencoder);
             bool hasCls = _axisOnnxCls != null && _axisOnnxCls.Values.Any(om => om?.Session != null && !om.IsAutoencoder);
-            if (!hasKnn && !hasAe && !hasCls)
+            bool hasSkl = _axisSklModels != null && _axisSklModels.Values.Any(sm => sm?.OnnxSession != null);
+            if (!hasKnn && !hasAe && !hasCls && !hasSkl)
             {
-                MessageBox.Show("먼저 모델을 추가하세요. (AE ONNX / 분류 ONNX / KNN JSON)");
+                MessageBox.Show("먼저 모델을 추가하세요. (SKL ONNX / AE ONNX / 분류 ONNX / KNN JSON)");
                 return;
             }
+
+            if (_isDbMode) { StartDbWatch(); return; }
 
             // 2) 폴더 체크
             if (string.IsNullOrEmpty(_watchFolder) || !Directory.Exists(_watchFolder))
@@ -2237,19 +3195,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _watcher.Created += OnFileCreatedOrChanged;
             _watcher.Changed += OnFileCreatedOrChanged;
             _watcher.Renamed += OnFileRenamed;
+            _watcher.Error   += OnWatcherError;
 
-            // 6) 베이스라인(현재 길이 기록) — 이벤트 켜기 전에
+            // 6) 기존 파일 길이를 베이스라인으로 기록 — 진단 시작 이후 새로 생기는 파일만 처리
             var option = WatchSubdirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
             lock (_sync)
             {
                 _processing.Clear();
                 foreach (var kv in _debouncers) { try { kv.Value.Cancel(); } catch { } try { kv.Value.Dispose(); } catch { } }
                 _debouncers.Clear();
-
                 _lastProcessedLen.Clear();
                 foreach (string f in Directory.EnumerateFiles(_watchFolder, "*.csv", option))
                 {
-                    try { var fi = new FileInfo(f); _lastProcessedLen[f] = fi.Length; } catch { }
+                    try { _lastProcessedLen[f] = new FileInfo(f).Length; } catch { }
                 }
             }
 
@@ -2279,6 +3237,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     _watcher.Created -= OnFileCreatedOrChanged;
                     _watcher.Changed -= OnFileCreatedOrChanged;
                     _watcher.Renamed -= OnFileRenamed;
+                    _watcher.Error   -= OnWatcherError;
                     _watcher.Dispose();
                 }
                 catch { }
@@ -2290,8 +3249,496 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _debouncers.Clear();
                 _processing.Clear();
             }
+
+            // DB 폴링도 중지
+            StopDbWatch();
+
             btnStart.Enabled = true; btnStop.Enabled = false; lblStatus.Text = "상태: 중지";
         }
+
+        // ── DB 모드 전환 ──────────────────────────────────────────────────────
+        private void SwitchSourceMode(bool dbMode)
+        {
+            _isDbMode = dbMode;
+            if (pnlCsvSource != null) pnlCsvSource.Visible = !dbMode;
+            if (pnlDbSource != null)  pnlDbSource.Visible  =  dbMode;
+        }
+
+        // ── InfluxDB 설정 파일 자동 탐색 ─────────────────────────────────────
+        private static string FindInfluxConfigPath()
+        {
+            var candidates = new[]
+            {
+                Path.Combine(ResolveDataRoot(), "Tests", "influx_config.json"),
+                @"D:\Dev\hvs\WorkingSource\DAQ_Test\infra\influx_config.json",
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
+            };
+            foreach (var p in candidates)
+                if (File.Exists(p)) return p;
+            return candidates[2]; // fallback: exe 폴더
+        }
+        private static string ResolveDataRoot()
+        {
+            foreach (var r in new[] { @"E:\Data\PHM_Logs", @"C:\Data\PHM_Logs", @"C:\PHM_Logs" })
+                if (Directory.Exists(r)) return r;
+            return @"C:\Data\PHM_Logs";
+        }
+
+        // ── DB 장치/레이블 목록 갱신 ─────────────────────────────────────────
+        private async void RefreshDbDevices()
+        {
+            btnDbRefresh.Enabled = false;
+            try
+            {
+                EnsureInfluxSource();
+                var devices = await _influxSource.GetDevicesAsync();
+                var labels  = await _influxSource.GetLabelsAsync();
+                BeginInvoke(new Action(() =>
+                {
+                    string prevDev = cmbDbDevice.Text;
+                    string prevLbl = cmbDbLabel.Text;
+                    cmbDbDevice.Items.Clear();
+                    cmbDbLabel.Items.Clear();
+                    cmbDbDevice.Items.Add("");
+                    foreach (var d in devices) cmbDbDevice.Items.Add(d);
+                    cmbDbLabel.Items.Add("");
+                    foreach (var l in labels)  cmbDbLabel.Items.Add(l);
+                    cmbDbDevice.Text = prevDev;
+                    cmbDbLabel.Text  = prevLbl;
+                    AppendEventLog($"[DB] 장치 {devices.Count}개, 레이블 {labels.Count}개 로드됨");
+                }));
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new Action(() => AppendEventLog($"[DB] 목록 갱신 오류: {ex.Message}")));
+            }
+            finally { BeginInvoke(new Action(() => btnDbRefresh.Enabled = true)); }
+        }
+
+        private void EnsureInfluxSource()
+        {
+            // ServerSettings.Current 우선 사용, 없으면 파일에서 로드
+            var cfg = Services.ServerSettings.Current.ToInfluxConfig();
+            if (string.IsNullOrEmpty(cfg.Url) || cfg.Url == "http://localhost:8086")
+            {
+                string cfgPath = FindInfluxConfigPath();
+                cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            }
+            if (_influxSource == null)
+                _influxSource = new InfluxDbDataSource(cfg);
+        }
+
+        // ── DB 진단 시작/중지 ────────────────────────────────────────────────
+        private void StartDbWatch()
+        {
+            StopDbWatch();
+            EnsureInfluxSource();
+
+            string device = cmbDbDevice.Text?.Trim() ?? "";
+            string label  = cmbDbLabel.Text?.Trim()  ?? "";
+            var    from   = dtpDbFrom.Value.ToUniversalTime();
+            var    to     = dtpDbTo.Value.ToUniversalTime();
+
+            if (from >= to)
+            {
+                AppendEventLog("[DB] 오류: 시작 시각이 종료 시각보다 뒤입니다.");
+                return;
+            }
+
+            _influxPollCts = new CancellationTokenSource();
+            var token = _influxPollCts.Token;
+
+            btnStart.Enabled = false;
+            btnStop.Enabled  = true;
+            lblStatus.Text   = $"상태: DB 진단 중...";
+            AppendEventLog($"[DB] 진단 시작 — 장치='{device}' 레이블='{label}' 기간={dtpDbFrom.Value:yyyy-MM-dd HH:mm:ss} ~ {dtpDbTo.Value:yyyy-MM-dd HH:mm:ss}");
+
+            Task.Run(() => RunDbDiagnosisAsync(device, label, from, to, token), token)
+                .ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                        BeginInvoke(new Action(() => AppendEventLog($"[DB] 진단 오류: {t.Exception?.GetBaseException().Message}")));
+                    BeginInvoke(new Action(() =>
+                    {
+                        btnStart.Enabled = true;
+                        btnStop.Enabled  = false;
+                        lblStatus.Text   = "상태: 대기";
+                    }));
+                });
+        }
+
+        private void StopDbWatch()
+        {
+            if (_influxPollCts != null)
+            {
+                try { _influxPollCts.Cancel(); } catch { }
+                try { _influxPollCts.Dispose(); } catch { }
+                _influxPollCts = null;
+            }
+        }
+
+        // ── DB 단발성 진단 ────────────────────────────────────────────────────
+        private static readonly HashSet<string> TorqueYColumns =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "torque", "fbtrq", "trq" };
+
+        /// <summary>로드된 모델 중 하나라도 토크 채널을 사용하면 true</summary>
+        private bool HasTorqueModels()
+        {
+            foreach (var kv in _axisSklModels)
+                if (TorqueYColumns.Contains(kv.Value?.YColumn ?? "")) return true;
+            foreach (var kv in _axisModels)
+                if (TorqueYColumns.Contains(kv.Value?.Model?.YColumn ?? "")) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// 지정 기간의 InfluxDB 데이터를 조회하여 진단합니다. (단발성, 폴링 없음)
+        /// 전체 기간을 하나의 세그먼트로 병합하여 진단 1회 수행합니다.
+        /// </summary>
+        private async Task RunDbDiagnosisAsync(string device, string label, DateTime from, DateTime to, CancellationToken ct)
+        {
+            string devArg = string.IsNullOrEmpty(device) ? null : device;
+            string lblArg = string.IsNullOrEmpty(label)  ? null : label;
+
+            // 전체 기간을 하나의 세그먼트로 취급 — 기간 길이를 segmentSeconds 로 설정
+            double winSecs = (to - from).TotalSeconds + 1.0;
+            int totalSegs = 0;
+
+            // ── (A) accel 세그먼트 ────────────────────────────────────────────
+            var accelSegs = await _influxSource.QuerySegmentsAsync(
+                devArg, lblArg, from, to, segmentSeconds: winSecs, ct: ct);
+
+            if (accelSegs.Count > 0)
+            {
+                BeginInvoke(new Action(() => ProcessInfluxSegment(MergeSegments(accelSegs))));
+                totalSegs += accelSegs.Count;
+            }
+
+            // ── (B) torque 세그먼트 (토크 모델이 있을 때만) ───────────────────
+            if (HasTorqueModels())
+            {
+                var torqueSegs = await _influxSource.QueryTorqueSegmentsAsync(
+                    devArg, lblArg, from, to, segmentSeconds: winSecs, ct: ct);
+
+                if (torqueSegs.Count > 0)
+                {
+                    BeginInvoke(new Action(() => ProcessInfluxSegment(MergeSegments(torqueSegs))));
+                    totalSegs += torqueSegs.Count;
+                }
+            }
+
+            if (totalSegs == 0)
+                BeginInvoke(new Action(() => AppendEventLog("[DB] 해당 기간에 데이터가 없습니다.")));
+        }
+
+        /// <summary>DB 장치/레이블 전체 기간을 dtpDbFrom/dtpDbTo 에 자동 채웁니다.</summary>
+        private async Task FillDbFullRangeAsync()
+        {
+            EnsureInfluxSource();
+            string device = cmbDbDevice.Text?.Trim() ?? "";
+            string label  = cmbDbLabel.Text?.Trim()  ?? "";
+            try
+            {
+                var (first, last) = await _influxSource.GetTimeRangeAsync(
+                    string.IsNullOrEmpty(device) ? null : device,
+                    string.IsNullOrEmpty(label)  ? null : label);
+                dtpDbFrom.Value = first.ToLocalTime();
+                dtpDbTo.Value   = last.ToLocalTime();
+                AppendEventLog($"[DB] 전체 기간: {dtpDbFrom.Value:yyyy-MM-dd HH:mm:ss} ~ {dtpDbTo.Value:yyyy-MM-dd HH:mm:ss}");
+            }
+            catch (Exception ex)
+            {
+                AppendEventLog($"[DB] 기간 조회 오류: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 동일 폴 창의 세그먼트를 시간 순으로 이어 붙여 하나로 반환합니다.
+        /// 이동 1 회분 데이터가 여러 세그먼트로 분할된 경우에도 진단을 1 회만 수행합니다.
+        /// </summary>
+        private static SignalSegment MergeSegments(List<SignalSegment> segs)
+        {
+            if (segs.Count == 1) return segs[0];
+
+            // 시작 시각 순 정렬
+            segs.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            var first = segs[0];
+
+            bool hasX      = segs.Any(s => s.X      != null && s.X.Length      > 0);
+            bool hasY      = segs.Any(s => s.Y      != null && s.Y.Length      > 0);
+            bool hasZ      = segs.Any(s => s.Z      != null && s.Z.Length      > 0);
+            bool hasTorque = segs.Any(s => s.Torque != null && s.Torque.Length > 0);
+
+            int total = segs.Sum(s => s.SampleCount);
+            var time   = new double[total];
+            var xArr   = hasX      ? new double[total] : null;
+            var yArr   = hasY      ? new double[total] : null;
+            var zArr   = hasZ      ? new double[total] : null;
+            var trqArr = hasTorque ? new double[total] : null;
+
+            int offset = 0;
+            foreach (var seg in segs)
+            {
+                double tBase = (seg.StartTime - first.StartTime).TotalSeconds;
+                int n = seg.SampleCount;
+                for (int i = 0; i < n; i++)
+                {
+                    time[offset + i] = tBase + (seg.Time != null && i < seg.Time.Length ? seg.Time[i] : i * 0.001);
+                    if (hasX      && seg.X      != null && i < seg.X.Length)      xArr  [offset + i] = seg.X     [i];
+                    if (hasY      && seg.Y      != null && i < seg.Y.Length)      yArr  [offset + i] = seg.Y     [i];
+                    if (hasZ      && seg.Z      != null && i < seg.Z.Length)      zArr  [offset + i] = seg.Z     [i];
+                    if (hasTorque && seg.Torque != null && i < seg.Torque.Length) trqArr[offset + i] = seg.Torque[i];
+                }
+                offset += n;
+            }
+
+            return new SignalSegment
+            {
+                Name      = first.Name,
+                Label     = first.Label,
+                Device    = first.Device,
+                StartTime = first.StartTime,
+                Time      = time,
+                X         = xArr,
+                Y         = yArr,
+                Z         = zArr,
+                Torque    = trqArr,
+            };
+        }
+
+        // ── InfluxDB 세그먼트 처리 (ProcessCsvSafe의 DB 버전) ────────────────
+        private void ProcessInfluxSegment(SignalSegment seg)
+        {
+            if (seg == null) return;
+
+            // ── 이상치 필터 ─────────────────────────────────────────────────
+            if (!SegmentValidator.IsValid(seg, out var rejectReason))
+            {
+                AppendEventLog($"[SKIP] segment {seg.Name} — outlier rejected ({rejectReason})");
+                return;
+            }
+
+            // 세그먼트 이름/장치에서 axis 파싱 (예: "Axis0", "seg_0000" 등)
+            var axesByName = AxesFromDevice(seg.Device ?? "") ;
+            if (axesByName.Count == 0) axesByName = AxesFromDevice(seg.Name ?? "");
+
+            // estSr: 타임스탬프로부터 계산
+            double estSr = 1000.0;
+            if (seg.Time != null && seg.Time.Length >= 2)
+            {
+                double dur = seg.Time[seg.Time.Length - 1] - seg.Time[0];
+                if (dur > 0) estSr = (seg.Time.Length - 1) / dur;
+            }
+
+            // ---------- (B) KNN — 전체 축 공용 모델 ----------
+            foreach (KeyValuePair<int, AxisModel> kv in _axisModels)
+            {
+                int axis = axesByName.Count > 0 ? axesByName.First() : 0;
+                var am = kv.Value;
+                if (am?.Model == null) continue;
+
+                var m = am.Model;
+                if (string.IsNullOrWhiteSpace(m.YColumn)) continue;
+
+                double[] arr = seg.GetChannel(m.YColumn);
+                if (arr == null || arr.Length < 4) continue;
+
+                double[] sample = SignalFeatures.BuildFeatureVectorFromSeries(arr.ToList(), m.Features, estSr);
+                if (sample == null) continue;
+
+                double score = SignalFeatures.ScoreKnn(sample, m.Train, m.K, m.Standardize, m.Mean, m.Std);
+                double thr   = m.Threshold > 0 ? m.Threshold : DefaultThreshold;
+                bool isAnom  = score >= thr;
+                AlarmLevel level = isAnom ? (score >= thr * 10.0 ? AlarmLevel.Danger : AlarmLevel.Warning) : AlarmLevel.Normal;
+
+                var captAxis = axis; var captScore = score; var captThr = thr;
+                var captLevel = level; var captSeg = seg; var captYCol = m.YColumn;
+                BeginInvoke(new Action(() =>
+                {
+                    RenderSegmentChart(captSeg, captYCol, captAxis);
+                    UpdateKpiAndLog(captAxis, captScore, captThr, captLevel,
+                        $"[KNN] axis {captAxis}  score={captScore:F2}  thr={captThr:F2}  => {AlarmText(captLevel)}  ({captSeg.Name})",
+                        captSeg.StartTime);
+                }));
+            }
+
+            // ---------- (C) sklearn ONNX — 전체 축 공용 모델 ----------
+            foreach (KeyValuePair<int, OnnxSklModel> kv in _axisSklModels.OrderBy(k => k.Key))
+            {
+                int axis = axesByName.Count > 0 ? axesByName.First() : 0;
+                OnnxSklModel skl = kv.Value;
+                if (skl == null || skl.OnnxSession == null) continue;
+                if (string.IsNullOrWhiteSpace(skl.YColumn)) continue;
+
+                double[] arr = seg.GetChannel(skl.YColumn);
+                if (arr == null || arr.Length < 4) continue;
+
+                double[] vec = SignalFeatures.BuildFeatureVectorFromSeries(arr.ToList(), skl.Features, estSr);
+                if (vec == null || vec.Length != skl.Features.Length) continue;
+
+                bool isAnom; int predClass; float[] probs; double rawScore; string sklInfo;
+                if (!TrySklOnnxScoreFromVec(skl, vec, out isAnom, out predClass, out probs, out rawScore, out sklInfo))
+                    continue;
+
+                bool isKnnAd = skl.Session == "AD" && skl.ModelType == "knn"
+                               && skl.TrainVectors != null && skl.TrainVectors.Length > 0;
+                double thr = isKnnAd ? skl.Threshold
+                           : skl.ScoreThreshold > 0 ? skl.ScoreThreshold : 0.0;
+                bool useScoreThreshold = isKnnAd || skl.ScoreThreshold > 0;
+
+                AlarmLevel level;
+                if (skl.Session == "AD")
+                    level = useScoreThreshold
+                          ? (rawScore >= thr * 1.5 ? AlarmLevel.Danger : rawScore >= thr ? AlarmLevel.Warning : AlarmLevel.Normal)
+                          : (isAnom ? AlarmLevel.Warning : AlarmLevel.Normal);
+                else
+                    level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+
+                var captAxis = axis; var captSkl = skl; var captRaw = rawScore;
+                var captThr2 = useScoreThreshold ? thr : skl.Threshold;
+                var captLevel = level; var captInfo = sklInfo; var captProbs = probs;
+                var captPred = predClass; var captSeg = seg;
+                BeginInvoke(new Action(() =>
+                {
+                    RenderSegmentChart(captSeg, captSkl.YColumn, captAxis);
+                    UpdateKpiAndLog(captAxis, captRaw, captThr2, captLevel,
+                        $"[SKL-{captSkl.Session}] axis {captAxis}  {captInfo}  => {AlarmText(captLevel)}  ({captSeg.Name})",
+                        captSeg.StartTime);
+                    if (captProbs != null && captProbs.Length > 0)
+                        UpdateAxisClassGauge(captAxis, captProbs, captPred >= 0 ? captPred : (isAnom ? 1 : 0));
+                }));
+            }
+
+            // ---------- (D) 전역 모델 폴백 (DB 모드) ----------
+            if (_globalKnnModel != null || _globalOnnxAe != null)
+            {
+                var coveredAxes = new HashSet<int>(
+                    _axisModels.Keys.Concat(_axisSklModels.Keys));
+                var candidateAxes = axesByName.Count > 0
+                    ? new HashSet<int>(axesByName)
+                    : new HashSet<int>(coveredAxes);
+                if (candidateAxes.Count == 0) candidateAxes.Add(0);
+
+                foreach (int axis in candidateAxes)
+                {
+                    if (coveredAxes.Contains(axis)) continue;
+
+                    if (_globalKnnModel != null)
+                    {
+                        var gm = _globalKnnModel;
+                        double[] arr = string.IsNullOrWhiteSpace(gm.YColumn)
+                            ? null
+                            : seg.GetChannel(gm.YColumn);
+                        if (arr != null && arr.Length >= 4)
+                        {
+                            double[] sample = SignalFeatures.BuildFeatureVectorFromSeries(arr.ToList(), gm.Features, estSr);
+                            if (sample != null)
+                            {
+                                double score = SignalFeatures.ScoreKnn(sample, gm.Train, gm.K, gm.Standardize, gm.Mean, gm.Std);
+                                double thr = gm.Threshold > 0 ? gm.Threshold : DefaultThreshold;
+                                AlarmLevel level = score >= thr
+                                    ? (score >= thr * 10.0 ? AlarmLevel.Danger : AlarmLevel.Warning)
+                                    : AlarmLevel.Normal;
+                                var captAxis = axis; var captScore = score; var captThr = thr; var captSeg = seg;
+                                BeginInvoke(new Action(() =>
+                                    UpdateKpiAndLog(captAxis, captScore, captThr, level,
+                                        $"[G-KNN] axis {captAxis}  score={captScore:F2}  thr={captThr:F2}  => {AlarmText(level)}  ({captSeg.Name})",
+                                        captSeg.StartTime)));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 샘플 차트 렌더링 (DB 모드 — 인메모리 배열 사용) ──────────────
+            if (seg.X != null && seg.X.Length > 0)
+            {
+                var xsSec = new List<double>(seg.X.Length);
+                var yMain = new List<double>(seg.X.Length);
+                var chXList = new List<double>(seg.X.Length);
+                var chYList = new List<double>(seg.X.Length);
+                var chZList = new List<double>(seg.X.Length);
+
+                double t0 = seg.Time != null && seg.Time.Length > 0 ? seg.Time[0] : 0.0;
+                for (int i = 0; i < seg.X.Length; i++)
+                {
+                    double t = seg.Time != null && i < seg.Time.Length
+                        ? seg.Time[i] - t0
+                        : i * (estSr > 0 ? 1.0 / estSr : 0.001);
+                    double vx = seg.X[i];
+                    double vy = seg.Y != null && i < seg.Y.Length ? seg.Y[i] : 0.0;
+                    double vz = seg.Z != null && i < seg.Z.Length ? seg.Z[i] : 0.0;
+                    xsSec.Add(t);
+                    yMain.Add(Math.Sqrt(vx * vx + vy * vy + vz * vz));
+                    chXList.Add(vx);
+                    chYList.Add(vy);
+                    chZList.Add(vz);
+                }
+
+                // 추론한 모든 축에 차트 렌더링
+                var chartAxes = new HashSet<int>(axesByName.Count > 0
+                    ? axesByName
+                    : _axisModels.Keys.Concat(_axisSklModels.Keys));
+                if (chartAxes.Count == 0) chartAxes.Add(0); // 기본 axis 0
+
+                var captXs  = xsSec;
+                var captYm  = yMain;
+                var captChX = chXList;
+                var captChY = chYList;
+                var captChZ = chZList;
+                foreach (int chartAxis in chartAxes)
+                {
+                    var captAx = chartAxis;
+                    BeginInvoke(new Action(() =>
+                        RenderSampleChartFromArrays(captAx, "Accel |a|", captXs, captYm, captChX, captChY, captChZ, true)));
+                }
+            }
+        }
+
+        // ── Device 이름에서 axis 번호 파싱 ──────────────────────────────────
+        private static HashSet<int> AxesFromDevice(string deviceOrName)
+        {
+            var axes = new HashSet<int>();
+            if (string.IsNullOrEmpty(deviceOrName)) return axes;
+            var m = Regex.Matches(deviceOrName, @"Axis(?<id>\d+)", RegexOptions.IgnoreCase);
+            foreach (Match mm in m)
+                if (int.TryParse(mm.Groups["id"].Value, out int ax)) axes.Add(ax);
+            return axes;
+        }
+
+        // ── KPI 업데이트 + 이벤트 로그 공통 헬퍼 ──────────────────────────
+        private void UpdateKpiAndLog(int axis, double score, double thr, AlarmLevel level, string logMsg, DateTime timestamp)
+        {
+            if (level == AlarmLevel.Danger)  Interlocked.Increment(ref cntDanger);
+            else if (level == AlarmLevel.Warning) Interlocked.Increment(ref cntWarning);
+            Interlocked.Increment(ref cycles);
+            cardDanger.ValueText  = cntDanger  + " 건";
+            cardWarning.ValueText = cntWarning + " 건";
+            cardCycles.ValueText  = cycles     + " 회";
+
+            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] {logMsg}");
+
+            if (level != AlarmLevel.Normal)
+            {
+                ShowToast(level, axis, score);
+                rows.Add(new EventRow
+                {
+                    TimeLine     = timestamp.ToLocalTime().ToString("yyyy.MM.dd HH:mm:ss"),
+                    Axis         = axis,
+                    AnomalyScore = Math.Round(score, 4),
+                    Threshold    = Math.Round(thr, 4),
+                    Alarm        = level == AlarmLevel.Danger ? "위험" : "경고"
+                });
+                if (grid.Rows.Count > 0)
+                    try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
+            }
+
+            scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, score));
+            while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+        }
+
+        private static string AlarmText(AlarmLevel l)
+            => l == AlarmLevel.Danger ? "DANGER" : l == AlarmLevel.Warning ? "WARN" : "OK";
 
         private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
@@ -2350,6 +3797,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 System.Diagnostics.Debug.WriteLine(ex);
             }
         }
+
+        private void OnWatcherError(object sender, ErrorEventArgs e)
+        {
+            BeginInvoke(new Action(() =>
+                AppendEventLog($"[FSW-ERROR] 감시 오류: {e.GetException()?.Message} — 재시작 중...")));
+
+            // 오류 발생 시 Watcher 재시작
+            try
+            {
+                if (_watcher != null)
+                {
+                    _watcher.EnableRaisingEvents = false;
+                    _watcher.EnableRaisingEvents = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new Action(() =>
+                    AppendEventLog($"[FSW-ERROR] 재시작 실패: {ex.Message}")));
+            }
+        }
         #endregion
 
         #region 파일 처리/스코어링
@@ -2364,7 +3832,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 long lastLen = 0;
                 lock (_sync) { _lastProcessedLen.TryGetValue(path, out lastLen); }
-                if (curLen <= lastLen) return; // 증분 없음 → 스킵
+                if (curLen <= lastLen)
+                    return;
 
                 string[] headers = Retry<string[]>(() => SignalFeatures.GetCsvHeaders(path), 5, 100);
                 if (headers == null || headers.Length == 0) return;
@@ -2372,6 +3841,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 var axesByName = AxesFromFilename(path);
                 HashSet<string> headerSet = new HashSet<string>(headers.Select(h => h == null ? null : h.Trim()).Where(h => !string.IsNullOrEmpty(h)), StringComparer.OrdinalIgnoreCase);
                 List<int> movedAxes = DetermineMovedAxes(path, headers, MotionEps);
+
                 bool anyAxisProcessed = false;
 
                 // ---------- (A) AE 우선 ----------
@@ -2452,6 +3922,44 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     }
                 }
 
+                // ---------- (A2) CLS 단독 — AE 없이 분류만 등록된 축 처리 ----------
+                foreach (var kv in _axisOnnxCls.OrderBy(k => k.Key))
+                {
+                    int axis = kv.Key;
+                    var cls = kv.Value;
+                    if (cls == null || cls.Session == null || cls.IsAutoencoder) continue;
+                    // AE가 이미 커버한 축은 (B)에서 처리됐으므로 skip
+                    if (_axisOnnx.ContainsKey(axis) && _axisOnnx[axis]?.Session != null) continue;
+                    if (axesByName.Count > 0 && !axesByName.Contains(axis)) continue;
+                    if (movedAxes.Count > 0 && !movedAxes.Contains(axis)) continue;
+                    if (string.IsNullOrWhiteSpace(cls.YColumn) || !HasYColumns(headers, cls, axis)) continue;
+
+                    int predCls; float[] probsCls; string infoCls;
+                    if (!TryOnnxInferOnce(axis, path, out predCls, out probsCls, out infoCls)) continue;
+
+                    anyAxisProcessed = true;
+                    var capAxis = axis; var capPred = predCls; var capProbs = probsCls;
+                    var capInfo = infoCls; var capYCol = cls.YColumn;
+                    BeginInvoke(new Action(() =>
+                    {
+                        RenderSampleChartSafe(path, capYCol, capAxis);
+                        Interlocked.Increment(ref cycles);
+                        cardCycles.ValueText = cycles + " 회";
+
+                        // 게이지에서 레이블 조회
+                        ProbGaugeControl gauge;
+                        string[] gaugeLabels = _axisGauges.TryGetValue(capAxis, out gauge) ? gauge.Labels : null;
+                        string predLabel = (gaugeLabels != null && capPred >= 0 && capPred < gaugeLabels.Length)
+                            ? gaugeLabels[capPred] : capPred.ToString();
+                        float p = (capProbs != null && capProbs.Length > 0 && capPred >= 0 && capPred < capProbs.Length)
+                            ? capProbs[capPred] : 0f;
+
+                        AppendEventLog($"[CLS] axis {capAxis}  pred={predLabel} p={p:0.000}  ({capInfo})  ({Path.GetFileName(path)})");
+                        UpdateAxisClassGauge(capAxis, capProbs, capPred);
+                        lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (CLS axis {capAxis}, {Path.GetFileName(path)})";
+                    }));
+                }
+
                 foreach (KeyValuePair<int, AxisModel> kv in _axisModels.OrderBy(k => k.Key))
                 {
                     int axis = kv.Key;
@@ -2530,9 +4038,179 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     }));
                 }
 
-                if (anyAxisProcessed)
+                // ---------- (C) sklearn ONNX (AIForm 모델) — 전체 축 공용 모델 ----------
+                foreach (KeyValuePair<int, OnnxSklModel> kv in _axisSklModels.OrderBy(k => k.Key))
                 {
-                    lock (_sync) { _lastProcessedLen[path] = curLen; }
+                    int axis = axesByName.Count > 0 ? axesByName.First() : 0;
+                    OnnxSklModel skl = kv.Value;
+                    if (skl == null || skl.OnnxSession == null) continue;
+                    if (string.IsNullOrWhiteSpace(skl.YColumn)) continue;
+
+                    // 토크 모델은 토크 CSV 컬럼 이름으로 재매핑 (예: "torque" → "Ax0_Trq(%)")
+                    string effectiveYColumn = TorqueYColumns.Contains(skl.YColumn)
+                        ? ResolveTorqueColumn(headers, axesByName.Count > 0 ? axesByName.First() : 0)
+                        : skl.YColumn;
+                    if (string.IsNullOrEmpty(effectiveYColumn) || !headerSet.Contains(effectiveYColumn)) continue;
+
+                    bool isAnom; int predClass; float[] probs; double rawScore; string sklInfo;
+                    if (!TrySklOnnxScore(skl, path, effectiveYColumn, out isAnom, out predClass, out probs, out rawScore, out sklInfo))
+                        continue;
+
+                    // 임계값 결정:
+                    // knn AD: C# kNN 거리 기준 → Threshold 직접 사용
+                    // 그 외 AD: score_threshold(decision function 기반) 있으면 사용, 없으면 label만
+                    bool isKnnAd = skl.Session == "AD" && skl.ModelType == "knn"
+                                   && skl.TrainVectors != null && skl.TrainVectors.Length > 0;
+                    double thr = isKnnAd                      ? skl.Threshold
+                               : skl.ScoreThreshold > 0      ? skl.ScoreThreshold
+                                                              : 0.0;
+                    bool useScoreThreshold = isKnnAd || skl.ScoreThreshold > 0;
+
+                    AlarmLevel level;
+                    if (skl.Session == "AD")
+                    {
+                        if (useScoreThreshold)
+                            level = rawScore >= thr * 1.5 ? AlarmLevel.Danger
+                                  : rawScore >= thr       ? AlarmLevel.Warning
+                                  : AlarmLevel.Normal;
+                        else
+                            level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+                    }
+                    else
+                        level = isAnom ? AlarmLevel.Warning : AlarmLevel.Normal;
+
+                    anyAxisProcessed = true;
+
+                    BeginInvoke(new Action(() =>
+                    {
+                        RenderSampleChartSafe(path, effectiveYColumn, axis);
+
+                        if (level == AlarmLevel.Danger) Interlocked.Increment(ref cntDanger);
+                        else if (level == AlarmLevel.Warning) Interlocked.Increment(ref cntWarning);
+                        Interlocked.Increment(ref cycles);
+                        cardDanger.ValueText = cntDanger + " 건";
+                        cardWarning.ValueText = cntWarning + " 건";
+                        cardCycles.ValueText = cycles + " 회";
+
+                        var alarmText = level == AlarmLevel.Danger ? "DANGER" : level == AlarmLevel.Warning ? "WARN" : "OK";
+                        AppendEventLog($"[SKL-{skl.Session}] axis {axis}  {sklInfo}  => {alarmText}  ({Path.GetFileName(path)})");
+
+                        if (probs != null && probs.Length > 0)
+                            UpdateAxisClassGauge(axis, probs, predClass >= 0 ? predClass : (isAnom ? 1 : 0));
+
+                        if (level != AlarmLevel.Normal)
+                        {
+                            ShowToast(level, axis, rawScore);
+                            rows.Add(new EventRow
+                            {
+                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Axis = axis,
+                                AnomalyScore = Math.Round(rawScore, 4),
+                                Threshold = Math.Round(useScoreThreshold ? thr : skl.Threshold, 4),
+                                Alarm = level == AlarmLevel.Danger ? "위험" : "경고"
+                            });
+                            if (grid.Rows.Count > 0)
+                                try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
+                        }
+
+                        scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, rawScore));
+                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                        lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (SKL axis {axis}, {Path.GetFileName(path)})";
+                    }));
+                }
+
+                // ---------- (D) 전역 모델 폴백 — 축별 모델이 없는 축에 적용 ----------
+                if (_globalKnnModel != null || _globalOnnxAe != null)
+                {
+                    // 이미 처리된 축 수집
+                    var coveredAxes = new HashSet<int>(
+                        _axisModels.Keys.Concat(_axisOnnx.Keys).Concat(_axisSklModels.Keys));
+
+                    // 이 파일의 후보 축 (파일명 기반 + 커버된 축)
+                    var candidateAxes = axesByName.Count > 0
+                        ? new HashSet<int>(axesByName)
+                        : new HashSet<int>(coveredAxes);
+                    if (candidateAxes.Count == 0) candidateAxes.Add(0);
+
+                    foreach (int axis in candidateAxes)
+                    {
+                        if (coveredAxes.Contains(axis)) continue; // 이미 처리됨
+
+                        // 전역 KNN
+                        if (_globalKnnModel != null)
+                        {
+                            var gm = _globalKnnModel;
+                            if (!string.IsNullOrWhiteSpace(gm.YColumn) && headerSet.Contains(gm.YColumn))
+                            {
+                                double[] sample = Retry<double[]>(() => BuildFeatureVectorFromCsv(path, gm.YColumn, gm.Features), 5, 100);
+                                if (sample != null)
+                                {
+                                    double score = SignalFeatures.ScoreKnn(sample, gm.Train, gm.K, gm.Standardize, gm.Mean, gm.Std);
+                                    double thr = gm.Threshold > 0 ? gm.Threshold : DefaultThreshold;
+                                    bool isAnom = score >= thr;
+                                    AlarmLevel level = isAnom ? (score >= thr * 10.0 ? AlarmLevel.Danger : AlarmLevel.Warning) : AlarmLevel.Normal;
+                                    anyAxisProcessed = true;
+                                    var captAxis = axis; var captScore = score; var captThr = thr; var captLevel = level;
+                                    BeginInvoke(new Action(() =>
+                                    {
+                                        RenderSampleChartSafe(path, gm.YColumn, captAxis);
+                                        if (captLevel == AlarmLevel.Danger) Interlocked.Increment(ref cntDanger);
+                                        else if (captLevel == AlarmLevel.Warning) Interlocked.Increment(ref cntWarning);
+                                        Interlocked.Increment(ref cycles);
+                                        cardDanger.ValueText = cntDanger + " 건"; cardWarning.ValueText = cntWarning + " 건"; cardCycles.ValueText = cycles + " 회";
+                                        var alarmText = captLevel == AlarmLevel.Danger ? "DANGER" : captLevel == AlarmLevel.Warning ? "WARN" : "OK";
+                                        AppendEventLog($"[G-KNN] axis {captAxis}  score={captScore:F2}  thr={captThr:F2}  => {alarmText}  ({Path.GetFileName(path)})");
+                                        if (captLevel != AlarmLevel.Normal) ShowToast(captLevel, captAxis, captScore);
+                                        scoreSeries.Enqueue(Tuple.Create(captAxis, DateTime.Now, captScore));
+                                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                                        lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (G-KNN axis {captAxis}, {Path.GetFileName(path)})";
+                                    }));
+                                }
+                            }
+                        }
+
+                        // 전역 AE(ONNX)
+                        if (_globalOnnxAe?.Session != null)
+                        {
+                            var gae = _globalOnnxAe;
+                            if (!string.IsNullOrWhiteSpace(gae.YColumn) && HasYColumns(headers, gae, axis))
+                            {
+                                double scoreAe; string infoAe;
+                                if (TryOnnxAeScoreOnce(axis, path, gae, out scoreAe, out infoAe))
+                                {
+                                    double thrAe = gae.Threshold > 0 ? gae.Threshold : DefaultThreshold;
+                                    bool isAnom = scoreAe >= thrAe;
+                                    AlarmLevel level = isAnom ? (scoreAe >= thrAe * 10.0 ? AlarmLevel.Danger : AlarmLevel.Warning) : AlarmLevel.Normal;
+                                    anyAxisProcessed = true;
+                                    var captAxis = axis; var captScore = scoreAe; var captThr = thrAe; var captLevel = level;
+                                    BeginInvoke(new Action(() =>
+                                    {
+                                        RenderSampleChartSafe(path, gae.YColumn, captAxis);
+                                        if (captLevel == AlarmLevel.Danger) Interlocked.Increment(ref cntDanger);
+                                        else if (captLevel == AlarmLevel.Warning) Interlocked.Increment(ref cntWarning);
+                                        Interlocked.Increment(ref cycles);
+                                        cardDanger.ValueText = cntDanger + " 건"; cardWarning.ValueText = cntWarning + " 건"; cardCycles.ValueText = cycles + " 회";
+                                        var alarmText = captLevel == AlarmLevel.Danger ? "DANGER" : captLevel == AlarmLevel.Warning ? "WARN" : "OK";
+                                        AppendEventLog($"[G-AE] axis {captAxis}  mae={captScore:F4}  thr={captThr:F4}  => {alarmText}  ({Path.GetFileName(path)})");
+                                        if (captLevel != AlarmLevel.Normal) ShowToast(captLevel, captAxis, captScore);
+                                        scoreSeries.Enqueue(Tuple.Create(captAxis, DateTime.Now, captScore));
+                                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                                        lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (G-AE axis {captAxis}, {Path.GetFileName(path)})";
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 처리 시도 여부와 무관하게 현재 길이 저장 → 동일 파일 재처리 방지
+                lock (_sync) { _lastProcessedLen[path] = curLen; }
+
+                if (!anyAxisProcessed)
+                {
+                    // 모델 매칭 실패 로그 (디버그용)
+                    BeginInvoke(new Action(() =>
+                        AppendEventLog($"[FSW] 매칭 모델 없음: {Path.GetFileName(path)} (헤더/Y컬럼 불일치?)")));
                 }
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
@@ -2640,6 +4318,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 s.Points.AddXY(t.ToOADate(), y);
             }
 
+            // --- 서버 실시간 추론 점수 추가 ---
+            Tuple<string, DateTime, double> liveItem;
+            while (_liveScoreQueue.TryDequeue(out liveItem))
+            {
+                var ls = EnsureLiveSeries(liveItem.Item1);
+                ls.Points.AddXY(liveItem.Item2.ToOADate(), liveItem.Item3);
+            }
+
             // --- 오래된 포인트 정리(시리즈별) ---
             foreach (Series s in chartLine.Series)
             {
@@ -2666,6 +4352,89 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             chartLine.Series.Add(s);
             return s;
+        }
+
+        /// <summary>서버 실시간 추론 전용 차트 시리즈를 반환 (없으면 생성).</summary>
+        private Series EnsureLiveSeries(string sensorType)
+        {
+            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
+            string name = isAccel ? "서버-가속도" : "서버-토크";
+            var s = chartLine.Series.FindByName(name);
+            if (s != null) return s;
+
+            s = new Series(name)
+            {
+                ChartType   = SeriesChartType.FastLine,
+                XValueType  = ChartValueType.DateTime,
+                BorderWidth = 2,
+                LegendText  = name,
+                Color       = isAccel ? Color.DodgerBlue : Color.OrangeRed,
+                BorderDashStyle = ChartDashStyle.Dot,
+            };
+            chartLine.Series.Add(s);
+            return s;
+        }
+
+        /// <summary>
+        /// AppEvents.InferenceResultReceived 핸들러 — 서버 추론 결과를 UI에 반영합니다.
+        /// </summary>
+        private void OnLiveInferenceResult(string sensorType, InferenceResult result)
+        {
+            if (result == null) return;
+
+            // 차트에 넣을 점수를 큐에 추가 (스레드 안전)
+            _liveScoreQueue.Enqueue(Tuple.Create(sensorType, DateTime.Now, (double)result.AnomalyScore));
+            while (_liveScoreQueue.Count > 600)
+            {
+                Tuple<string, DateTime, double> _discard;
+                _liveScoreQueue.TryDequeue(out _discard);
+            }
+
+            // UI 컨트롤 업데이트는 UI 스레드에서
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                bool isAccel   = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
+                var lblStatus  = isAccel ? _lblLiveAccelStatus  : _lblLiveTorqueStatus;
+                var lblScore   = isAccel ? _lblLiveAccelScore   : _lblLiveTorqueScore;
+                if (lblStatus == null || lblScore == null) return;
+
+                string stateText = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
+                Color  stateClr  = result.IsAnomaly ? Color.Red : Color.Green;
+
+                lblStatus.Text      = stateText;
+                lblStatus.ForeColor = stateClr;
+                lblStatus.Font      = new Font(Font, FontStyle.Bold);
+
+                string cls = !string.IsNullOrEmpty(result.ClassName) &&
+                             !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
+                             !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase)
+                             ? $" {result.ClassName}" : "";
+                lblScore.Text = $"{result.AnomalyScore:F3}{cls}";
+
+                // 이상 감지 시 KPI / 이벤트 로그 갱신
+                if (result.IsAnomaly)
+                {
+                    cntDanger++;
+                    cardDanger.ValueText = cntDanger + " 건";
+
+                    string sensorLabel = isAccel ? "가속도" : "토크";
+                    AppendEventLog(
+                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {sensorLabel} 이상  " +
+                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}" +
+                        (string.IsNullOrEmpty(result.ClassName) ? "" : $"  class={result.ClassName}"));
+
+                    rows.Add(new EventRow
+                    {
+                        TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
+                        Axis         = isAccel ? -1 : -2,
+                        AnomalyScore = Math.Round(result.AnomalyScore, 4),
+                        Threshold    = Math.Round(result.Threshold, 4),
+                        Alarm        = sensorLabel + " 이상"
+                    });
+                    if (rows.Count > 500) rows.RemoveAt(0);
+                }
+            }));
         }
 
         private static bool HasYColumns(string[] headers, OnnxAxisModel om, int axis)
