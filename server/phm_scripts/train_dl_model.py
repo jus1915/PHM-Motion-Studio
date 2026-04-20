@@ -272,8 +272,14 @@ def _read_signal_csv(
         # 축 번호 없는 채널명(e.g. "Trq(%)") → 실제 컬럼명(e.g. "Ax0_Trq(%)") 해석
         actual_channels = _resolve_channels(list(reader.fieldnames), channels)
         has_label = label_column in (reader.fieldnames or [])
+        # Op 컬럼이 있으면 Idle 구간 제외 (대소문자 무시)
+        fieldnames_lower = [f.strip().lower() for f in (reader.fieldnames or [])]
+        op_col = next((reader.fieldnames[i] for i, f in enumerate(fieldnames_lower) if f == "op"), None)
 
         for row in reader:
+            # Idle 구간 스킵
+            if op_col and row.get(op_col, "").strip().lower() == "idle":
+                continue
             try:
                 vals = [float(row[c]) for c in actual_channels]
             except (KeyError, ValueError, TypeError):
