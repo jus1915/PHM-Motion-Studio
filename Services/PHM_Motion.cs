@@ -517,14 +517,32 @@ namespace PHM_Project_DockPanel.Services
             if (!string.IsNullOrWhiteSpace(inferUrl))
             {
                 _inferenceService?.Dispose();
+                if (_accelLogger  != null) _accelLogger.GetOperation  = GetCurrentOperation;
+                if (_ajinLogger   != null) _ajinLogger.GetOperation   = GetCurrentOperation;
                 _inferenceService = new ContinuousInferenceService(
-                    inferUrl, _accelLogger, _ajinLogger);
+                    inferUrl, _accelLogger, _ajinLogger, GetCurrentOperation);
                 _inferenceService.Start();
             }
 
             return true;  // 플래그 활성화 성공 → 항상 true 반환
         }
 
+        /// <summary>?꾩옱 紐⑦꽣 ?숈옉 ?곹깭瑜?諛섑솚?⑸땲?? ?섎굹?쇰룄 ?吏곸씠硫?"Pos", ?꾨? Idle?대㈃ "Idle".</summary>
+        public string GetCurrentOperation()
+        {
+            try
+            {
+                var status = _controller.GetStatus();
+                if (status?.AxesStatus == null) return "Idle";
+                foreach (var ax in status.AxesStatus)
+                {
+                    if (ax.OpState != OperationState.Idle)
+                        return "Pos";
+                }
+                return "Idle";
+            }
+            catch { return "Idle"; }
+        }
         /// <summary>연속 수집을 중지하고 CSV를 닫습니다.</summary>
         public void StopContinuousLogging()
         {

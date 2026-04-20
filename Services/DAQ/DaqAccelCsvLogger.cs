@@ -37,6 +37,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public double MinG { get { return _minG; } set { _minG = value; } }
         public double MaxG { get { return _maxG; } set { _maxG = value; } }
         public double IepeCurrentAmps { get { return _iepeCurrentAmps; } set { _iepeCurrentAmps = value > 0 ? value : 0.004; } }
+        /// <summary>?몄텧 ??"Idle" ?먮뒗 "Pos"瑜?諛섑솚. null?대㈃ "Pos"濡?媛꾩＜.</summary>
+        public Func<string> GetOperation { get; set; }
 
         // ===== 민감도/오프셋 (mV/g, g) =====
         private class AxisSens { public double X; public double Y; public double Z; }
@@ -240,7 +242,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     // UTF-8, 4KB 내부 버퍼
                     _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = false };
                     // 헤더
-                    _swByMod[m].WriteLine("time_s,x,y,z");
+                    _swByMod[m].WriteLine("time_s,x,y,z,Op");
                 }
 
                 _reader = new AnalogMultiChannelReader(_aiTask.Stream)
@@ -377,7 +379,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         gx -= off.X; gy -= off.Y; gz -= off.Z;
 
                         if (_swByMod[m] != null)
-                            _swByMod[m].WriteLine(t.ToString("F6") + "," + gx.ToString("G6") + "," + gy.ToString("G6") + "," + gz.ToString("G6"));
+                            _swByMod[m].WriteLine(t.ToString("F6") + "," + gx.ToString("G6") + "," + gy.ToString("G6") + "," + gz.ToString("G6") + "," + opNow);
                     }
                 }
 

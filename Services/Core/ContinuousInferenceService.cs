@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -31,6 +31,7 @@ namespace PHM_Project_DockPanel.Services.Core
 
         private CancellationTokenSource _cts;
         private Task                    _loopTask;
+        private readonly Func<string>   _getOperation;
 
         // 추론 주기 (ms)
         private const int IntervalMs = 2000;
@@ -44,11 +45,13 @@ namespace PHM_Project_DockPanel.Services.Core
         public ContinuousInferenceService(
             string             inferenceServerUrl,
             DaqAccelCsvLogger  accelLogger,
-            AjinCsvLogger      torqueLogger)
+            AjinCsvLogger      torqueLogger,
+            Func<string>       getOperation = null)
         {
-            _client       = new InferenceServerClient(inferenceServerUrl);
-            _accelLogger  = accelLogger;
-            _torqueLogger = torqueLogger;
+            _client        = new InferenceServerClient(inferenceServerUrl);
+            _accelLogger   = accelLogger;
+            _torqueLogger  = torqueLogger;
+            _getOperation  = getOperation;
         }
 
         // ── 시작 / 중지 ────────────────────────────────────────────────────────
@@ -76,6 +79,8 @@ namespace PHM_Project_DockPanel.Services.Core
                     await Task.Delay(IntervalMs, ct).ConfigureAwait(false);
                 }
                 catch (TaskCanceledException) { break; }
+                // Idle 援ш컙 異붾줎 ?ㅽ궢
+                if (_getOperation?.Invoke() == "Idle") continue;
 
                 // ── 가속도 ────────────────────────────────────────────────────
                 if (_accelLogger?.IsRunning == true)
@@ -179,7 +184,23 @@ namespace PHM_Project_DockPanel.Services.Core
                 if (signalCols.Length == 0) return (null, 0);
 
                 // 데이터 행 (헤더 제외)
-                string[] dataLines = lines.Skip(1).ToArray();
+                // Op==Idle ???쒓굅 ???곗씠???쇱씤 援ъ꽦
+                int opColIdx = -1;
+                for (int _i = 0; _i < headers.Length; _i++)
+                {
+                    if (string.Equals(headers[_i].Trim(), "Op", System.StringComparison.OrdinalIgnoreCase))
+                    { opColIdx = _i; break; }
+                }
+                string[] dataLines = lines.Skip(1)
+                    .Where(_ln =>
+                    {
+                        if (opColIdx < 0) return true;
+                        var _cols = _ln.Split(',');
+                        return _cols.Length <= opColIdx ||
+                               !string.Equals(_cols[opColIdx].Trim(), "Idle",
+                                   System.StringComparison.OrdinalIgnoreCase);
+                    })
+                    .ToArray();
                 if (dataLines.Length < windowSize)
                     return (null, 0); // 데이터 부족
 

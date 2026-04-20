@@ -51,6 +51,8 @@ namespace PHM_Project_DockPanel.Services.WMX
         /// InfluxDB 실시간 토크 게시에 사용.
         /// </summary>
         public Action<string, int, double, DateTime> TorqueSampled;
+        /// <summary>?몄텧 ??"Idle" ?먮뒗 "Pos"瑜?諛섑솚. null?대㈃ "Pos"濡?媛꾩＜.</summary>
+        public Func<string> GetOperation { get; set; }
 
         public AjinCsvLogger(
             Func<int, double> getPos,
@@ -103,6 +105,7 @@ namespace PHM_Project_DockPanel.Services.WMX
             var header = new StringBuilder("time_s");
             foreach (int ax in _axes)
                 header.Append($",Ax{ax}_Trq(%)");
+            header.Append(",Op");
 
             var sw = Stopwatch.StartNew();
 
@@ -139,6 +142,8 @@ namespace PHM_Project_DockPanel.Services.WMX
                             TorqueSampled?.Invoke(Device ?? _fileSuffix, ax, trq, DateTime.UtcNow);
                         }
 
+                        string _opNow = GetOperation?.Invoke() ?? "Pos";
+                        line.Append("," + _opNow);
                         writer.WriteLine(line.ToString());
 
                         // ── 고정 인터벌 대기 ──────────────────────────────
