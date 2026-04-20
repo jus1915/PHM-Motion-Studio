@@ -321,11 +321,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             evtWrap.Controls.Add(_grid);
             evtWrap.Controls.Add(lblEvt);
 
+            // form → root 순으로 먼저 부모에 추가해야 percent 행 높이가 0이 되지 않음
+            this.ClientSize = new Size(900, 620);
+            Controls.Add(root);
+
             root.Controls.Add(header,    0, 0);
             root.Controls.Add(cardRow,   0, 1);
             root.Controls.Add(chartWrap, 0, 2);
             root.Controls.Add(evtWrap,   0, 3);
-            Controls.Add(root);
         }
 
         private Chart BuildChart()
