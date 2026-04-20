@@ -34,7 +34,7 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly Func<string>   _getOperation;
 
         // 추론 주기 (ms)
-        private const int IntervalMs = 2000;
+        private const int IntervalMs = 500;
 
         // 동일 오류 반복 로그 억제 (센서 타입별)
         private readonly System.Collections.Generic.Dictionary<string, string> _lastErrorByType
@@ -72,15 +72,26 @@ namespace PHM_Project_DockPanel.Services.Core
         {
             AppEvents.RaiseLog("[추론 서비스] 시작");
 
+            string _prevOp = "Idle";
             while (!ct.IsCancellationRequested)
             {
-                try
+                string _curOp = _getOperation?.Invoke() ?? "Pos";
+                bool _justStarted = (_prevOp == "Idle" && _curOp == "Pos");
+                _prevOp = _curOp;
+
+                if (_curOp == "Idle")
                 {
-                    await Task.Delay(IntervalMs, ct).ConfigureAwait(false);
+                    // Idle 以?100ms留덈떎 ?곹깭 媛먯떆
+                    try { await Task.Delay(100, ct).ConfigureAwait(false); }
+                    catch (TaskCanceledException) { break; }
+                    continue;
                 }
-                catch (TaskCanceledException) { break; }
-                // Idle 援ш컙 異붾줎 ?ㅽ궢
-                if (_getOperation?.Invoke() == "Idle") continue;
+
+                // Pos: 利됱떆 ?꾪솚 吏곹썑???쒕젅???놁씠 諛붾줈 異붾줎, ?댄썑??IntervalMs ?湲?                if (!_justStarted)
+                {
+                    try { await Task.Delay(IntervalMs, ct).ConfigureAwait(false); }
+                    catch (TaskCanceledException) { break; }
+                }
 
                 // ── 가속도 ────────────────────────────────────────────────────
                 if (_accelLogger?.IsRunning == true)
