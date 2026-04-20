@@ -35,8 +35,9 @@ namespace PHM_Project_DockPanel.Services.Core
         // 추론 주기 (ms)
         private const int IntervalMs = 2000;
 
-        // 동일 오류 반복 로그 억제
-        private string _lastErrorMsg = null;
+        // 동일 오류 반복 로그 억제 (센서 타입별)
+        private readonly System.Collections.Generic.Dictionary<string, string> _lastErrorByType
+            = new System.Collections.Generic.Dictionary<string, string>();
 
         public bool IsRunning => _loopTask != null && !_loopTask.IsCompleted;
 
@@ -122,16 +123,17 @@ namespace PHM_Project_DockPanel.Services.Core
 
                 if (result.IsError)
                 {
-                    // 같은 오류 메시지는 한 번만 로그 출력 (2초 반복 억제)
-                    if (result.Error != _lastErrorMsg)
+                    // 센서 타입별 동일 오류 반복 억제
+                    _lastErrorByType.TryGetValue(sensorType, out string prev);
+                    if (result.Error != prev)
                     {
-                        _lastErrorMsg = result.Error;
+                        _lastErrorByType[sensorType] = result.Error;
                         AppEvents.RaiseLog($"[추론 서비스] {sensorType} 오류: {result.Error}");
                     }
                 }
                 else
                 {
-                    _lastErrorMsg = null; // 정상 응답이면 리셋
+                    _lastErrorByType.Remove(sensorType); // 정상 응답이면 리셋
                 }
 
                 AppEvents.RaiseInferenceResult(sensorType, result);
@@ -139,7 +141,14 @@ namespace PHM_Project_DockPanel.Services.Core
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                AppEvents.RaiseLog($"[추론 서비스] {sensorType} 오류: {ex.Message}");
+                // 예외도 센서 타입별 반복 억제
+                string msg = ex.Message;
+                _lastErrorByType.TryGetValue(sensorType, out string prev);
+                if (msg != prev)
+                {
+                    _lastErrorByType[sensorType] = msg;
+                    AppEvents.RaiseLog($"[추론 서비스] {sensorType} 오류: {msg}");
+                }
             }
         }
 
