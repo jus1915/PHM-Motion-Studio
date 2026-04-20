@@ -70,7 +70,7 @@ namespace PHM_Project_DockPanel.Services.WMX
 
         public bool Start(int[] axes, string dir, string baseName)
         {
-            if (IsLogging) { _log("[AjinLog] 이미 로깅 중입니다."); return false; }
+            if (IsLogging) return false;
 
             try
             {
@@ -79,7 +79,6 @@ namespace PHM_Project_DockPanel.Services.WMX
                 _filePath = Path.Combine(dir, baseName + "_" + _fileSuffix + ".csv");
                 _cts = new CancellationTokenSource();
                 _task = Task.Run(() => PollLoop(_cts.Token), _cts.Token);
-                _log($"[AjinLog] 시작 → {_filePath}");
                 return true;
             }
             catch (Exception ex)
@@ -92,7 +91,7 @@ namespace PHM_Project_DockPanel.Services.WMX
         public void Stop()
         {
             if (!IsLogging) return;
-            try { _cts?.Cancel(); _task?.Wait(2000); _log("[AjinLog] 중지 완료"); }
+            try { _cts?.Cancel(); _task?.Wait(2000); }
             catch { }
             finally { _cts?.Dispose(); _cts = null; _task = null; }
         }
