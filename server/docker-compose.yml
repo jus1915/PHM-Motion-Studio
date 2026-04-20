@@ -141,7 +141,11 @@ services:
     entrypoint:
       - bash
       - -c
-      - "airflow db migrate && airflow users create --role Admin --username admin --password admin --email admin@example.com --firstname Admin --lastname User"
+      - >-
+        airflow db migrate &&
+        airflow users create --role Admin --username admin --password admin
+          --email admin@example.com --firstname Admin --lastname User || true &&
+        airflow sync-perm
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
