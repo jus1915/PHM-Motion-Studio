@@ -183,15 +183,18 @@ def predict(req: PredictRequest):
             mae   = float(np.abs(norm_arr - recon).mean())
             thr   = float(meta.get("threshold", 0.1))
 
-            rms     = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
-            rms_thr = float(meta.get("rms_thr", float("inf")))
-            rms_mean= float(meta.get("rms_mean", 0.0))
-            rms_norm= max(0.0, (rms - rms_mean) / max(rms_thr - rms_mean, 1e-8)) \
-                      if rms_thr < 1e30 else 0.0
+            rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
+            rms_thr  = float(meta.get("rms_thr", float("inf")))
+            rms_mean = float(meta.get("rms_mean", 0.0))
+            rms_norm = max(0.0, (rms - rms_mean) / max(rms_thr - rms_mean, 1e-8)) \
+                       if rms_thr < 1e30 else 0.0
 
             mae_norm     = mae / max(thr, 1e-8)
-            score_normed = mae_norm + 0.3 * rms_norm
-            is_anomaly   = mae >= thr or rms >= rms_thr
+            # 가중합: MAE(주) + RMS 초과(보조)
+            # amp_dev 항 제거: standardize_per_sample=True 환경에서 왕복 운동의
+            # 정상적인 진폭 변동(가속·감속)을 이상으로 오인하는 문제 방지
+            score_normed = mae_norm + 0.15 * rms_norm
+            is_anomaly   = score_normed >= 1.0
 
             return PredictResponse(
                 model_type="AE-CNN1D",
