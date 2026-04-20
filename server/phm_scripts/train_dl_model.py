@@ -1246,6 +1246,17 @@ def main() -> None:
         print(json.dumps({"error": "유효한 윈도우를 하나도 추출하지 못했습니다. 데이터 경로와 채널 설정을 확인하십시오."}))
         sys.exit(1)
 
+    # _resolve_channels 가 채널을 확장했을 수 있으므로 실제 데이터 shape 으로 재설정
+    # 예: channels=["Trq(%)"] → Ax0_Trq(%)/Ax1_Trq(%)/Ax2_Trq(%) 3채널로 확장된 경우
+    actual_n_channels = windows[0][0].shape[1]
+    if actual_n_channels != n_channels:
+        print(
+            f"[main] 채널 수 재설정: {n_channels} → {actual_n_channels} "
+            f"(_resolve_channels 확장 결과)",
+            file=sys.stderr,
+        )
+        n_channels = actual_n_channels
+
     # 클래스 분포 출력
     label_counts: Dict[int, int] = {}
     for _, lbl in windows:
