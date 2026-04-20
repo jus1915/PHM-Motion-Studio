@@ -1,0 +1,219 @@
+version: "3.8"
+
+# ---------------------------------------------------------------------------
+# PHM Infra Stack
+#   - InfluxDB 2.7      : time-series DAQ storage        (port 8086)
+#   - Grafana 10.4      : dashboards                     (port 3000)
+#   - PostgreSQL 15     : shared backend for MLflow + Airflow (internal only)
+#   - MLflow 2.14.3     : experiment / model tracking    (port 5000)
+#   - Airflow 2.9.2     : pipeline orchestration         (port 8080)
+#   - PHM Inference     : FastAPI + ONNX Runtime         (port 8000)
+# ---------------------------------------------------------------------------
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Time-series store
+  # --------------------------------------------------------------------------
+  influxdb:
+    image: influxdb:2.7
+    container_name: daq_influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: adminpassword
+      DOCKER_INFLUXDB_INIT_ORG: daq_org
+      DOCKER_INFLUXDB_INIT_BUCKET: vibration
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: my-super-secret-token
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------------------------
+  # Dashboards
+  # --------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: daq_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Shared relational backend (MLflow metadata + Airflow state)
+  # init.sql creates the 'airflow' database; 'mlflow' uses the default DB
+  # defined by POSTGRES_DB below.
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:15
+    container_name: phm_postgres
+    restart: unless-stopped
+    # No host-port mapping — only reachable inside the Docker network.
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_USER: devuser
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: mlflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devuser -d mlflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------------------------
+  # PHM 실시간 추론 서버 (FastAPI + ONNX Runtime)
+  #   POST http://localhost:8000/predict  — 신호 윈도우 → 이상탐지/분류 결과
+  #   GET  http://localhost:8000/health   — 로드된 모델 목록
+  # --------------------------------------------------------------------------
+  phm-inference:
+    image: python:3.11-slim
+    container_name: phm_inference
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./phm_scripts:/opt/phm/scripts
+      - ./phm_models:/opt/phm/models
+    environment:
+      PHM_MODELS_ROOT: /opt/phm/models
+    command: >
+      bash -c "pip install --quiet fastapi 'uvicorn[standard]' onnxruntime numpy pydantic &&
+               python /opt/phm/scripts/inference_server.py"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # MLflow tracking server
+  # --------------------------------------------------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.3
+    container_name: phm_mlflow
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlflow:/mlflow
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - sqlite:///mlflow/mlflow.db
+      - --default-artifact-root
+      - /mlflow/artifacts
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "5000"
+
+  # --------------------------------------------------------------------------
+  # Airflow — one-time initialisation container (runs then exits)
+  # Creates the DB schema and the default admin user.
+  # --------------------------------------------------------------------------
+  airflow-init:
+    image: apache/airflow:2.9.2
+    container_name: phm_airflow_init
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+      - "airflow db migrate && airflow users create --role Admin --username admin --password admin --email admin@example.com --firstname Admin --lastname User"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+      AIRFLOW__WEBSERVER__SECRET_KEY: phm-secret-key-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Airflow webserver  (UI at http://localhost:8080)
+  # --------------------------------------------------------------------------
+  airflow-webserver:
+    image: apache/airflow:2.9.2
+    container_name: phm_airflow_webserver
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    command: webserver
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./phm_scripts:/opt/phm/scripts
+      - ./phm_data:/opt/phm/data
+      - ./phm_models:/opt/phm/models
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+      AIRFLOW__WEBSERVER__SECRET_KEY: phm-secret-key-dev
+      # REST API Basic Auth 활성화 (C# 클라이언트 트리거용)
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      # PHM 스크립트/데이터/모델 경로 (DAG 환경변수)
+      PHM_SCRIPTS_DIR: /opt/phm/scripts
+      PHM_DATA_ROOT: /opt/phm/data
+      PHM_MODELS_ROOT: /opt/phm/models
+      _PIP_ADDITIONAL_REQUIREMENTS: "mlflow scikit-learn skl2onnx onnx torch torchvision"
+    depends_on:
+      - airflow-init
+
+  # --------------------------------------------------------------------------
+  # Airflow scheduler
+  # --------------------------------------------------------------------------
+  airflow-scheduler:
+    image: apache/airflow:2.9.2
+    container_name: phm_airflow_scheduler
+    restart: unless-stopped
+    command: scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./phm_scripts:/opt/phm/scripts
+      - ./phm_data:/opt/phm/data
+      - ./phm_models:/opt/phm/models
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+      AIRFLOW__WEBSERVER__SECRET_KEY: phm-secret-key-dev
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      PHM_SCRIPTS_DIR: /opt/phm/scripts
+      PHM_DATA_ROOT: /opt/phm/data
+      PHM_MODELS_ROOT: /opt/phm/models
+      _PIP_ADDITIONAL_REQUIREMENTS: "mlflow scikit-learn skl2onnx onnx torch torchvision"
+    depends_on:
+      - airflow-init
+
+# ----------------------------------------------------------------------------
+# Named volumes
+# ----------------------------------------------------------------------------
+volumes:
+  influxdb_data:
+  influxdb_config:
+  grafana_data:
+  postgres_data:

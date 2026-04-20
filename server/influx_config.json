@@ -1,0 +1,6 @@
+{
+  "Url": "http://10.100.19.228:8086",
+  "Token": "my-super-secret-token",
+  "Org": "daq_org",
+  "Bucket": "vibration"
+}
