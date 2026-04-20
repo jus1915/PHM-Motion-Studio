@@ -27,6 +27,7 @@ namespace PHM_Project_DockPanel.Windows
         private DataGridView _teachingGrid;
 
         private CancellationTokenSource _teachCts;
+        private readonly Random _rng = new Random();
 
         // --- 컬럼 인덱스/이름(고정) ---
         private const int COL_RUN = 0;
@@ -504,8 +505,9 @@ namespace PHM_Project_DockPanel.Windows
                                     abort = true; break;
                                 }
 
+                                double _resolvedTarget = ResolveTarget(step.Target, step.Axis);
                                 success = await _motion.RunMotionWithLogging(
-                                    new[] { step.Axis }, true, step.Target, null, plan.Loop);
+                                    new[] { step.Axis }, true, _resolvedTarget, null, plan.Loop);
                             }
                         }
                         finally
@@ -854,6 +856,23 @@ namespace PHM_Project_DockPanel.Windows
         }
     }
 
+        /// <summary>
+        /// Target == 77777 ?대㈃ ?대떦 異뺤쓽 50~(PositionMax-50) mm 踰붿쐞 ??臾댁옉???꾩튂 諛섑솚.
+        /// 洹??몄뿏 ?먮옒 target 洹몃?濡?諛섑솚.
+        /// </summary>
+        private double ResolveTarget(double target, int axisIndex)
+        {
+            const double RANDOM_MAGIC = 77777.0;
+            if (Math.Abs(target - RANDOM_MAGIC) > 0.01) return target;
+
+            double posMax = 900.0;  // 湲곕낯媛?            if (_motion?.AxisConfigs != null && axisIndex < _motion.AxisConfigs.Length)
+                posMax = _motion.AxisConfigs[axisIndex]?.PositionMax ?? 900.0;
+
+            double lo = 50.0;
+            double hi = posMax - 50.0;
+            if (hi <= lo) return posMax / 2.0;  // ?ㅽ듃濡쒗겕媛 ?덈Т 吏㏃쑝硫?以묎컙媛?
+            return lo + _rng.NextDouble() * (hi - lo);
+        }
     public class TeachingStep
     {
         public bool Enabled { get; set; }
