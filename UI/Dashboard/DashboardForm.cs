@@ -388,6 +388,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private Button btnTestProbs;              // ← 추가
         private readonly Random _rng = new Random(); // ← 추가
 
+        // ── 서버 실시간 추론 UI ──────────────────────────────────────────────────
+        private Label _lblLiveAccelStatus, _lblLiveTorqueStatus;
+        private Label _lblLiveAccelScore,  _lblLiveTorqueScore;
+        private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
+            = new ConcurrentQueue<Tuple<string, DateTime, double>>();
+
         // DB 모드 UI 컨트롤
         private RadioButton rbtnCsvMode, rbtnDbMode;
         private Panel pnlCsvSource, pnlDbSource;
@@ -560,10 +566,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Icon = SystemIcons.Warning, // 필요시 커스텀 아이콘 가능
                 Text = "PHM 알림"
             };
+
+            // 서버 실시간 추론 결과 구독
+            AppEvents.InferenceResultReceived += OnLiveInferenceResult;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            AppEvents.InferenceResultReceived -= OnLiveInferenceResult;
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
             base.OnFormClosing(e);
@@ -806,9 +816,44 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             gridModelPaths.Columns.AddRange(new DataGridViewColumn[] { colAxis, colPath });
             gbModelPaths.Controls.Add(gridModelPaths);
 
+            // ── [E] 서버 실시간 추론 현황 ────────────────────────────────────────
+            var gbLive = new GroupBox
+            {
+                Text = "서버 실시간 추론", Width = ctrlWidth,
+                Padding = new Padding(6, 4, 6, 6),
+                Margin = new Padding(2, 4, 2, 4),
+                AutoSize = true
+            };
+            var tlLive = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2,
+                AutoSize = true, Margin = Padding.Empty
+            };
+            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 50));   // 센서명
+            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));   // 상태
+            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 점수/클래스
+            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+
+            var lblAccelTag  = new Label { Text = "가속도",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
+            var lblTorqueTag = new Label { Text = "토크",    Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
+            _lblLiveAccelStatus  = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
+            _lblLiveTorqueStatus = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
+            _lblLiveAccelScore   = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+            _lblLiveTorqueScore  = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+
+            tlLive.Controls.Add(lblAccelTag,           0, 0);
+            tlLive.Controls.Add(_lblLiveAccelStatus,   1, 0);
+            tlLive.Controls.Add(_lblLiveAccelScore,    2, 0);
+            tlLive.Controls.Add(lblTorqueTag,          0, 1);
+            tlLive.Controls.Add(_lblLiveTorqueStatus,  1, 1);
+            tlLive.Controls.Add(_lblLiveTorqueScore,   2, 1);
+            gbLive.Controls.Add(tlLive);
+
             left.Controls.AddRange(new Control[] {
                 gbModels, gbSource,
                 btnStart, btnStop, lblStatus,
+                gbLive,
                 gbModelPaths
             });
             left.ResumeLayout(false);
@@ -4273,6 +4318,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 s.Points.AddXY(t.ToOADate(), y);
             }
 
+            // --- 서버 실시간 추론 점수 추가 ---
+            Tuple<string, DateTime, double> liveItem;
+            while (_liveScoreQueue.TryDequeue(out liveItem))
+            {
+                var ls = EnsureLiveSeries(liveItem.Item1);
+                ls.Points.AddXY(liveItem.Item2.ToOADate(), liveItem.Item3);
+            }
+
             // --- 오래된 포인트 정리(시리즈별) ---
             foreach (Series s in chartLine.Series)
             {
@@ -4299,6 +4352,89 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             chartLine.Series.Add(s);
             return s;
+        }
+
+        /// <summary>서버 실시간 추론 전용 차트 시리즈를 반환 (없으면 생성).</summary>
+        private Series EnsureLiveSeries(string sensorType)
+        {
+            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
+            string name = isAccel ? "서버-가속도" : "서버-토크";
+            var s = chartLine.Series.FindByName(name);
+            if (s != null) return s;
+
+            s = new Series(name)
+            {
+                ChartType   = SeriesChartType.FastLine,
+                XValueType  = ChartValueType.DateTime,
+                BorderWidth = 2,
+                LegendText  = name,
+                Color       = isAccel ? Color.DodgerBlue : Color.OrangeRed,
+                BorderDashStyle = ChartDashStyle.Dot,
+            };
+            chartLine.Series.Add(s);
+            return s;
+        }
+
+        /// <summary>
+        /// AppEvents.InferenceResultReceived 핸들러 — 서버 추론 결과를 UI에 반영합니다.
+        /// </summary>
+        private void OnLiveInferenceResult(string sensorType, InferenceResult result)
+        {
+            if (result == null) return;
+
+            // 차트에 넣을 점수를 큐에 추가 (스레드 안전)
+            _liveScoreQueue.Enqueue(Tuple.Create(sensorType, DateTime.Now, (double)result.AnomalyScore));
+            while (_liveScoreQueue.Count > 600)
+            {
+                Tuple<string, DateTime, double> _discard;
+                _liveScoreQueue.TryDequeue(out _discard);
+            }
+
+            // UI 컨트롤 업데이트는 UI 스레드에서
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                bool isAccel   = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
+                var lblStatus  = isAccel ? _lblLiveAccelStatus  : _lblLiveTorqueStatus;
+                var lblScore   = isAccel ? _lblLiveAccelScore   : _lblLiveTorqueScore;
+                if (lblStatus == null || lblScore == null) return;
+
+                string stateText = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
+                Color  stateClr  = result.IsAnomaly ? Color.Red : Color.Green;
+
+                lblStatus.Text      = stateText;
+                lblStatus.ForeColor = stateClr;
+                lblStatus.Font      = new Font(Font, FontStyle.Bold);
+
+                string cls = !string.IsNullOrEmpty(result.ClassName) &&
+                             !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
+                             !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase)
+                             ? $" {result.ClassName}" : "";
+                lblScore.Text = $"{result.AnomalyScore:F3}{cls}";
+
+                // 이상 감지 시 KPI / 이벤트 로그 갱신
+                if (result.IsAnomaly)
+                {
+                    cntDanger++;
+                    cardDanger.ValueText = cntDanger + " 건";
+
+                    string sensorLabel = isAccel ? "가속도" : "토크";
+                    AppendEventLog(
+                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {sensorLabel} 이상  " +
+                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}" +
+                        (string.IsNullOrEmpty(result.ClassName) ? "" : $"  class={result.ClassName}"));
+
+                    rows.Add(new EventRow
+                    {
+                        TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
+                        Axis         = isAccel ? -1 : -2,
+                        AnomalyScore = Math.Round(result.AnomalyScore, 4),
+                        Threshold    = Math.Round(result.Threshold, 4),
+                        Alarm        = sensorLabel + " 이상"
+                    });
+                    if (rows.Count > 500) rows.RemoveAt(0);
+                }
+            }));
         }
 
         private static bool HasYColumns(string[] headers, OnnxAxisModel om, int axis)
