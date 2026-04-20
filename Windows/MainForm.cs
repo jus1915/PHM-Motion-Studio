@@ -358,6 +358,8 @@ namespace PHM_Project_DockPanel
                 CreateDockMenuItem<AIForm>("AI", DockState.Document));
             menuDataAnalysis.DropDownItems.Add(
                 CreateDockMenuItem<DashboardForm>("실시간 추론", DockState.Document));
+            menuDataAnalysis.DropDownItems.Add(
+                CreateDockMenuItem<RealtimeMonitorForm>("실시간 이상탐지 모니터", DockState.Document));
 
             menuStrip.Items.Add(menuDataCollection);
             menuStrip.Items.Add(menuDataAnalysis);
@@ -588,6 +590,7 @@ namespace PHM_Project_DockPanel
             if (persistString == typeof(AnomalyDetectionForm).ToString()) return new AnomalyDetectionForm();
             if (persistString == typeof(AIForm).ToString()) return new AIForm();
             if (persistString == typeof(DashboardForm).ToString()) return new DashboardForm();
+            if (persistString == typeof(RealtimeMonitorForm).ToString()) return new RealtimeMonitorForm();
 
             return null;
         }
