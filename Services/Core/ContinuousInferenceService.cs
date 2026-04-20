@@ -228,16 +228,14 @@ namespace PHM_Project_DockPanel.Services.Core
             }
             else // torque
             {
-                // Ax0_Trq(%), Ax1_Trq(%), ... 또는 Trq(%)
+                // Ax0_Trq(%), Ax1_Trq(%), ... — 연결된 모든 축 사용
+                // 모델이 학습된 채널 수와 일치해야 하므로 축 번호 순서대로 전부 포함
                 for (int i = 0; i < headers.Length; i++)
                 {
                     string h = headers[i].Trim().ToLowerInvariant();
                     if (h.Contains("trq") || h.Contains("torque"))
                         result.Add(i);
                 }
-                // 토크는 첫 번째 채널만 사용 (모델이 1채널 기준)
-                if (result.Count > 1)
-                    result = result.GetRange(0, 1);
             }
 
             return result.ToArray();

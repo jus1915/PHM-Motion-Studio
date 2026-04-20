@@ -218,10 +218,13 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
 
 
 def _resolve_channels(headers: List[str], channels: List[str]) -> List[str]:
-    """축 번호 없는 토크 채널명(e.g. 'Trq(%)')을 실제 헤더 컬럼명으로 매핑합니다.
+    """축 번호 없는 채널명을 실제 헤더 컬럼명으로 매핑합니다.
 
-    채널명에 'Ax'가 없으면 'Ax\\d+_{channel}' 패턴으로 첫 번째 매칭 컬럼을 사용합니다.
-    직접 매칭되는 컬럼이 있으면 그대로 사용합니다.
+    규칙:
+      - 헤더에 그대로 있으면 그대로 사용 (e.g. 'x', 'y', 'z')
+      - 'Ax' 접두사가 없는 이름(e.g. 'Trq(%)')은 'Ax\\d+_{channel}' 패턴으로
+        매칭되는 컬럼을 *모두* 확장합니다 → 연결 축 수에 따라 자동 다축 지원
+      - 매칭 컬럼이 없으면 원래 이름을 유지 (이후 오류로 처리)
     """
     import re as _re
     resolved = []
@@ -229,10 +232,14 @@ def _resolve_channels(headers: List[str], channels: List[str]) -> List[str]:
         if ch in headers:
             resolved.append(ch)
         else:
-            # Ax0_Trq(%) 형태 검색 (괄호를 escape 처리)
             pat = _re.compile(r"^Ax\d+_" + _re.escape(ch) + r"$", _re.IGNORECASE)
-            match = next((h for h in headers if pat.match(h)), None)
-            resolved.append(match if match else ch)  # 못 찾으면 원래 이름 유지 (오류로 처리됨)
+            matches = [h for h in headers if pat.match(h)]
+            if matches:
+                # 축 번호 순서대로 정렬 (Ax0, Ax1, ...)
+                matches.sort(key=lambda h: int(_re.search(r"\d+", h).group()))
+                resolved.extend(matches)
+            else:
+                resolved.append(ch)  # 못 찾으면 원래 이름 유지 (오류로 처리됨)
     return resolved
 
 
