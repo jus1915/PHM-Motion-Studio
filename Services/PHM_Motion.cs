@@ -483,7 +483,11 @@ namespace PHM_Project_DockPanel.Services
                     try
                     {
                         Directory.CreateDirectory(torqueDir);
-                        int axisCount = Math.Max(1, _axisConfigs?.Length ?? 1);
+                        // AxisConfig.AxisCount = 실제 연결된 축 수 (연결 시 설정됨)
+                        // _axisConfigs.Length 는 설정 파일 기준 전체 축 수라 더 많을 수 있음
+                        int axisCount = AxisConfig.AxisCount > 0
+                            ? AxisConfig.AxisCount
+                            : Math.Max(1, _axisConfigs?.Length ?? 1);
                         int[] allAxes = new int[axisCount];
                         for (int i = 0; i < axisCount; i++) allAxes[i] = i;
                         bool ok = _ajinLogger.Start(allAxes, torqueDir, baseName);
