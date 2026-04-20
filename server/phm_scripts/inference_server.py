@@ -150,6 +150,18 @@ def predict(req: PredictRequest):
             ),
         )
 
+    # ── 모델 기대 채널 수 검증 ────────────────────────────────────────────────
+    model_n_channels = meta.get("n_channels")
+    if model_n_channels and req.n_channels != model_n_channels:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"채널 수 불일치: 모델={model_n_channels}ch, 요청={req.n_channels}ch. "
+                f"모델 학습 채널: {meta.get('channels', '?')}. "
+                f"Airflow 재학습 또는 CSV 재수집 후 retry."
+            ),
+        )
+
     expected = req.window_size * req.n_channels
     if len(req.window) != expected:
         raise HTTPException(
@@ -157,64 +169,67 @@ def predict(req: PredictRequest):
             detail=f"window 길이 {len(req.window)} ≠ {req.window_size}×{req.n_channels}={expected}",
         )
 
-    # (1, T, C) float32
-    raw_arr  = np.array(req.window, dtype=np.float32).reshape(1, req.window_size, req.n_channels)
-    norm_arr = _zscore(raw_arr)
+    try:
+        # (1, T, C) float32
+        raw_arr  = np.array(req.window, dtype=np.float32).reshape(1, req.window_size, req.n_channels)
+        norm_arr = _zscore(raw_arr)
 
-    model_kind = meta.get("kind", "CNN1D")
-    input_name = sess.get_inputs()[0].name
+        model_kind = meta.get("kind", "CNN1D")
+        input_name = sess.get_inputs()[0].name
 
-    # ── AE-CNN1D: 재구성 오차로 이상 탐지 ────────────────────────────────────
-    if model_kind == "AE-CNN1D":
-        recon = sess.run(None, {input_name: norm_arr})[0]   # (1, T, C)
-        mae   = float(np.abs(norm_arr - recon).mean())
-        thr   = float(meta.get("threshold", 0.1))
+        # ── AE-CNN1D: 재구성 오차로 이상 탐지 ────────────────────────────────
+        if model_kind == "AE-CNN1D":
+            recon = sess.run(None, {input_name: norm_arr})[0]   # (1, T, C)
+            mae   = float(np.abs(norm_arr - recon).mean())
+            thr   = float(meta.get("threshold", 0.1))
 
-        # RMS 진폭 이상 체크
-        rms     = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
-        rms_thr = float(meta.get("rms_thr", float("inf")))
-        rms_mean= float(meta.get("rms_mean", 0.0))
-        rms_norm= max(0.0, (rms - rms_mean) / max(rms_thr - rms_mean, 1e-8)) \
-                  if rms_thr < 1e30 else 0.0
+            rms     = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
+            rms_thr = float(meta.get("rms_thr", float("inf")))
+            rms_mean= float(meta.get("rms_mean", 0.0))
+            rms_norm= max(0.0, (rms - rms_mean) / max(rms_thr - rms_mean, 1e-8)) \
+                      if rms_thr < 1e30 else 0.0
 
-        # 복합 점수 (>1.0 이면 이상)
-        mae_norm    = mae / max(thr, 1e-8)
-        score_normed = mae_norm + 0.3 * rms_norm
-        is_anomaly  = mae >= thr or rms >= rms_thr
+            mae_norm     = mae / max(thr, 1e-8)
+            score_normed = mae_norm + 0.3 * rms_norm
+            is_anomaly   = mae >= thr or rms >= rms_thr
+
+            return PredictResponse(
+                model_type="AE-CNN1D",
+                sensor_type=req.sensor_type,
+                is_anomaly=is_anomaly,
+                anomaly_score=round(score_normed, 6),
+                threshold=1.0,
+                class_name="anomaly" if is_anomaly else "normal",
+                raw_mae=round(mae, 6),
+                raw_threshold=round(thr, 6),
+            )
+
+        # ── CNN1D: 분류 ──────────────────────────────────────────────────────
+        logits      = sess.run(None, {input_name: norm_arr})[0]
+        exp_l       = np.exp(logits - logits.max(axis=1, keepdims=True))
+        probs       = exp_l / exp_l.sum(axis=1, keepdims=True)
+        pred_idx    = int(np.argmax(probs[0]))
+        confidence  = float(probs[0][pred_idx])
+        class_names = meta.get("class_names", ["normal", "fault"])
+        pred_class  = class_names[pred_idx] if pred_idx < len(class_names) else str(pred_idx)
+        is_anomaly  = pred_class.lower() != "normal"
+        anomaly_score = (1.0 - confidence) if not is_anomaly else confidence
 
         return PredictResponse(
-            model_type="AE-CNN1D",
+            model_type="CNN1D",
             sensor_type=req.sensor_type,
             is_anomaly=is_anomaly,
-            anomaly_score=round(score_normed, 6),
-            threshold=1.0,
-            class_name="anomaly" if is_anomaly else "normal",
-            raw_mae=round(mae, 6),
-            raw_threshold=round(thr, 6),
+            anomaly_score=round(anomaly_score, 6),
+            threshold=0.5,
+            class_name=pred_class,
+            confidence=round(confidence, 6),
         )
 
-    # ── CNN1D: 분류 ────────────────────────────────────────────────────────────
-    logits  = sess.run(None, {input_name: norm_arr})[0]          # (1, n_classes)
-    exp_l   = np.exp(logits - logits.max(axis=1, keepdims=True))
-    probs   = exp_l / exp_l.sum(axis=1, keepdims=True)           # softmax
-    pred_idx    = int(np.argmax(probs[0]))
-    confidence  = float(probs[0][pred_idx])
-    class_names = meta.get("class_names", ["normal", "fault"])
-    pred_class  = class_names[pred_idx] if pred_idx < len(class_names) else str(pred_idx)
-    is_anomaly  = pred_class.lower() != "normal"
-
-    # 이상 점수: normal이면 (1-confidence), 그 외 class는 confidence
-    anomaly_score = (1.0 - confidence) if not is_anomaly else confidence
-
-    return PredictResponse(
-        model_type="CNN1D",
-        sensor_type=req.sensor_type,
-        is_anomaly=is_anomaly,
-        anomaly_score=round(anomaly_score, 6),
-        threshold=0.5,
-        class_name=pred_class,
-        confidence=round(confidence, 6),
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # ONNX 실행 오류 등 — 상세 메시지를 500으로 반환
+        raise HTTPException(status_code=500, detail=f"추론 실패: {type(e).__name__}: {e}")
 
 
 # ── 엔트리포인트 ──────────────────────────────────────────────────────────────
