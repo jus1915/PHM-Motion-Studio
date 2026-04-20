@@ -431,17 +431,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             var grid = new DataGridView
             {
-                ReadOnly              = true,
-                AllowUserToAddRows    = false,
-                AllowUserToDeleteRows = false,
-                AutoSizeColumnsMode   = DataGridViewAutoSizeColumnsMode.Fill,
-                RowHeadersVisible     = false,
-                BorderStyle           = BorderStyle.None,
-                BackgroundColor       = Color.White,
-                GridColor             = Color.FromArgb(220, 220, 228),
-                ColumnHeadersHeight   = 26,
-                RowTemplate           = { Height = 22 },
-                DataSource            = _events
+                ReadOnly                    = true,
+                AllowUserToAddRows          = false,
+                AllowUserToDeleteRows       = false,
+                AutoSizeColumnsMode         = DataGridViewAutoSizeColumnsMode.Fill,
+                RowHeadersVisible           = false,
+                BorderStyle                 = BorderStyle.None,
+                BackgroundColor             = Color.White,
+                GridColor                   = Color.FromArgb(220, 220, 228),
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight         = 26,
+                RowTemplate                 = { Height = 22 },
+                DataSource                  = _events
             };
             grid.EnableHeadersVisualStyles = false;
             grid.ColumnHeadersDefaultCellStyle.BackColor  = Color.FromArgb(244, 244, 248);
