@@ -1006,6 +1006,7 @@ def save_meta(
     threshold: Optional[float] = None,
     rms_mean: Optional[float] = None,
     rms_thr:  Optional[float] = None,
+    n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
@@ -1025,7 +1026,7 @@ def save_meta(
         "sensor_type": sensor_type,
         "y_column":    channels[0] if channels else "",
         "channels":    channels,
-        "n_channels":  len(channels),
+        "n_channels":  n_channels_override if n_channels_override is not None else len(channels),
         "window_size": int(params.get("window_size", 1024)),
         "input_name":  "input",
         "output_name": "recon" if is_ae else "logits",
@@ -1345,6 +1346,7 @@ def main() -> None:
             threshold=threshold,
             rms_mean=rms_mean,
             rms_thr=rms_thr,
+            n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
         )
 
         _try_end_mlflow(
@@ -1400,6 +1402,7 @@ def main() -> None:
         epochs_trained=epochs_trained,
         mlflow_run_id=mlflow_run.info.run_id if mlflow_run else None,
         mlflow_tracking_uri=mlflow_tracking_uri or None,
+        n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
     )
 
     # ── MLflow 종료 ───────────────────────────────────────────────────────────
