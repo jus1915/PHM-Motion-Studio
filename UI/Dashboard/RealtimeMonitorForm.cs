@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
 using WeifenLuo.WinFormsUI.Docking;
+using PHM_Project_DockPanel.Services;
 using PHM_Project_DockPanel.Services.Core;
 
 namespace PHM_Project_DockPanel.UI.Dashboard
