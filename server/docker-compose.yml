@@ -118,13 +118,14 @@ services:
       - "5000:5000"
     volumes:
       - ./mlflow:/mlflow
+      - ./phm_models:/opt/phm/models   # Airflow 컨테이너와 동일 경로 → 아티팩트 권한 공유
     command:
       - mlflow
       - server
       - --backend-store-uri
       - sqlite:///mlflow/mlflow.db
       - --default-artifact-root
-      - /mlflow/artifacts
+      - /opt/phm/models/mlflow_artifacts  # phm_models 볼륨 → Airflow도 쓰기 가능
       - --host
       - "0.0.0.0"
       - --port
@@ -171,7 +172,6 @@ services:
       - ./phm_scripts:/opt/phm/scripts
       - ./phm_data:/opt/phm/data
       - ./phm_models:/opt/phm/models
-      - ./mlflow:/mlflow                # MLflow 아티팩트 직접 쓰기 권한
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
@@ -203,7 +203,6 @@ services:
       - ./phm_scripts:/opt/phm/scripts
       - ./phm_data:/opt/phm/data
       - ./phm_models:/opt/phm/models
-      - ./mlflow:/mlflow                # MLflow 아티팩트 직접 쓰기 권한
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
