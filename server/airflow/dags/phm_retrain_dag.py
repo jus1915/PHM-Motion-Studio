@@ -186,18 +186,31 @@ def run_training(**context) -> None:
 
 
 def run_training_accel(**context) -> None:
-    """가속도 전용 학습 태스크 (기본 conf 에서 sensor_type=accel 강제)."""
-    if context["dag_run"].conf:
-        context["dag_run"].conf["sensor_type"] = "accel"
+    """가속도 전용 학습 태스크.
+
+    C# conf 에 channels/output 이 들어와도 accel 고유값으로 강제 덮어씁니다.
+    """
+    conf = dict(context["dag_run"].conf or {})
+    conf["sensor_type"] = "accel"
+    # 가속도 채널·출력 경로는 항상 accel 기준으로 강제 (C# conf 무시)
+    conf["channels"] = ["x", "y", "z"]
+    conf["output"]   = str(Path(_MODELS_ROOT) / "cnn1d_fd.onnx")
+    context["dag_run"].conf = conf
     run_training(**context)
 
 
 def run_training_torque(**context) -> None:
-    """토크 전용 학습 태스크 (기본 conf 에서 sensor_type=torque 강제)."""
+    """토크 전용 학습 태스크.
+
+    C# conf 에 channels/output 이 들어와도 torque 고유값으로 강제 덮어씁니다.
+    channels 는 "Trq(%)" 하나만 지정 — train_dl_model.py 의 _resolve_channels 가
+    CSV 헤더를 읽어 Ax0_Trq(%)~AxN_Trq(%) 전체로 자동 확장합니다.
+    """
     conf = dict(context["dag_run"].conf or {})
     conf["sensor_type"] = "torque"
-    conf.setdefault("channels", ["Trq(%)"])
-    conf.setdefault("output", str(Path(_MODELS_ROOT) / "cnn1d_torque.onnx"))
+    # 토크 채널·출력 경로는 항상 torque 기준으로 강제 (C# conf 무시)
+    conf["channels"] = ["Trq(%)"]
+    conf["output"]   = str(Path(_MODELS_ROOT) / "cnn1d_torque.onnx")
     context["dag_run"].conf = conf
     run_training(**context)
 
