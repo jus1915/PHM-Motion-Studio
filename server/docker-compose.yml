@@ -171,6 +171,7 @@ services:
       - ./phm_scripts:/opt/phm/scripts
       - ./phm_data:/opt/phm/data
       - ./phm_models:/opt/phm/models
+      - ./mlflow:/mlflow                # MLflow 아티팩트 직접 쓰기 권한
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
@@ -183,6 +184,8 @@ services:
       PHM_DATA_ROOT: /opt/phm/data
       PHM_MODELS_ROOT: /opt/phm/models
       _PIP_ADDITIONAL_REQUIREMENTS: "mlflow scikit-learn skl2onnx onnx torch torchvision"
+      # Git 없는 환경에서 GitPython 경고 억제
+      GIT_PYTHON_REFRESH: quiet
     depends_on:
       - airflow-init
 
@@ -200,6 +203,7 @@ services:
       - ./phm_scripts:/opt/phm/scripts
       - ./phm_data:/opt/phm/data
       - ./phm_models:/opt/phm/models
+      - ./mlflow:/mlflow                # MLflow 아티팩트 직접 쓰기 권한
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
@@ -210,6 +214,7 @@ services:
       PHM_DATA_ROOT: /opt/phm/data
       PHM_MODELS_ROOT: /opt/phm/models
       _PIP_ADDITIONAL_REQUIREMENTS: "mlflow scikit-learn skl2onnx onnx torch torchvision"
+      GIT_PYTHON_REFRESH: quiet
     depends_on:
       - airflow-init
 
