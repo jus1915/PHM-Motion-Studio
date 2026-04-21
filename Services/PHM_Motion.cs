@@ -525,8 +525,13 @@ namespace PHM_Project_DockPanel.Services
                 }
                 if (_ajinLogger != null)
                     _ajinLogger.GetAxisOperation = GetAxisOperation;
+                int _axCntInfer = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
+                int[] _inferAxes = System.Linq.Enumerable.Range(0, _axCntInfer).ToArray();
                 _inferenceService = new ContinuousInferenceService(
-                    inferUrl, _accelLogger, _ajinLogger, GetCurrentOperation);
+                    inferUrl, _accelLogger, _ajinLogger,
+                    getOperation:     GetCurrentOperation,
+                    getAxisOperation: GetAxisOperation,
+                    axes:             _inferAxes);
                 _inferenceService.Start();
             }
 

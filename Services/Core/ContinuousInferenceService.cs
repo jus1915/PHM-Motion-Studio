@@ -25,33 +25,67 @@ namespace PHM_Project_DockPanel.Services.Core
     // =========================================================================
     public sealed class ContinuousInferenceService : IDisposable
     {
-        private readonly InferenceServerClient _client;
-        private readonly DaqAccelCsvLogger     _accelLogger;
-        private readonly AjinCsvLogger         _torqueLogger;
+        private readonly InferenceServerClient  _client;
+        private readonly DaqAccelCsvLogger      _accelLogger;
+        private readonly AjinCsvLogger          _torqueLogger;
 
         private CancellationTokenSource _cts;
         private Task                    _loopTask;
-        private readonly Func<string>   _getOperation;
+        private readonly Func<string>         _getOperation;      // 전역 (레거시)
+        private readonly Func<int, string>    _getAxisOperation;  // per-axis
+        private readonly int[]               _axes;              // 모니터링 대상 축
 
         // 추론 주기 (ms)
         private const int IntervalMs = 500;
 
-        // 동일 오류 반복 로그 억제 (센서 타입별)
+        // 동일 오류 반복 로그 억제 (키 = "sensor_type" 또는 "sensor_type_ax{n}")
         private readonly System.Collections.Generic.Dictionary<string, string> _lastErrorByType
             = new System.Collections.Generic.Dictionary<string, string>();
 
         public bool IsRunning => _loopTask != null && !_loopTask.IsCompleted;
 
+        /// <param name="getOperation">전역 동작 상태 콜백 (레거시 호환용, null 가능)</param>
+        /// <param name="getAxisOperation">
+        ///   per-axis 동작 상태 콜백 (int axisIndex → "Pos"/"Idle").
+        ///   지정 시 axes 배열도 함께 전달해야 합니다.
+        /// </param>
+        /// <param name="axes">per-axis 모니터링 대상 축 인덱스 배열</param>
         public ContinuousInferenceService(
-            string             inferenceServerUrl,
-            DaqAccelCsvLogger  accelLogger,
-            AjinCsvLogger      torqueLogger,
-            Func<string>       getOperation = null)
+            string              inferenceServerUrl,
+            DaqAccelCsvLogger   accelLogger,
+            AjinCsvLogger       torqueLogger,
+            Func<string>        getOperation     = null,
+            Func<int, string>   getAxisOperation = null,
+            int[]               axes             = null)
         {
-            _client        = new InferenceServerClient(inferenceServerUrl);
-            _accelLogger   = accelLogger;
-            _torqueLogger  = torqueLogger;
-            _getOperation  = getOperation;
+            _client           = new InferenceServerClient(inferenceServerUrl);
+            _accelLogger      = accelLogger;
+            _torqueLogger     = torqueLogger;
+            _getOperation     = getOperation;
+            _getAxisOperation = getAxisOperation;
+            _axes             = axes;
+        }
+
+        // ── 현재 전역 동작 상태 ─────────────────────────────────────────────────
+        /// <summary>어느 축이라도 Pos 이면 "Pos", 모두 Idle 이면 "Idle".</summary>
+        private string GetCurrentOp()
+        {
+            if (_getAxisOperation != null && _axes != null)
+            {
+                foreach (int ax in _axes)
+                    if (_getAxisOperation(ax) == "Pos") return "Pos";
+                return "Idle";
+            }
+            return _getOperation?.Invoke() ?? "Pos";
+        }
+
+        /// <summary>현재 Pos 상태인 첫 번째 축 인덱스. 없거나 per-axis 콜백 없으면 null.</summary>
+        private int? GetMovingAxis()
+        {
+            if (_getAxisOperation == null || _axes == null) return null;
+            foreach (int ax in _axes)
+                if (_getAxisOperation(ax) == "Pos") return ax;
+            return null;
         }
 
         // ── 시작 / 중지 ────────────────────────────────────────────────────────
@@ -75,23 +109,27 @@ namespace PHM_Project_DockPanel.Services.Core
             string _prevOp = "Idle";
             while (!ct.IsCancellationRequested)
             {
-                string _curOp = _getOperation?.Invoke() ?? "Pos";
-                bool _justStarted = (_prevOp == "Idle" && _curOp == "Pos");
+                string _curOp      = GetCurrentOp();
+                bool   _justStarted = (_prevOp == "Idle" && _curOp == "Pos");
                 _prevOp = _curOp;
 
                 if (_curOp == "Idle")
                 {
-                    // Idle 以?100ms留덈떎 ?곹깭 媛먯떆
+                    // Idle: 100ms 간격으로 상태 재확인
                     try { await Task.Delay(100, ct).ConfigureAwait(false); }
                     catch (TaskCanceledException) { break; }
                     continue;
                 }
 
-                // Pos: 利됱떆 ?꾪솚 吏곹썑???쒕젅???놁씠 諛붾줈 異붾줎, ?댄썑??IntervalMs ?湲?                if (!_justStarted)
+                // Pos: 직전 호출 직후라면 지연 없이 바로 추론, 이후엔 IntervalMs 대기
+                if (!_justStarted)
                 {
                     try { await Task.Delay(IntervalMs, ct).ConfigureAwait(false); }
                     catch (TaskCanceledException) { break; }
                 }
+
+                // 현재 움직이는 축 (per-axis 모델 선택용)
+                int? _movingAxis = GetMovingAxis();
 
                 // ── 가속도 ────────────────────────────────────────────────────
                 if (_accelLogger?.IsRunning == true)
@@ -102,7 +140,9 @@ namespace PHM_Project_DockPanel.Services.Core
                         foreach (string p in paths)
                         {
                             if (string.IsNullOrEmpty(p) || !File.Exists(p)) continue;
-                            await RunInferenceForCsvAsync(p, "accel", ct).ConfigureAwait(false);
+                            // per-axis 모델: 움직이는 축 전달 → ae_fd_ax{n}.onnx 우선
+                            await RunInferenceForCsvAsync(p, "accel", _movingAxis, ct)
+                                  .ConfigureAwait(false);
                             break; // 첫 번째 모듈만 사용
                         }
                     }
@@ -113,7 +153,9 @@ namespace PHM_Project_DockPanel.Services.Core
                 {
                     string p = _torqueLogger.OutputPath;
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
-                        await RunInferenceForCsvAsync(p, "torque", ct).ConfigureAwait(false);
+                        // 토크는 전축 단일 모델 → axis=null
+                        await RunInferenceForCsvAsync(p, "torque", null, ct)
+                              .ConfigureAwait(false);
                 }
             }
 
@@ -124,9 +166,11 @@ namespace PHM_Project_DockPanel.Services.Core
         private async Task RunInferenceForCsvAsync(
             string            csvPath,
             string            sensorType,
+            int?              axis,
             CancellationToken ct)
         {
             const int WindowSize = 1024;
+            string _errKey = axis.HasValue ? $"{sensorType}_ax{axis}" : sensorType;
 
             try
             {
@@ -135,21 +179,21 @@ namespace PHM_Project_DockPanel.Services.Core
                     return;
 
                 var result = await _client.PredictAsync(
-                    window, WindowSize, nCh, sensorType, ct).ConfigureAwait(false);
+                    window, WindowSize, nCh, sensorType, axis, ct).ConfigureAwait(false);
 
                 if (result.IsError)
                 {
                     // 센서 타입별 동일 오류 반복 억제
-                    _lastErrorByType.TryGetValue(sensorType, out string prev);
+                    _lastErrorByType.TryGetValue(_errKey, out string prev);
                     if (result.Error != prev)
                     {
-                        _lastErrorByType[sensorType] = result.Error;
+                        _lastErrorByType[_errKey] = result.Error;
                         AppEvents.RaiseLog($"[추론 서비스] {sensorType} 오류: {result.Error}");
                     }
                 }
                 else
                 {
-                    _lastErrorByType.Remove(sensorType); // 정상 응답이면 리셋
+                    _lastErrorByType.Remove(_errKey); // 정상 응답이면 리셋
                 }
 
                 AppEvents.RaiseInferenceResult(sensorType, result);
@@ -159,10 +203,10 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 // 예외도 센서 타입별 반복 억제
                 string msg = ex.Message;
-                _lastErrorByType.TryGetValue(sensorType, out string prev);
+                _lastErrorByType.TryGetValue(_errKey, out string prev);
                 if (msg != prev)
                 {
-                    _lastErrorByType[sensorType] = msg;
+                    _lastErrorByType[_errKey] = msg;
                     AppEvents.RaiseLog($"[추론 서비스] {sensorType} 오류: {msg}");
                 }
             }

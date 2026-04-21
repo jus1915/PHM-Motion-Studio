@@ -8,12 +8,20 @@ PHM 모션 스튜디오 — 주기적 재학습 Airflow DAG
 C# AIForm 에서 POST /api/v1/dags/phm_retrain/dagRuns 로 즉시 트리거,
   dag_run.conf 에 train_dl_model.py 파라미터를 포함해 전달합니다.
 
+dag_run.conf 주요 파라미터:
+  axis_count      : 가속도 센서 학습 대상 축 수 (기본 1)
+                    per-axis 모델: ae_fd_ax0.onnx, ae_fd_ax1.onnx ...
+  session         : "AD" (AE 이상탐지, 기본) | "FD" (분류)
+  data_dir        : 수집 CSV 루트 (Windows 경로도 자동 변환)
+  window_size     : 윈도우 크기 (기본 1024)
+  epochs          : 학습 에폭 (기본 30)
+
 환경변수:
   PHM_SCRIPTS_DIR      : train_dl_model.py 위치 (기본: /opt/phm/scripts)
   PHM_DATA_ROOT        : 수집 데이터 루트 경로   (기본: /opt/phm/data)
-                         C# 앱이 Windows 경로로 보내도 이 값으로 대체됩니다.
   PHM_MODELS_ROOT      : 모델 출력 루트 경로     (기본: /opt/phm/models)
   PHM_RETRAIN_SCHEDULE : cron 식                 (기본: 0 2 * * *)
+  PHM_INFERENCE_URL    : 추론 서버 URL           (기본: http://phm-inference:8000)
 
 docker-compose 볼륨 예시:
   - ./phm_scripts:/opt/phm/scripts   # train_dl_model.py
@@ -43,14 +51,13 @@ _SCRIPTS_DIR = Path(os.getenv(
 ))
 _SCRIPT_PATH = _SCRIPTS_DIR / "train_dl_model.py"
 
-_DATA_ROOT   = os.getenv("PHM_DATA_ROOT",   "/opt/phm/data")
-_MODELS_ROOT = os.getenv("PHM_MODELS_ROOT", "/opt/phm/models")
+_DATA_ROOT       = os.getenv("PHM_DATA_ROOT",       "/opt/phm/data")
+_MODELS_ROOT     = os.getenv("PHM_MODELS_ROOT",     "/opt/phm/models")
+_INFERENCE_URL   = os.getenv("PHM_INFERENCE_URL",   "http://phm-inference:8000")
 
 # C# 앱이 conf 를 전달하지 않을 때 사용하는 기본값
-# Windows 절대 경로 대신 Docker 볼륨 마운트 경로를 기본으로 사용합니다.
 _DEFAULT_CONF: dict = {
     "data_dir":     _DATA_ROOT,
-    "output":       str(Path(_MODELS_ROOT) / "cnn1d_fd.onnx"),
     "channels":     ["x", "y", "z"],
     "sensor_type":  "accel",
     "label_column": "",
@@ -62,32 +69,94 @@ _DEFAULT_CONF: dict = {
     "lr":           0.001,
     "val_split":    0.2,
     "seed":         42,
-    # "FD" = 분류(2개 이상 클래스 필요), "AD" = AE 이상탐지(단일 클래스 가능)
-    # train_dl_model.py가 클래스 부족 시 자동으로 AD로 전환하므로 FD로 시작해도 무방
-    "session":      "FD",
+    # "AD" = AE 이상탐지(단일 클래스), "FD" = 분류(2개 이상 클래스 필요)
+    "session":      "AD",
 }
 
 # Windows 드라이브 패턴 (예: C:\, D:\)
 _WIN_DRIVE_RE = __import__("re").compile(r"^[A-Za-z]:[/\\]")
 
 
-def _normalize_path(value: object) -> object:
-    """
-    C# 앱에서 전달된 Windows 절대 경로를 Linux 경로로 변환합니다.
+def _normalize_data_dir(raw: str) -> str:
+    """Windows 절대 경로이면 PHM_DATA_ROOT 로 대체합니다."""
+    if isinstance(raw, str) and _WIN_DRIVE_RE.match(raw):
+        print(f"[PHM] data_dir 변환: {raw!r} → {_DATA_ROOT!r}", flush=True)
+        return _DATA_ROOT
+    return raw
 
-    규칙:
-      data_dir  → PHM_DATA_ROOT  하위 경로로 재매핑
-      output    → PHM_MODELS_ROOT 하위 경로로 재매핑
-    단순히 마지막 구성 요소(파일명 또는 마지막 폴더명)만 보존합니다.
-    """
-    if not isinstance(value, str):
-        return value
-    if not _WIN_DRIVE_RE.match(value):
-        return value  # 이미 Linux 경로 or 상대 경로
 
-    # 경로 마지막 요소만 유지 (예: cnn1d_fd.onnx, Signals)
-    tail = Path(value.replace("\\", "/")).name
-    return tail  # 호출 측에서 루트와 결합
+def _normalize_output(raw: str) -> str:
+    """Windows 절대 경로이면 PHM_MODELS_ROOT/{파일명} 으로 대체합니다."""
+    if isinstance(raw, str) and _WIN_DRIVE_RE.match(raw):
+        fname = Path(raw.replace("\\", "/")).name
+        result = str(Path(_MODELS_ROOT) / fname)
+        print(f"[PHM] output 변환: {raw!r} → {result!r}", flush=True)
+        return result
+    return raw
+
+
+# ── 핵심 실행 헬퍼 ─────────────────────────────────────────────────────────────
+def _execute_training(params: dict, run_id: str) -> None:
+    """
+    params dict 를 JSON 파일로 저장한 뒤 train_dl_model.py 를 실행합니다.
+    학습 결과(로그)를 Airflow 로그에 실시간 출력합니다.
+    """
+    # Windows 경로 정규화
+    params["data_dir"] = _normalize_data_dir(params.get("data_dir", _DATA_ROOT))
+    if "output" in params:
+        params["output"] = _normalize_output(params["output"])
+
+    # 출력 폴더 생성
+    output_path = Path(params["output"])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # params JSON 임시 파일 저장
+    safe_id = str(run_id).replace("/", "_").replace(":", "-")
+    params_file = Path(tempfile.gettempdir()) / f"phm_airflow_{safe_id}.json"
+    params_file.write_text(
+        json.dumps(params, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"[PHM] 파라미터 파일: {params_file}", flush=True)
+    print(f"[PHM] 파라미터 내용:\n{params_file.read_text(encoding='utf-8')}", flush=True)
+
+    if not _SCRIPT_PATH.exists():
+        raise FileNotFoundError(f"train_dl_model.py 없음: {_SCRIPT_PATH}")
+
+    # 가상환경 python 우선 사용
+    venv_python     = _SCRIPTS_DIR / ".venv" / "bin" / "python"
+    venv_python_win = _SCRIPTS_DIR / ".venv" / "Scripts" / "python.exe"
+    if venv_python.exists():
+        python = str(venv_python)
+    elif venv_python_win.exists():
+        python = str(venv_python_win)
+    else:
+        python = sys.executable
+
+    cmd = [python, str(_SCRIPT_PATH), "--params", str(params_file)]
+    print(f"[PHM] 학습 명령: {' '.join(cmd)}", flush=True)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+    )
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+
+    returncode = proc.wait()
+    if returncode != 0:
+        raise RuntimeError(
+            f"train_dl_model.py 실패 (exit={returncode}). 위 출력을 확인하세요."
+        )
+    print(f"[PHM] 학습 완료 → {output_path}", flush=True)
+
 
 # ── 기본 인수 ─────────────────────────────────────────────────────────────────
 _default_args = {
@@ -102,123 +171,89 @@ _default_args = {
 # ── 태스크 함수 ───────────────────────────────────────────────────────────────
 def run_training(**context) -> None:
     """
-    dag_run.conf 의 params 를 파일로 저장한 뒤
-    train_dl_model.py 를 서브프로세스로 실행합니다.
-
-    C# 앱이 Windows 절대 경로를 conf 로 보낼 경우 자동으로 Linux 경로로 변환합니다.
+    dag_run.conf 의 params 를 그대로 train_dl_model.py 에 전달합니다.
+    sensor_type / output 을 직접 지정할 때 사용하는 범용 태스크입니다.
     """
     conf: dict = context["dag_run"].conf or {}
-
-    # C# 가 전달한 conf 를 기본값 위에 덮어씀
     params = {**_DEFAULT_CONF, **conf}
-
-    # ── Windows 경로 → Linux 경로 변환 ─────────────────────────────────────
-    raw_data = params.get("data_dir", "")
-    if isinstance(raw_data, str) and _WIN_DRIVE_RE.match(raw_data):
-        # Windows 절대 경로 → PHM_DATA_ROOT 로 대체
-        # (Docker 볼륨이 phm_data 전체를 /opt/phm/data 로 마운트하므로
-        #  하위 폴더명을 붙이지 않고 루트를 그대로 사용)
-        params["data_dir"] = _DATA_ROOT
-        print(f"[PHM] data_dir 변환: {raw_data!r} → {_DATA_ROOT!r}", flush=True)
-
-    raw_out = params.get("output", "")
-    if isinstance(raw_out, str) and _WIN_DRIVE_RE.match(raw_out):
-        fname = Path(raw_out.replace("\\", "/")).name
-        params["output"] = str(Path(_MODELS_ROOT) / fname)
-        print(f"[PHM] output 변환: {raw_out!r} → {params['output']!r}", flush=True)
-
-    # 출력 폴더 생성
-    output_path = Path(params["output"])
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # params JSON 임시 파일 저장
-    run_id = context.get("run_id", "manual")
-    # run_id 에 슬래시 등이 포함될 수 있으므로 파일명에 안전한 문자만 사용
-    safe_run_id = str(run_id).replace("/", "_").replace(":", "-")
-    params_file = Path(tempfile.gettempdir()) / f"phm_airflow_{safe_run_id}.json"
-    params_file.write_text(
-        json.dumps(params, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(f"[PHM] 파라미터 파일: {params_file}", flush=True)
-    print(f"[PHM] 파라미터 내용:\n{params_file.read_text(encoding='utf-8')}", flush=True)
-
-    if not _SCRIPT_PATH.exists():
-        raise FileNotFoundError(f"train_dl_model.py 없음: {_SCRIPT_PATH}")
-
-    # 가상환경 python 우선 사용 (없으면 현재 인터프리터)
-    venv_python = _SCRIPTS_DIR / ".venv" / "bin" / "python"   # Linux venv
-    venv_python_win = _SCRIPTS_DIR / ".venv" / "Scripts" / "python.exe"
-    if venv_python.exists():
-        python = str(venv_python)
-    elif venv_python_win.exists():
-        python = str(venv_python_win)
-    else:
-        python = sys.executable
-
-    cmd = [python, str(_SCRIPT_PATH), "--params", str(params_file)]
-    print(f"[PHM] 학습 명령: {' '.join(cmd)}", flush=True)
-
-    # stdout/stderr 를 파이프로 받아 Airflow 로그에 실시간 출력
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,   # stderr → stdout 합류
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
-    )
-
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-
-    returncode = proc.wait()
-
-    if returncode != 0:
-        raise RuntimeError(
-            f"train_dl_model.py 실패 (exit={returncode}). "
-            f"위 출력 내용을 확인하세요."
-        )
-
-    print(f"[PHM] 학습 완료 → {output_path}", flush=True)
+    if "output" not in params:
+        params["output"] = str(Path(_MODELS_ROOT) / "cnn1d_fd.onnx")
+    _execute_training(params, context.get("run_id", "manual"))
 
 
 def run_training_accel(**context) -> None:
-    """가속도 전용 학습 태스크.
+    """
+    가속도 전용 학습 태스크 — 축별 per-axis AE 모델 학습.
 
-    C# conf 에 channels/output 이 들어와도 accel 고유값으로 강제 덮어씁니다.
+    conf 파라미터:
+      axis_count  : 학습할 축 수 (기본 1). 각 축마다 ae_fd_ax{n}.onnx 생성.
+      session     : "AD" (기본, AE 이상탐지) | "FD" (분류)
+      그 외 _DEFAULT_CONF 참조.
+
+    출력 파일:
+      /opt/phm/models/ae_fd_ax0.onnx  ← Op_Ax0 데이터만 학습
+      /opt/phm/models/ae_fd_ax1.onnx  ← Op_Ax1 데이터만 학습
+      ...
     """
     conf = dict(context["dag_run"].conf or {})
-    conf["sensor_type"] = "accel"
-    # 가속도 채널·출력 경로는 항상 accel 기준으로 강제 (C# conf 무시)
-    conf["channels"] = ["x", "y", "z"]
-    conf["output"]   = str(Path(_MODELS_ROOT) / "cnn1d_fd.onnx")
-    context["dag_run"].conf = conf
-    run_training(**context)
+    axis_count = int(conf.pop("axis_count", 1))
+    run_id     = str(context.get("run_id", "manual"))
+
+    for ax in range(axis_count):
+        print(f"\n[PHM] ━━━ 가속도 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        params = {**_DEFAULT_CONF, **conf}
+        params["sensor_type"]      = "accel"
+        params["channels"]         = ["x", "y", "z"]
+        params["output"]           = str(Path(_MODELS_ROOT) / f"ae_fd_ax{ax}.onnx")
+        params["filter_op_column"] = f"Op_Ax{ax}"
+        params.setdefault("session", "AD")    # AE 이상탐지 기본
+        _execute_training(params, f"{run_id}_ax{ax}")
+
+    print(f"\n[PHM] 가속도 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
 def run_training_torque(**context) -> None:
-    """토크 전용 학습 태스크.
+    """
+    토크 전용 학습 태스크.
 
-    C# conf 에 channels/output 이 들어와도 torque 고유값으로 강제 덮어씁니다.
-    channels 는 "Trq(%)" 하나만 지정 — train_dl_model.py 의 _resolve_channels 가
+    channels = ["Trq(%)"] 하나만 지정 — train_dl_model.py 의 _resolve_channels 가
     CSV 헤더를 읽어 Ax0_Trq(%)~AxN_Trq(%) 전체로 자동 확장합니다.
+    토크는 전축(全軸) 단일 모델로 학습합니다 (ae_torque.onnx).
     """
     conf = dict(context["dag_run"].conf or {})
-    conf["sensor_type"] = "torque"
-    # 토크 채널·출력 경로는 항상 torque 기준으로 강제 (C# conf 무시)
-    conf["channels"] = ["Trq(%)"]
-    conf["output"]   = str(Path(_MODELS_ROOT) / "cnn1d_torque.onnx")
-    context["dag_run"].conf = conf
-    run_training(**context)
+    conf.pop("axis_count", None)   # torque는 단일 모델 — axis_count 무시
+    params = {**_DEFAULT_CONF, **conf}
+    params["sensor_type"] = "torque"
+    params["channels"]    = ["Trq(%)"]
+    params["output"]      = str(Path(_MODELS_ROOT) / "ae_torque.onnx")
+    params.setdefault("session", "AD")
+    _execute_training(params, str(context.get("run_id", "manual")))
+
+
+def reload_inference_cache(**context) -> None:
+    """
+    학습 완료 후 추론 서버의 모델 캐시를 재로드합니다.
+    서버가 없거나 응답하지 않으면 경고만 출력하고 성공으로 처리합니다.
+    """
+    import urllib.request
+    import urllib.error
+
+    url = f"{_INFERENCE_URL}/models/reload"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode()
+            print(f"[PHM] 추론 서버 캐시 재로드 완료: {body}", flush=True)
+    except urllib.error.URLError as e:
+        print(f"[PHM] 추론 서버 캐시 재로드 실패 (무시): {e}", flush=True)
+    except Exception as e:
+        print(f"[PHM] 추론 서버 캐시 재로드 오류 (무시): {e}", flush=True)
 
 
 # ── DAG 정의 ──────────────────────────────────────────────────────────────────
 with DAG(
     dag_id="phm_retrain",
-    description="PHM 모션 스튜디오 — DL 모델 주기적 재학습",
+    description="PHM 모션 스튜디오 — DL 모델 주기적 재학습 (per-axis 지원)",
     default_args=_default_args,
     schedule_interval=_SCHEDULE,
     start_date=days_ago(1),
@@ -227,19 +262,26 @@ with DAG(
     doc_md=__doc__,
 ) as dag:
 
-    # C# 에서 conf 로 sensor_type 을 명시하면 단일 task 로 처리
-    # sensor_type 미지정 시 가속도 → 토크 순서로 순차 실행
     t_accel = PythonOperator(
         task_id="train_accel",
         python_callable=run_training_accel,
-        doc_md="가속도 신호(x/y/z) CNN1D / AE 학습",
+        doc_md=(
+            "가속도 신호(x/y/z) AE 이상탐지 모델 학습. "
+            "conf.axis_count 만큼 축별(ae_fd_ax{n}.onnx) 순차 학습."
+        ),
     )
 
     t_torque = PythonOperator(
         task_id="train_torque",
         python_callable=run_training_torque,
-        doc_md="토크 신호 CNN1D / AE 학습",
+        doc_md="토크 신호 AE 이상탐지 모델 학습 (ae_torque.onnx, 전축 단일).",
     )
 
-    # 가속도 → 토크 순차 실행 (독립 실행도 가능)
-    t_accel >> t_torque
+    t_reload = PythonOperator(
+        task_id="reload_inference_cache",
+        python_callable=reload_inference_cache,
+        doc_md="학습 완료 후 추론 서버(phm-inference:8000)의 모델 캐시를 재로드.",
+    )
+
+    # 가속도 → 토크 → 추론 서버 캐시 재로드
+    t_accel >> t_torque >> t_reload

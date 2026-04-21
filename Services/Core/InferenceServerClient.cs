@@ -54,21 +54,36 @@ namespace PHM_Project_DockPanel.Services.Core
         /// <param name="windowSize">시간축 샘플 수 (예: 1024)</param>
         /// <param name="nChannels">채널 수 (예: accel=3, torque=1)</param>
         /// <param name="sensorType">"accel" 또는 "torque"</param>
+        /// <param name="axis">
+        ///   per-axis 모델 사용 시 축 인덱스 (0, 1, …). null 이면 레거시/전축 모델 사용.
+        ///   ae_fd_ax{axis}.onnx 우선 로드, 없으면 ae_fd.onnx 로 폴백.
+        /// </param>
         /// <param name="ct">취소 토큰</param>
         public async Task<InferenceResult> PredictAsync(
             float[]           window,
             int               windowSize,
             int               nChannels,
             string            sensorType = "accel",
+            int?              axis       = null,
             CancellationToken ct         = default)
         {
-            var req = new
-            {
-                sensor_type = sensorType,
-                window      = window,
-                window_size = windowSize,
-                n_channels  = nChannels,
-            };
+            // axis null 이면 JSON 에 포함하지 않음 (서버 기본값 사용)
+            object req = axis.HasValue
+                ? (object)new
+                  {
+                      sensor_type = sensorType,
+                      axis        = axis.Value,
+                      window      = window,
+                      window_size = windowSize,
+                      n_channels  = nChannels,
+                  }
+                : new
+                  {
+                      sensor_type = sensorType,
+                      window      = window,
+                      window_size = windowSize,
+                      n_channels  = nChannels,
+                  };
 
             string json     = JsonConvert.SerializeObject(req);
             var    content  = new StringContent(json, Encoding.UTF8, "application/json");
@@ -106,15 +121,17 @@ namespace PHM_Project_DockPanel.Services.Core
     // =========================================================================
     public sealed class InferenceResult
     {
-        [JsonProperty("model_type")]    public string ModelType    { get; set; } = "";
-        [JsonProperty("sensor_type")]   public string SensorType   { get; set; } = "";
-        [JsonProperty("is_anomaly")]    public bool   IsAnomaly    { get; set; }
-        [JsonProperty("anomaly_score")] public float  AnomalyScore { get; set; }
-        [JsonProperty("threshold")]     public float  Threshold    { get; set; } = 1.0f;
-        [JsonProperty("class_name")]    public string ClassName    { get; set; } = "";
-        [JsonProperty("confidence")]    public float? Confidence   { get; set; }
-        [JsonProperty("raw_mae")]       public float? RawMae       { get; set; }
-        [JsonProperty("raw_threshold")] public float? RawThreshold { get; set; }
+        [JsonProperty("model_type")]    public string  ModelType    { get; set; } = "";
+        [JsonProperty("sensor_type")]   public string  SensorType   { get; set; } = "";
+        [JsonProperty("axis")]          public int?    Axis         { get; set; }
+        [JsonProperty("model_file")]    public string  ModelFile    { get; set; }
+        [JsonProperty("is_anomaly")]    public bool    IsAnomaly    { get; set; }
+        [JsonProperty("anomaly_score")] public float   AnomalyScore { get; set; }
+        [JsonProperty("threshold")]     public float   Threshold    { get; set; } = 1.0f;
+        [JsonProperty("class_name")]    public string  ClassName    { get; set; } = "";
+        [JsonProperty("confidence")]    public float?  Confidence   { get; set; }
+        [JsonProperty("raw_mae")]       public float?  RawMae       { get; set; }
+        [JsonProperty("raw_threshold")] public float?  RawThreshold { get; set; }
 
         /// <summary>네트워크/파싱 오류 시 설정되는 에러 메시지. null 이면 정상.</summary>
         [JsonIgnore] public string Error { get; set; }

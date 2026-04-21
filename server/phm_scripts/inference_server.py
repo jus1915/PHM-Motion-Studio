@@ -5,6 +5,12 @@ POST /predict  : 신호 윈도우 → 이상탐지 / 분류 결과 반환
 GET  /health   : 로드된 모델 목록 반환
 GET  /models/reload : 모델 캐시 재로드
 
+Per-axis 모델 지원:
+  PredictRequest.axis (int, optional) 를 지정하면 해당 축 전용 모델을 우선 로드합니다.
+    axis=0 → ae_fd_ax0.onnx 우선, 없으면 ae_fd.onnx 로 폴백
+    axis=1 → ae_fd_ax1.onnx 우선, 없으면 ae_fd.onnx 로 폴백
+  axis 미지정 시 기존 동작(ae_fd.onnx / cnn1d_fd.onnx) 유지
+
 환경변수:
   PHM_MODELS_ROOT : ONNX 모델 루트 경로 (기본 /opt/phm/models)
 
@@ -45,23 +51,54 @@ from pydantic import BaseModel
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 MODELS_ROOT = Path(os.getenv("PHM_MODELS_ROOT", "/opt/phm/models"))
 
-app = FastAPI(title="PHM Inference Server", version="1.0.0")
+app = FastAPI(title="PHM Inference Server", version="2.0.0")
 
-# ── 모델 캐시 {sensor_type: (session, meta)} ──────────────────────────────────
+# ── 모델 캐시 {cache_key: (session, meta)} ────────────────────────────────────
+# cache_key = "{sensor_type}" 또는 "{sensor_type}_ax{n}"
 _sessions: dict = {}
 
-_SENSOR_CANDIDATES = {
+# 기본(레거시) 후보 파일 — axis 미지정 시 또는 per-axis 모델 없을 때 폴백
+_FALLBACK_CANDIDATES = {
     "accel":  ["ae_fd.onnx",     "cnn1d_fd.onnx"],
     "torque": ["ae_torque.onnx", "cnn1d_torque.onnx"],
 }
 
+# 최대 지원 축 수 (health 엔드포인트에서 스캔용)
+_MAX_AXIS_SCAN = 8
 
-def _load_model(sensor_type: str):
-    """캐시에서 꺼내거나 디스크에서 로드합니다."""
-    if sensor_type in _sessions:
-        return _sessions[sensor_type]
 
-    candidates = _SENSOR_CANDIDATES.get(sensor_type, [])
+def _per_axis_candidates(sensor_type: str, axis: int) -> List[str]:
+    """per-axis 모델 후보 파일명 목록 (우선순위 높은 순)."""
+    if sensor_type == "accel":
+        return [
+            f"ae_fd_ax{axis}.onnx",
+            f"cnn1d_fd_ax{axis}.onnx",
+        ]
+    # torque는 per-axis 모델 없음 → 빈 리스트 반환
+    return []
+
+
+def _cache_key(sensor_type: str, axis: Optional[int]) -> str:
+    return f"{sensor_type}_ax{axis}" if axis is not None else sensor_type
+
+
+def _load_model(sensor_type: str, axis: Optional[int] = None):
+    """캐시에서 꺼내거나 디스크에서 로드합니다.
+
+    axis 지정 시: per-axis 후보 → 폴백 순으로 탐색
+    axis 미지정 시: 기존 후보 목록 탐색
+    """
+    key = _cache_key(sensor_type, axis)
+    if key in _sessions:
+        return _sessions[key]
+
+    # 후보 파일 목록 구성
+    if axis is not None:
+        candidates = _per_axis_candidates(sensor_type, axis) + \
+                     _FALLBACK_CANDIDATES.get(sensor_type, [])
+    else:
+        candidates = _FALLBACK_CANDIDATES.get(sensor_type, [])
+
     for fname in candidates:
         model_path = MODELS_ROOT / fname
         if not model_path.exists():
@@ -74,9 +111,9 @@ def _load_model(sensor_type: str):
             meta: dict = {}
             if meta_path.exists():
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            _sessions[sensor_type] = (sess, meta)
+            _sessions[key] = (sess, meta)
             print(
-                f"[inference] 모델 로드: {fname}  kind={meta.get('kind','?')}",
+                f"[inference] 모델 로드: {fname}  key={key}  kind={meta.get('kind','?')}",
                 flush=True,
             )
             return sess, meta
@@ -89,6 +126,7 @@ def _load_model(sensor_type: str):
 # ── Pydantic 모델 ─────────────────────────────────────────────────────────────
 class PredictRequest(BaseModel):
     sensor_type: str = "accel"     # "accel" | "torque"
+    axis: Optional[int] = None     # 축 인덱스 (None = 레거시/전축 모델)
     window: List[float]            # flat float32 배열, 길이 = window_size × n_channels
     window_size: int = 1024
     n_channels: int = 3
@@ -97,6 +135,8 @@ class PredictRequest(BaseModel):
 class PredictResponse(BaseModel):
     model_type: str                # "AE-CNN1D" | "CNN1D"
     sensor_type: str
+    axis: Optional[int] = None     # 실제 추론에 사용된 축 인덱스
+    model_file: Optional[str] = None  # 실제 로드된 모델 파일명
     is_anomaly: bool
     anomaly_score: float           # 정규화된 이상 점수 (>1.0 이면 이상)
     threshold: float               # 항상 1.0 (정규화 기준)
@@ -115,18 +155,41 @@ def _zscore(arr: np.ndarray) -> np.ndarray:
     return (arr - mean) / std
 
 
+def _loaded_model_file(sensor_type: str, axis: Optional[int]) -> Optional[str]:
+    """현재 캐시에 로드된 모델의 파일명을 반환합니다."""
+    key = _cache_key(sensor_type, axis)
+    if key not in _sessions:
+        return None
+    meta = _sessions[key][1]
+    return meta.get("source_file")   # meta에 없으면 None
+
+
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     loaded = {k: v[1].get("kind", "?") for k, v in _sessions.items()}
-    available = {}
-    for st, candidates in _SENSOR_CANDIDATES.items():
-        available[st] = [f for f in candidates if (MODELS_ROOT / f).exists()]
+
+    # 사용 가능한 모델 스캔
+    available: dict = {}
+    for st, fallbacks in _FALLBACK_CANDIDATES.items():
+        files = []
+        # per-axis 모델 스캔 (ae_fd_ax0.onnx ~ ae_fd_ax7.onnx)
+        for ax in range(_MAX_AXIS_SCAN):
+            for fname in _per_axis_candidates(st, ax):
+                if (MODELS_ROOT / fname).exists():
+                    files.append(fname)
+                    break   # 해당 축의 최우선 모델만 1개 표시
+        # 폴백(레거시) 모델
+        for fname in fallbacks:
+            if (MODELS_ROOT / fname).exists():
+                files.append(fname)
+        available[st] = files
+
     return {
-        "status": "ok",
-        "loaded_models": loaded,
+        "status":           "ok",
+        "loaded_models":    loaded,
         "available_models": available,
-        "models_root": str(MODELS_ROOT),
+        "models_root":      str(MODELS_ROOT),
     }
 
 
@@ -138,14 +201,21 @@ def reload_models():
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
-    sess, meta = _load_model(req.sensor_type)
+    sess, meta = _load_model(req.sensor_type, req.axis)
     if sess is None:
-        avail = [f for f in _SENSOR_CANDIDATES.get(req.sensor_type, [])
-                 if (MODELS_ROOT / f).exists()]
+        # 사용 가능한 모델 목록 수집
+        avail: List[str] = []
+        if req.axis is not None:
+            for fname in _per_axis_candidates(req.sensor_type, req.axis):
+                if (MODELS_ROOT / fname).exists():
+                    avail.append(fname)
+        for fname in _FALLBACK_CANDIDATES.get(req.sensor_type, []):
+            if (MODELS_ROOT / fname).exists():
+                avail.append(fname)
         raise HTTPException(
             status_code=404,
             detail=(
-                f"sensor_type='{req.sensor_type}' 모델 없음. "
+                f"sensor_type='{req.sensor_type}' axis={req.axis} 모델 없음. "
                 f"사용 가능: {avail if avail else '없음 — Airflow 학습을 먼저 실행하세요.'}"
             ),
         )
@@ -168,6 +238,9 @@ def predict(req: PredictRequest):
             status_code=400,
             detail=f"window 길이 {len(req.window)} ≠ {req.window_size}×{req.n_channels}={expected}",
         )
+
+    # 실제 사용된 모델 파일명 (meta에 source_file 없으면 axis로 추정)
+    model_file = meta.get("source_file")
 
     try:
         # (1, T, C) float32
@@ -199,6 +272,8 @@ def predict(req: PredictRequest):
             return PredictResponse(
                 model_type="AE-CNN1D",
                 sensor_type=req.sensor_type,
+                axis=req.axis,
+                model_file=model_file,
                 is_anomaly=is_anomaly,
                 anomaly_score=round(score_normed, 6),
                 threshold=1.0,
@@ -221,6 +296,8 @@ def predict(req: PredictRequest):
         return PredictResponse(
             model_type="CNN1D",
             sensor_type=req.sensor_type,
+            axis=req.axis,
+            model_file=model_file,
             is_anomaly=is_anomaly,
             anomaly_score=round(anomaly_score, 6),
             threshold=0.5,
@@ -231,7 +308,6 @@ def predict(req: PredictRequest):
     except HTTPException:
         raise
     except Exception as e:
-        # ONNX 실행 오류 등 — 상세 메시지를 500으로 반환
         raise HTTPException(status_code=500, detail=f"추론 실패: {type(e).__name__}: {e}")
 
 
