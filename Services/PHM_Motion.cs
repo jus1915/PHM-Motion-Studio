@@ -517,8 +517,14 @@ namespace PHM_Project_DockPanel.Services
             if (!string.IsNullOrWhiteSpace(inferUrl))
             {
                 _inferenceService?.Dispose();
-                if (_accelLogger  != null) _accelLogger.GetOperation  = GetCurrentOperation;
-                if (_ajinLogger   != null) _ajinLogger.GetOperation   = GetCurrentOperation;
+                if (_accelLogger != null)
+                {
+                    _accelLogger.GetAxisOperation = GetAxisOperation;
+                    int _axCnt = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
+                    _accelLogger.LoggedAxes = System.Linq.Enumerable.Range(0, _axCnt).ToArray();
+                }
+                if (_ajinLogger != null)
+                    _ajinLogger.GetAxisOperation = GetAxisOperation;
                 _inferenceService = new ContinuousInferenceService(
                     inferUrl, _accelLogger, _ajinLogger, GetCurrentOperation);
                 _inferenceService.Start();
@@ -527,7 +533,19 @@ namespace PHM_Project_DockPanel.Services
             return true;  // 플래그 활성화 성공 → 항상 true 반환
         }
 
-        /// <summary>?꾩옱 紐⑦꽣 ?숈옉 ?곹깭瑜?諛섑솚?⑸땲?? ?섎굹?쇰룄 ?吏곸씠硫?"Pos", ?꾨? Idle?대㈃ "Idle".</summary>
+        /// <summary>?뱀젙 異뺤쓽 ?숈옉 ?곹깭瑜?諛섑솚?⑸땲?? "Pos" ?먮뒗 "Idle".</summary>
+        public string GetAxisOperation(int axisIndex)
+        {
+            try
+            {
+                var status = _controller.GetStatus();
+                if (status?.AxesStatus == null || axisIndex >= status.AxesStatus.Length) return "Idle";
+                return status.AxesStatus[axisIndex].OpState != OperationState.Idle ? "Pos" : "Idle";
+            }
+            catch { return "Idle"; }
+        }
+
+        /// <summary>?섎굹?쇰룄 ?吏곸씠硫?"Pos", ?꾨? Idle?대㈃ "Idle".</summary>
         public string GetCurrentOperation()
         {
             try
@@ -535,10 +553,7 @@ namespace PHM_Project_DockPanel.Services
                 var status = _controller.GetStatus();
                 if (status?.AxesStatus == null) return "Idle";
                 foreach (var ax in status.AxesStatus)
-                {
-                    if (ax.OpState != OperationState.Idle)
-                        return "Pos";
-                }
+                    if (ax.OpState != OperationState.Idle) return "Pos";
                 return "Idle";
             }
             catch { return "Idle"; }

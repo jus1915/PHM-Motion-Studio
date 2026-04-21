@@ -196,20 +196,29 @@ namespace PHM_Project_DockPanel.Services.Core
 
                 // 데이터 행 (헤더 제외)
                 // Op==Idle ???쒓굅 ???곗씠???쇱씤 援ъ꽦
-                int opColIdx = -1;
+                // Op_Ax{n} ?먮뒗 ?덇굅??Op 而щ읆 ??Idle ???쒓굅
+                var _opCols = new System.Collections.Generic.List<int>();
                 for (int _i = 0; _i < headers.Length; _i++)
                 {
-                    if (string.Equals(headers[_i].Trim(), "Op", System.StringComparison.OrdinalIgnoreCase))
-                    { opColIdx = _i; break; }
+                    string _h = headers[_i].Trim();
+                    if (_h.StartsWith("Op_Ax", System.StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(_h, "Op", System.StringComparison.OrdinalIgnoreCase))
+                        _opCols.Add(_i);
                 }
+                int[] _opColArr = _opCols.ToArray();
                 string[] dataLines = lines.Skip(1)
                     .Where(_ln =>
                     {
-                        if (opColIdx < 0) return true;
+                        if (_opColArr.Length == 0) return true;
                         var _cols = _ln.Split(',');
-                        return _cols.Length <= opColIdx ||
-                               !string.Equals(_cols[opColIdx].Trim(), "Idle",
-                                   System.StringComparison.OrdinalIgnoreCase);
+                        foreach (int _oci in _opColArr)
+                        {
+                            if (_oci >= _cols.Length) continue;
+                            if (!string.Equals(_cols[_oci].Trim(), "Idle",
+                                    System.StringComparison.OrdinalIgnoreCase))
+                                return true;
+                        }
+                        return false;
                     })
                     .ToArray();
                 if (dataLines.Length < windowSize)

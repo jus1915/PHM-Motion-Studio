@@ -37,8 +37,10 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public double MinG { get { return _minG; } set { _minG = value; } }
         public double MaxG { get { return _maxG; } set { _maxG = value; } }
         public double IepeCurrentAmps { get { return _iepeCurrentAmps; } set { _iepeCurrentAmps = value > 0 ? value : 0.004; } }
-        /// <summary>?몄텧 ??"Idle" ?먮뒗 "Pos"瑜?諛섑솚. null?대㈃ "Pos"濡?媛꾩＜.</summary>
-        public Func<string> GetOperation { get; set; }
+        /// <summary>異??몃뜳?ㅻ? 諛쏆븘 "Idle" ?먮뒗 "Pos"瑜?諛섑솚. null?대㈃ "Pos"濡?媛꾩＜.</summary>
+        public Func<int, string> GetAxisOperation { get; set; }
+        /// <summary>Op_Ax{n} 而щ읆???앹꽦??異??몃뜳??紐⑸줉. null?대㈃ Op 而щ읆 ?놁쓬.</summary>
+        public int[] LoggedAxes { get; set; }
 
         // ===== 민감도/오프셋 (mV/g, g) =====
         private class AxisSens { public double X; public double Y; public double Z; }
@@ -242,7 +244,10 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     // UTF-8, 4KB 내부 버퍼
                     _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = false };
                     // 헤더
-                    _swByMod[m].WriteLine("time_s,x,y,z,Op");
+                    var _hdr = new System.Text.StringBuilder("time_s,x,y,z");
+                    if (LoggedAxes != null)
+                        foreach (int _ax in LoggedAxes) _hdr.Append($",Op_Ax{_ax}");
+                    _swByMod[m].WriteLine(_hdr.ToString());
                 }
 
                 _reader = new AnalogMultiChannelReader(_aiTask.Stream)
@@ -359,7 +364,10 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 int modulesInBuffer = Math.Min(_modules.Length, ch / 3);
 
                 double rate = (_rate > 0) ? _rate : AccelRate;
-                string opNow = GetOperation?.Invoke() ?? "Pos";
+                // Op_Ax{n} 媛믪? 釉붾줉????踰덈쭔 罹≪쿂 (?ㅻ젅???덉쟾)
+                string[] _opNows = (LoggedAxes != null && GetAxisOperation != null)
+                    ? System.Array.ConvertAll(LoggedAxes, ax => GetAxisOperation(ax) ?? "Pos")
+                    : System.Array.Empty<string>();
 
                 for (int i = 0; i < n; i++)
                 {
@@ -380,7 +388,11 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         gx -= off.X; gy -= off.Y; gz -= off.Z;
 
                         if (_swByMod[m] != null)
-                            _swByMod[m].WriteLine(t.ToString("F6") + "," + gx.ToString("G6") + "," + gy.ToString("G6") + "," + gz.ToString("G6") + "," + opNow);
+                            var _rowSb = new System.Text.StringBuilder();
+                            _rowSb.Append(t.ToString("F6")).Append(",").Append(gx.ToString("G6"))
+                                  .Append(",").Append(gy.ToString("G6")).Append(",").Append(gz.ToString("G6"));
+                            foreach (string _op in _opNows) _rowSb.Append(",").Append(_op);
+                            _swByMod[m].WriteLine(_rowSb.ToString());
                     }
                 }
 
