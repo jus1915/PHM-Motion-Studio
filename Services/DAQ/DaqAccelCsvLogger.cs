@@ -388,11 +388,13 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         gx -= off.X; gy -= off.Y; gz -= off.Z;
 
                         if (_swByMod[m] != null)
+                        {
                             var _rowSb = new System.Text.StringBuilder();
                             _rowSb.Append(t.ToString("F6")).Append(",").Append(gx.ToString("G6"))
                                   .Append(",").Append(gy.ToString("G6")).Append(",").Append(gz.ToString("G6"));
                             foreach (string _op in _opNows) _rowSb.Append(",").Append(_op);
                             _swByMod[m].WriteLine(_rowSb.ToString());
+                        }
                     }
                 }
 
