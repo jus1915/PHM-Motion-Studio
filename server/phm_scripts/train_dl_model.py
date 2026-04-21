@@ -247,6 +247,7 @@ def _read_signal_csv(
     path: str,
     channels: List[str],
     label_column: str,
+    filter_op_column: Optional[str] = None,
 ) -> Tuple[np.ndarray, Optional[str]]:
     """단일 CSV 파일에서 채널 신호와 레이블 열을 읽습니다.
 
@@ -272,14 +273,30 @@ def _read_signal_csv(
         # 축 번호 없는 채널명(e.g. "Trq(%)") → 실제 컬럼명(e.g. "Ax0_Trq(%)") 해석
         actual_channels = _resolve_channels(list(reader.fieldnames), channels)
         has_label = label_column in (reader.fieldnames or [])
-        # Op 컬럼이 있으면 Idle 구간 제외 (대소문자 무시)
+        # Op 필터링: filter_op_column 명시 시 해당 컬럼 사용,
+        # 미명시 시 Op_Ax* 또는 레거시 Op 컬럼 자동 감지 → 모두 Idle이면 행 제외
         fieldnames_lower = [f.strip().lower() for f in (reader.fieldnames or [])]
-        op_col = next((reader.fieldnames[i] for i, f in enumerate(fieldnames_lower) if f == "op"), None)
+        if filter_op_column:
+            # 명시된 컬럼 하나만 사용
+            _foc_lower = filter_op_column.strip().lower()
+            _op_cols = [reader.fieldnames[i] for i, f in enumerate(fieldnames_lower) if f == _foc_lower]
+        else:
+            # 자동 감지: Op_Ax* 또는 Op
+            _op_cols = [reader.fieldnames[i] for i, f in enumerate(fieldnames_lower)
+                        if f.startswith("op_ax") or f == "op"]
 
         for row in reader:
             # Idle 구간 스킵
-            if op_col and (row.get(op_col) or "").strip().lower() == "idle":
-                continue
+            # filter_op_column 명시: 해당 컬럼이 Idle이면 스킵
+            # 자동: 모든 Op 컬럼이 Idle이면 스킵 (하나라도 Pos면 포함)
+            if _op_cols:
+                values_idle = [(row.get(c) or "").strip().lower() == "idle" for c in _op_cols]
+                if filter_op_column:
+                    if values_idle and values_idle[0]:  # 명시 컬럼이 Idle
+                        continue
+                else:
+                    if all(values_idle):  # 모든 컬럼이 Idle
+                        continue
             try:
                 vals = [float(row[c]) for c in actual_channels]
             except (KeyError, ValueError, TypeError):
@@ -307,6 +324,7 @@ def load_windows_from_dir(
     stride: int,
     sensor_type: str = "",
     normalize: bool = True,
+    filter_op_column: Optional[str] = None,
 ) -> List[Tuple[np.ndarray, int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
@@ -356,7 +374,8 @@ def load_windows_from_dir(
             print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
-        signal, label_str = _read_signal_csv(str(csv_path), channels, label_column)
+        signal, label_str = _read_signal_csv(str(csv_path), channels, label_column,
+                                              filter_op_column=filter_op_column)
 
         # 레이블 결정: CSV 컬럼 → 경로 컴포넌트 → 부모 폴더명
         if label_str is None:
@@ -399,6 +418,7 @@ def load_windows_from_file_list(
     window_size: int,
     stride: int,
     normalize: bool = True,
+    filter_op_column: Optional[str] = None,
 ) -> List[Tuple[np.ndarray, int]]:
     """명시적 파일 목록에서 윈도우를 추출합니다.
 
@@ -426,7 +446,8 @@ def load_windows_from_file_list(
             skipped += 1
             continue
 
-        signal, csv_label = _read_signal_csv(path, channels, label_column)
+        signal, csv_label = _read_signal_csv(path, channels, label_column,
+                                             filter_op_column=filter_op_column)
 
         # 레이블 우선순위: entry["label"] > CSV 내 label_column
         label_str = forced_label if forced_label else (csv_label or "")
@@ -1199,6 +1220,7 @@ def main() -> None:
         ["normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness"],
     )
     label_column: str = params.get("label_column", "Label")
+    filter_op_column: Optional[str] = params.get("filter_op_column", None)
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
@@ -1233,6 +1255,7 @@ def main() -> None:
             window_size=window_size,
             stride=stride,
             normalize=normalize_windows,
+            filter_op_column=filter_op_column,
         )
     elif "data_dir" in params and params["data_dir"]:
         windows = load_windows_from_dir(
@@ -1244,6 +1267,7 @@ def main() -> None:
             stride=stride,
             sensor_type=params.get("sensor_type", ""),
             normalize=normalize_windows,
+            filter_op_column=filter_op_column,
         )
     else:
         print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
@@ -1296,6 +1320,7 @@ def main() -> None:
                 window_size=window_size,
                 stride=stride,
                 normalize=False,
+                filter_op_column=filter_op_column,
             )
         else:
             windows = load_windows_from_dir(
@@ -1307,6 +1332,7 @@ def main() -> None:
                 stride=stride,
                 sensor_type=params.get("sensor_type", ""),
                 normalize=False,
+                filter_op_column=filter_op_column,
             )
 
         # 출력 파일명도 AE 용으로 변경 (cnn1d_fd → ae_fd, cnn1d_torque → ae_torque)
