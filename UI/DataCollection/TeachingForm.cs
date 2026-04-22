@@ -854,25 +854,27 @@ namespace PHM_Project_DockPanel.Windows
                 _iterStatusLabel.Text = $"반복 {curStr}/{totalStr}";
             }
         }
-    }
 
         /// <summary>
-        /// Target == 77777 ?대㈃ ?대떦 異뺤쓽 50~(PositionMax-50) mm 踰붿쐞 ??臾댁옉???꾩튂 諛섑솚.
-        /// 洹??몄뿏 ?먮옒 target 洹몃?濡?諛섑솚.
+        /// Target == 77777이면 해당 축의 50~(PositionMax-50) mm 범위 내 무작위 위치 반환.
+        /// 그 외이면 원래 target 값으로 반환.
         /// </summary>
         private double ResolveTarget(double target, int axisIndex)
         {
             const double RANDOM_MAGIC = 77777.0;
             if (Math.Abs(target - RANDOM_MAGIC) > 0.01) return target;
 
-            double posMax = 900.0;  // 湲곕낯媛?            if (_motion?.AxisConfigs != null && axisIndex < _motion.AxisConfigs.Length)
+            double posMax = 900.0;  // 기본값
+            if (_motion?.AxisConfigs != null && axisIndex < _motion.AxisConfigs.Length)
                 posMax = _motion.AxisConfigs[axisIndex]?.PositionMax ?? 900.0;
 
             double lo = 50.0;
             double hi = posMax - 50.0;
-            if (hi <= lo) return posMax / 2.0;  // ?ㅽ듃濡쒗겕媛 ?덈Т 吏㏃쑝硫?以묎컙媛?
+            if (hi <= lo) return posMax / 2.0;  // 범위가 너무 좁으면 중간값
             return lo + _rng.NextDouble() * (hi - lo);
         }
+    }
+
     public class TeachingStep
     {
         public bool Enabled { get; set; }
