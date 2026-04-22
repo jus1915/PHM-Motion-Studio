@@ -389,8 +389,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Random _rng = new Random(); // ← 추가
 
         // ── 서버 실시간 추론 UI ──────────────────────────────────────────────────
-        private Label _lblLiveAccelStatus, _lblLiveTorqueStatus;
-        private Label _lblLiveAccelScore,  _lblLiveTorqueScore;
+        // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2")
+        private TableLayoutPanel _tlLive;
+        private readonly Dictionary<string, Label> _liveStatusLabels = new Dictionary<string, Label>();
+        private readonly Dictionary<string, Label> _liveScoreLabels  = new Dictionary<string, Label>();
         private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
             = new ConcurrentQueue<Tuple<string, DateTime, double>>();
 
@@ -824,31 +826,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Margin = new Padding(2, 4, 2, 4),
                 AutoSize = true
             };
-            var tlLive = new TableLayoutPanel
+            // 추론 결과가 도착할 때 EnsureLiveRow() 로 동적으로 행이 추가됩니다.
+            _tlLive = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2,
+                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 0,
                 AutoSize = true, Margin = Padding.Empty
             };
-            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 50));   // 센서명
-            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));   // 상태
-            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 점수/클래스
-            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-
-            var lblAccelTag  = new Label { Text = "가속도",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
-            var lblTorqueTag = new Label { Text = "토크",    Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
-            _lblLiveAccelStatus  = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
-            _lblLiveTorqueStatus = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
-            _lblLiveAccelScore   = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-            _lblLiveTorqueScore  = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-
-            tlLive.Controls.Add(lblAccelTag,           0, 0);
-            tlLive.Controls.Add(_lblLiveAccelStatus,   1, 0);
-            tlLive.Controls.Add(_lblLiveAccelScore,    2, 0);
-            tlLive.Controls.Add(lblTorqueTag,          0, 1);
-            tlLive.Controls.Add(_lblLiveTorqueStatus,  1, 1);
-            tlLive.Controls.Add(_lblLiveTorqueScore,   2, 1);
-            gbLive.Controls.Add(tlLive);
+            _tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));   // 센서명+축
+            _tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));   // 상태
+            _tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 점수/클래스
+            gbLive.Controls.Add(_tlLive);
 
             left.Controls.AddRange(new Control[] {
                 gbModels, gbSource,
@@ -4355,24 +4342,66 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>서버 실시간 추론 전용 차트 시리즈를 반환 (없으면 생성).</summary>
-        private Series EnsureLiveSeries(string sensorType)
+        /// <param name="key">예: "accel_ax0", "torque_ax2"</param>
+        private Series EnsureLiveSeries(string key)
         {
-            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
-            string name = isAccel ? "서버-가속도" : "서버-토크";
-            var s = chartLine.Series.FindByName(name);
+            string seriesName = "서버-" + key;
+            var s = chartLine.Series.FindByName(seriesName);
             if (s != null) return s;
 
-            s = new Series(name)
+            bool isAccel = key.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
+            int axIdx = 0;
+            int ux = key.LastIndexOf("_ax", StringComparison.OrdinalIgnoreCase);
+            if (ux >= 0) int.TryParse(key.Substring(ux + 3), out axIdx);
+
+            // 축 인덱스별 색상 팔레트
+            Color[] accelColors  = { Color.DodgerBlue,  Color.DeepSkyBlue,   Color.SteelBlue,  Color.CornflowerBlue };
+            Color[] torqueColors = { Color.OrangeRed,   Color.Tomato,        Color.DarkOrange, Color.Coral };
+            Color c = isAccel ? accelColors[axIdx % accelColors.Length]
+                               : torqueColors[axIdx % torqueColors.Length];
+
+            string legend = isAccel ? $"가속도-Ax{axIdx}" : $"토크-Ax{axIdx}";
+
+            s = new Series(seriesName)
             {
-                ChartType   = SeriesChartType.FastLine,
-                XValueType  = ChartValueType.DateTime,
-                BorderWidth = 2,
-                LegendText  = name,
-                Color       = isAccel ? Color.DodgerBlue : Color.OrangeRed,
+                ChartType       = SeriesChartType.FastLine,
+                XValueType      = ChartValueType.DateTime,
+                BorderWidth     = 2,
+                LegendText      = legend,
+                Color           = c,
                 BorderDashStyle = ChartDashStyle.Dot,
             };
             chartLine.Series.Add(s);
             return s;
+        }
+
+        /// <summary>
+        /// 센서+축 조합 행이 _tlLive 에 없으면 동적으로 추가합니다.
+        /// UI 스레드에서만 호출해야 합니다.
+        /// </summary>
+        private void EnsureLiveRow(string key, string displayName)
+        {
+            if (_liveStatusLabels.ContainsKey(key)) return;
+
+            int row = _tlLive.RowCount;
+            _tlLive.RowCount = row + 1;
+            _tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+
+            var lblTag    = new Label { Text = displayName, Dock = DockStyle.Fill,
+                                        TextAlign = ContentAlignment.MiddleLeft,
+                                        Font = new Font(Font, FontStyle.Bold) };
+            var lblStatus = new Label { Text = "—", Dock = DockStyle.Fill,
+                                        TextAlign = ContentAlignment.MiddleCenter,
+                                        ForeColor = Color.Gray };
+            var lblScore  = new Label { Text = "",  Dock = DockStyle.Fill,
+                                        TextAlign = ContentAlignment.MiddleLeft };
+
+            _tlLive.Controls.Add(lblTag,    0, row);
+            _tlLive.Controls.Add(lblStatus, 1, row);
+            _tlLive.Controls.Add(lblScore,  2, row);
+
+            _liveStatusLabels[key] = lblStatus;
+            _liveScoreLabels[key]  = lblScore;
         }
 
         /// <summary>
@@ -4382,9 +4411,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             if (result == null) return;
 
+            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
+            // 키: "accel_ax0", "torque_ax2" 등 (axis 없으면 "accel", "torque")
+            string key = result.Axis.HasValue
+                         ? $"{sensorType}_ax{result.Axis.Value}"
+                         : sensorType;
+
             // 차트에 넣을 점수를 큐에 추가 (스레드 안전)
-            _liveScoreQueue.Enqueue(Tuple.Create(sensorType, DateTime.Now, (double)result.AnomalyScore));
-            while (_liveScoreQueue.Count > 600)
+            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, (double)result.AnomalyScore));
+            while (_liveScoreQueue.Count > 1200)
             {
                 Tuple<string, DateTime, double> _discard;
                 _liveScoreQueue.TryDequeue(out _discard);
@@ -4394,9 +4429,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
-                bool isAccel   = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
-                var lblStatus  = isAccel ? _lblLiveAccelStatus  : _lblLiveTorqueStatus;
-                var lblScore   = isAccel ? _lblLiveAccelScore   : _lblLiveTorqueScore;
+                // 해당 축+센서 행이 없으면 동적 추가
+                string axLabel      = result.Axis.HasValue ? $" Ax{result.Axis.Value}" : "";
+                string displayName  = (isAccel ? "가속도" : "토크") + axLabel;
+                EnsureLiveRow(key, displayName);
+
+                _liveStatusLabels.TryGetValue(key, out Label lblStatus);
+                _liveScoreLabels.TryGetValue(key, out Label lblScore);
                 if (lblStatus == null || lblScore == null) return;
 
                 string stateText = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
@@ -4418,19 +4457,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     cntDanger++;
                     cardDanger.ValueText = cntDanger + " 건";
 
-                    string sensorLabel = isAccel ? "가속도" : "토크";
                     AppendEventLog(
-                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {sensorLabel} 이상  " +
+                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {displayName} 이상  " +
                         $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}" +
                         (string.IsNullOrEmpty(result.ClassName) ? "" : $"  class={result.ClassName}"));
 
                     rows.Add(new EventRow
                     {
                         TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
-                        Axis         = isAccel ? -1 : -2,
+                        Axis         = result.Axis ?? (isAccel ? -1 : -2),
                         AnomalyScore = Math.Round(result.AnomalyScore, 4),
                         Threshold    = Math.Round(result.Threshold, 4),
-                        Alarm        = sensorLabel + " 이상"
+                        Alarm        = displayName + " 이상"
                     });
                     if (rows.Count > 500) rows.RemoveAt(0);
                 }
