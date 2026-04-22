@@ -321,7 +321,7 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 if (axis.HasValue)
                 {
-                    // per-axis: Ax{n}_Trq(%) 단일 컬럼만 선택
+                    // per-axis: Ax{n}_Trq(%) 단일 컬럼 우선
                     string target = $"ax{axis.Value}_trq(%)";
                     for (int i = 0; i < headers.Length; i++)
                     {
@@ -331,14 +331,11 @@ namespace PHM_Project_DockPanel.Services.Core
                             break;
                         }
                     }
-                    // 못찾으면 전체 Trq 컬럼 폴백
-                    if (result.Count == 0)
-                        goto torque_all;
                 }
-                else
+
+                // per-axis 미발견(result 비어있음) 또는 axis=null → 전체 Trq 컬럼 폴백
+                if (result.Count == 0)
                 {
-                    torque_all:
-                    // 전축 Trq 컬럼 (레거시 / 폴백)
                     for (int i = 0; i < headers.Length; i++)
                     {
                         string h = headers[i].Trim().ToLowerInvariant();
