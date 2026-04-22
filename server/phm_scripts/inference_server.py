@@ -74,7 +74,11 @@ def _per_axis_candidates(sensor_type: str, axis: int) -> List[str]:
             f"ae_fd_ax{axis}.onnx",
             f"cnn1d_fd_ax{axis}.onnx",
         ]
-    # torque는 per-axis 모델 없음 → 빈 리스트 반환
+    if sensor_type == "torque":
+        return [
+            f"ae_torque_ax{axis}.onnx",
+            f"cnn1d_torque_ax{axis}.onnx",
+        ]
     return []
 
 

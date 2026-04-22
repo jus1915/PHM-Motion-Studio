@@ -153,8 +153,8 @@ namespace PHM_Project_DockPanel.Services.Core
                 {
                     string p = _torqueLogger.OutputPath;
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
-                        // 토크는 전축 단일 모델 → axis=null
-                        await RunInferenceForCsvAsync(p, "torque", null, ct)
+                        // 토크도 per-axis 모델 사용: ae_torque_ax{n}.onnx 우선
+                        await RunInferenceForCsvAsync(p, "torque", _movingAxis, ct)
                               .ConfigureAwait(false);
                 }
             }
@@ -174,7 +174,7 @@ namespace PHM_Project_DockPanel.Services.Core
 
             try
             {
-                var (window, nCh) = ReadLastWindow(csvPath, sensorType, WindowSize);
+                var (window, nCh) = ReadLastWindow(csvPath, sensorType, WindowSize, axis);
                 if (window == null)
                     return;
 
@@ -220,7 +220,8 @@ namespace PHM_Project_DockPanel.Services.Core
         private static (float[] window, int nChannels) ReadLastWindow(
             string csvPath,
             string sensorType,
-            int    windowSize)
+            int    windowSize,
+            int?   axis = null)
         {
             try
             {
@@ -235,7 +236,7 @@ namespace PHM_Project_DockPanel.Services.Core
 
                 // 헤더 파싱 → 신호 컬럼 인덱스 결정
                 string[] headers = lines[0].Split(',');
-                int[] signalCols = GetSignalColumnIndices(headers, sensorType);
+                int[] signalCols = GetSignalColumnIndices(headers, sensorType, axis);
                 if (signalCols.Length == 0) return (null, 0);
 
                 // 데이터 행 (헤더 제외)
@@ -297,13 +298,18 @@ namespace PHM_Project_DockPanel.Services.Core
         }
 
         // ── 컬럼 인덱스 결정 ──────────────────────────────────────────────────
-        private static int[] GetSignalColumnIndices(string[] headers, string sensorType)
+        /// <param name="axis">
+        ///   per-axis 모드 시 축 인덱스.
+        ///   torque: axis 지정 → Ax{n}_Trq(%) 단일 컬럼, null → 전체 Trq 컬럼.
+        ///   accel: axis 무관 — 항상 x/y/z 전체 반환 (모델이 3채널 고정).
+        /// </param>
+        private static int[] GetSignalColumnIndices(string[] headers, string sensorType, int? axis = null)
         {
             var result = new List<int>();
 
             if (sensorType == "accel")
             {
-                // x, y, z 컬럼
+                // x, y, z 컬럼 (axis와 무관 — accel은 단일 센서 3채널 고정)
                 for (int i = 0; i < headers.Length; i++)
                 {
                     string h = headers[i].Trim().ToLowerInvariant();
@@ -313,13 +319,32 @@ namespace PHM_Project_DockPanel.Services.Core
             }
             else // torque
             {
-                // Ax0_Trq(%), Ax1_Trq(%), ... — 연결된 모든 축 사용
-                // 모델이 학습된 채널 수와 일치해야 하므로 축 번호 순서대로 전부 포함
-                for (int i = 0; i < headers.Length; i++)
+                if (axis.HasValue)
                 {
-                    string h = headers[i].Trim().ToLowerInvariant();
-                    if (h.Contains("trq") || h.Contains("torque"))
-                        result.Add(i);
+                    // per-axis: Ax{n}_Trq(%) 단일 컬럼만 선택
+                    string target = $"ax{axis.Value}_trq(%)";
+                    for (int i = 0; i < headers.Length; i++)
+                    {
+                        if (headers[i].Trim().ToLowerInvariant() == target)
+                        {
+                            result.Add(i);
+                            break;
+                        }
+                    }
+                    // 못찾으면 전체 Trq 컬럼 폴백
+                    if (result.Count == 0)
+                        goto torque_all;
+                }
+                else
+                {
+                    torque_all:
+                    // 전축 Trq 컬럼 (레거시 / 폴백)
+                    for (int i = 0; i < headers.Length; i++)
+                    {
+                        string h = headers[i].Trim().ToLowerInvariant();
+                        if (h.Contains("trq") || h.Contains("torque"))
+                            result.Add(i);
+                    }
                 }
             }
 

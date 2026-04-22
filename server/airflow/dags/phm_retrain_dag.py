@@ -252,20 +252,43 @@ def run_training_accel(**context) -> None:
 
 def run_training_torque(**context) -> None:
     """
-    토크 전용 학습 태스크.
+    토크 전용 학습 태스크 — 축별 per-axis AE 모델 학습.
 
-    channels = ["Trq(%)"] 하나만 지정 — train_dl_model.py 의 _resolve_channels 가
-    CSV 헤더를 읽어 Ax0_Trq(%)~AxN_Trq(%) 전체로 자동 확장합니다.
-    토크는 전축(全軸) 단일 모델로 학습합니다 (ae_torque.onnx).
+    conf 파라미터:
+      axis_count : 학습할 축 수 (0 또는 미지정 → CSV 스캔으로 자동 감지).
+                   각 축마다 ae_torque_ax{n}.onnx 생성.
+
+    각 축별로:
+      channels         = ["Ax{n}_Trq(%)"]   ← 해당 축 토크만
+      filter_op_column = "Op_Ax{n}"         ← 해당 축이 움직인 행만
+
+    출력 파일:
+      /opt/phm/models/ae_torque_ax0.onnx
+      /opt/phm/models/ae_torque_ax1.onnx
+      ...
     """
     conf = dict(context["dag_run"].conf or {})
-    conf.pop("axis_count", None)   # torque는 단일 모델 — axis_count 무시
-    params = {**_DEFAULT_CONF, **conf}
-    params["sensor_type"] = "torque"
-    params["channels"]    = ["Trq(%)"]
-    params["output"]      = str(Path(_MODELS_ROOT) / "ae_torque.onnx")
-    params.setdefault("session", "AD")
-    _execute_training(params, str(context.get("run_id", "manual")))
+    _raw_ax = int(conf.pop("axis_count", 0))
+    run_id  = str(context.get("run_id", "manual"))
+
+    if _raw_ax <= 0:
+        _data_dir  = _normalize_data_dir(conf.get("data_dir", _DATA_ROOT))
+        axis_count = _detect_axis_count(_data_dir)
+    else:
+        axis_count = _raw_ax
+        print(f"[PHM] torque axis_count conf 지정: {axis_count}개 축", flush=True)
+
+    for ax in range(axis_count):
+        print(f"\n[PHM] ━━━ 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        params = {**_DEFAULT_CONF, **conf}
+        params["sensor_type"]      = "torque"
+        params["channels"]         = [f"Ax{ax}_Trq(%)"]   # 해당 축 토크 단일 채널
+        params["output"]           = str(Path(_MODELS_ROOT) / f"ae_torque_ax{ax}.onnx")
+        params["filter_op_column"] = f"Op_Ax{ax}"
+        params.setdefault("session", "AD")
+        _execute_training(params, f"{run_id}_torque_ax{ax}")
+
+    print(f"\n[PHM] 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
 def reload_inference_cache(**context) -> None:
