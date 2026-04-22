@@ -95,6 +95,37 @@ def _normalize_output(raw: str) -> str:
     return raw
 
 
+# ── 축 수 자동 감지 ───────────────────────────────────────────────────────────
+def _detect_axis_count(data_root: str) -> int:
+    """
+    data_root 하위 CSV 파일의 헤더에서 Op_Ax{n} 컬럼을 스캔해
+    최대 축 인덱스 + 1 을 반환합니다.
+
+    발견된 컬럼이 없으면 1 을 반환합니다 (Ax0 단일 축 가정).
+    """
+    import re as _re
+    _pat = _re.compile(r'Op_Ax(\d+)', _re.IGNORECASE)
+    max_ax = -1
+    try:
+        for csv_path in Path(data_root).rglob("*.csv"):
+            try:
+                with open(csv_path, "r", encoding="utf-8", errors="replace") as _f:
+                    header_line = _f.readline()
+                for _m in _pat.finditer(header_line):
+                    ax = int(_m.group(1))
+                    if ax > max_ax:
+                        max_ax = ax
+                if max_ax >= 0:
+                    break   # 첫 번째 발견 CSV 로 충분
+            except Exception:
+                continue
+    except Exception:
+        pass
+    result = max_ax + 1 if max_ax >= 0 else 1
+    print(f"[PHM] axis_count 자동 감지: {result}개 축 (max Op_Ax index={max_ax})", flush=True)
+    return result
+
+
 # ── 핵심 실행 헬퍼 ─────────────────────────────────────────────────────────────
 def _execute_training(params: dict, run_id: str) -> None:
     """
@@ -196,8 +227,15 @@ def run_training_accel(**context) -> None:
       ...
     """
     conf = dict(context["dag_run"].conf or {})
-    axis_count = int(conf.pop("axis_count", 1))
-    run_id     = str(context.get("run_id", "manual"))
+    # axis_count=0 또는 미지정 시 → CSV 헤더 스캔으로 자동 감지
+    _raw_ax = int(conf.pop("axis_count", 0))
+    run_id  = str(context.get("run_id", "manual"))
+    if _raw_ax <= 0:
+        _data_dir = _normalize_data_dir(conf.get("data_dir", _DATA_ROOT))
+        axis_count = _detect_axis_count(_data_dir)
+    else:
+        axis_count = _raw_ax
+        print(f"[PHM] axis_count conf 지정: {axis_count}개 축", flush=True)
 
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 가속도 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
