@@ -101,7 +101,13 @@ def _load_model(sensor_type: str, axis: Optional[int] = None):
         candidates = _per_axis_candidates(sensor_type, axis) + \
                      _FALLBACK_CANDIDATES.get(sensor_type, [])
     else:
-        candidates = _FALLBACK_CANDIDATES.get(sensor_type, [])
+        # axis 미지정: 전역 모델 우선, 없으면 per-axis 모델(Ax0부터) 폴백
+        candidates = list(_FALLBACK_CANDIDATES.get(sensor_type, []))
+        for _ax in range(_MAX_AXIS_SCAN):
+            for _fname in _per_axis_candidates(sensor_type, _ax):
+                if (MODELS_ROOT / _fname).exists():
+                    candidates.append(_fname)
+                    break   # 해당 축의 최우선 모델 1개만 추가
 
     for fname in candidates:
         model_path = MODELS_ROOT / fname
@@ -227,12 +233,20 @@ def predict(req: PredictRequest):
     # ── 모델 기대 채널 수 검증 ────────────────────────────────────────────────
     model_n_channels = meta.get("n_channels")
     if model_n_channels and req.n_channels != model_n_channels:
+        # per-axis 요청인데 폴백 전역 모델(다채널)로 떨어진 경우:
+        # 채널 수가 다른 더 적합한 모델을 재탐색하지 않고 에러 반환
+        # (→ 해결책: Airflow per-axis 토크 학습 실행)
         raise HTTPException(
             status_code=400,
             detail=(
                 f"채널 수 불일치: 모델={model_n_channels}ch, 요청={req.n_channels}ch. "
                 f"모델 학습 채널: {meta.get('channels', '?')}. "
-                f"Airflow 재학습 또는 CSV 재수집 후 retry."
+                + (
+                    f"per-axis 모델(ae_torque_ax{req.axis}.onnx)이 없어 전역 모델로 폴백됨. "
+                    f"Airflow train_torque 태스크를 실행하세요."
+                    if req.axis is not None
+                    else "Airflow 재학습 또는 CSV 재수집 후 retry."
+                )
             ),
         )
 

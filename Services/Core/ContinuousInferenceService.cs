@@ -38,6 +38,10 @@ namespace PHM_Project_DockPanel.Services.Core
         // 추론 주기 (ms)
         private const int IntervalMs = 500;
 
+        // 마지막으로 감지된 이동 축 — GetMovingAxis() 타이밍 문제 보완
+        // (추론 직전에 축이 Idle로 돌아와도 직전 Pos 축으로 추론)
+        private int? _lastMovingAxis = null;
+
         // 동일 오류 반복 로그 억제 (키 = "sensor_type" 또는 "sensor_type_ax{n}")
         private readonly System.Collections.Generic.Dictionary<string, string> _lastErrorByType
             = new System.Collections.Generic.Dictionary<string, string>();
@@ -128,8 +132,10 @@ namespace PHM_Project_DockPanel.Services.Core
                     catch (TaskCanceledException) { break; }
                 }
 
-                // 현재 움직이는 축 (per-axis 모델 선택용)
-                int? _movingAxis = GetMovingAxis();
+                // 현재 움직이는 축 — Pos면 갱신, Idle이면 직전 값 유지 (타이밍 보완)
+                int? _curMovingAxis = GetMovingAxis();
+                if (_curMovingAxis.HasValue) _lastMovingAxis = _curMovingAxis;
+                int? _movingAxis = _lastMovingAxis;
 
                 // ── 가속도 ────────────────────────────────────────────────────
                 if (_accelLogger?.IsRunning == true)
@@ -153,7 +159,8 @@ namespace PHM_Project_DockPanel.Services.Core
                 {
                     string p = _torqueLogger.OutputPath;
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
-                        // 토크도 per-axis 모델 사용: ae_torque_ax{n}.onnx 우선
+                        // 토크: per-axis 모델(ae_torque_ax{n}.onnx) 우선,
+                        // 미존재 시 서버가 자동으로 전축 모델(ae_torque.onnx)로 폴백
                         await RunInferenceForCsvAsync(p, "torque", _movingAxis, ct)
                               .ConfigureAwait(false);
                 }
@@ -180,6 +187,16 @@ namespace PHM_Project_DockPanel.Services.Core
 
                 var result = await _client.PredictAsync(
                     window, WindowSize, nCh, sensorType, axis, ct).ConfigureAwait(false);
+
+                // 토크 per-axis 모델 미존재(채널 불일치 400) → 전채널 전역 모델로 재시도
+                if (result.IsError && sensorType == "torque" && axis.HasValue
+                    && result.Error != null && result.Error.Contains("채널 수 불일치"))
+                {
+                    var (wAll, nChAll) = ReadLastWindow(csvPath, sensorType, WindowSize, null);
+                    if (wAll != null)
+                        result = await _client.PredictAsync(
+                            wAll, WindowSize, nChAll, sensorType, null, ct).ConfigureAwait(false);
+                }
 
                 if (result.IsError)
                 {
