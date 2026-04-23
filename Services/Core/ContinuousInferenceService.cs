@@ -36,7 +36,9 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly int[]               _axes;              // 모니터링 대상 축
 
         // 추론 주기 (ms)
-        private const int IntervalMs = 500;
+        private const int IntervalMs     = 500;   // 동작 중 추론 간격
+        private const int IdleIntervalMs = 1000;  // 정지 중 외력 감지 간격
+        private const int IdleWindowSize = 256;   // 정지 중 사용 윈도우 크기 (빠른 응답성)
 
         // 마지막으로 감지된 이동 축 — GetMovingAxis() 타이밍 문제 보완
         // (추론 직전에 축이 Idle로 돌아와도 직전 Pos 축으로 추론)
@@ -119,9 +121,11 @@ namespace PHM_Project_DockPanel.Services.Core
 
                 if (_curOp == "Idle")
                 {
-                    // Idle: 100ms 간격으로 상태 재확인
-                    try { await Task.Delay(100, ct).ConfigureAwait(false); }
+                    // Idle: 외력 감지 목적으로 더 긴 간격(IdleIntervalMs)에 추론 실행.
+                    // Idle 행을 필터링하지 않는 작은 윈도우를 사용해 정지 중 토크/가속 변화를 감지.
+                    try { await Task.Delay(IdleIntervalMs, ct).ConfigureAwait(false); }
                     catch (TaskCanceledException) { break; }
+                    await RunIdleInferenceAsync(ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -169,33 +173,100 @@ namespace PHM_Project_DockPanel.Services.Core
             AppEvents.RaiseLog("[추론 서비스] 종료");
         }
 
+        // ── Idle 상태 외력 감지 추론 ───────────────────────────────────────────
+        /// <summary>
+        /// 정지(Idle) 상태에서도 외력 감지를 위해 추론을 실행합니다.
+        /// - 윈도우 크기: IdleWindowSize (256 샘플, 빠른 응답)
+        /// - Op=Idle 행 포함 (includeIdle=true): 정지 중 토크·가속 변화를 직접 분석
+        /// - 모니터링 대상 축 전체에 대해 순차 추론
+        /// </summary>
+        private async Task RunIdleInferenceAsync(CancellationToken ct)
+        {
+            // 모니터링 축: per-axis 설정 있으면 사용, 없으면 null (전역 모델)
+            int[] axesToRun = (_axes != null && _axes.Length > 0) ? _axes : null;
+
+            // ── 가속도 ────────────────────────────────────────────────────────
+            if (_accelLogger?.IsRunning == true)
+            {
+                string[] paths = _accelLogger.CsvPathByModule;
+                if (paths != null)
+                {
+                    foreach (string p in paths)
+                    {
+                        if (string.IsNullOrEmpty(p) || !File.Exists(p)) continue;
+                        if (axesToRun != null)
+                        {
+                            foreach (int ax in axesToRun)
+                                await RunInferenceForCsvAsync(
+                                    p, "accel", ax, ct,
+                                    windowSize: IdleWindowSize, includeIdle: true)
+                                    .ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await RunInferenceForCsvAsync(
+                                p, "accel", null, ct,
+                                windowSize: IdleWindowSize, includeIdle: true)
+                                .ConfigureAwait(false);
+                        }
+                        break; // 첫 번째 모듈만 사용
+                    }
+                }
+            }
+
+            // ── 토크 ──────────────────────────────────────────────────────────
+            if (_torqueLogger?.IsLogging == true)
+            {
+                string p = _torqueLogger.OutputPath;
+                if (!string.IsNullOrEmpty(p) && File.Exists(p))
+                {
+                    if (axesToRun != null)
+                    {
+                        foreach (int ax in axesToRun)
+                            await RunInferenceForCsvAsync(
+                                p, "torque", ax, ct,
+                                windowSize: IdleWindowSize, includeIdle: true)
+                                .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await RunInferenceForCsvAsync(
+                            p, "torque", null, ct,
+                            windowSize: IdleWindowSize, includeIdle: true)
+                            .ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+
         // ── CSV → 윈도우 추출 → 추론 ─────────────────────────────────────────
         private async Task RunInferenceForCsvAsync(
             string            csvPath,
             string            sensorType,
             int?              axis,
-            CancellationToken ct)
+            CancellationToken ct,
+            int               windowSize  = 1024,
+            bool              includeIdle = false)
         {
-            const int WindowSize = 1024;
             string _errKey = axis.HasValue ? $"{sensorType}_ax{axis}" : sensorType;
 
             try
             {
-                var (window, nCh) = ReadLastWindow(csvPath, sensorType, WindowSize, axis);
+                var (window, nCh) = ReadLastWindow(csvPath, sensorType, windowSize, axis, includeIdle);
                 if (window == null)
                     return;
 
                 var result = await _client.PredictAsync(
-                    window, WindowSize, nCh, sensorType, axis, ct).ConfigureAwait(false);
+                    window, windowSize, nCh, sensorType, axis, ct).ConfigureAwait(false);
 
                 // 토크 per-axis 모델 미존재(채널 불일치 400) → 전채널 전역 모델로 재시도
                 if (result.IsError && sensorType == "torque" && axis.HasValue
                     && result.Error != null && result.Error.Contains("채널 수 불일치"))
                 {
-                    var (wAll, nChAll) = ReadLastWindow(csvPath, sensorType, WindowSize, null);
+                    var (wAll, nChAll) = ReadLastWindow(csvPath, sensorType, windowSize, null, includeIdle);
                     if (wAll != null)
                         result = await _client.PredictAsync(
-                            wAll, WindowSize, nChAll, sensorType, null, ct).ConfigureAwait(false);
+                            wAll, windowSize, nChAll, sensorType, null, ct).ConfigureAwait(false);
                 }
 
                 if (result.IsError)
@@ -238,7 +309,8 @@ namespace PHM_Project_DockPanel.Services.Core
             string csvPath,
             string sensorType,
             int    windowSize,
-            int?   axis = null)
+            int?   axis        = null,
+            bool   includeIdle = false)
         {
             try
             {
@@ -271,7 +343,8 @@ namespace PHM_Project_DockPanel.Services.Core
                 string[] dataLines = lines.Skip(1)
                     .Where(_ln =>
                     {
-                        if (_opColArr.Length == 0) return true;
+                        // includeIdle=true(Idle 모니터링) 또는 Op 컬럼 없으면 모든 행 포함
+                        if (includeIdle || _opColArr.Length == 0) return true;
                         var _cols = _ln.Split(',');
                         foreach (int _oci in _opColArr)
                         {
