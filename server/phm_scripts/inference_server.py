@@ -257,17 +257,45 @@ def predict(req: PredictRequest):
             detail=f"window 길이 {len(req.window)} ≠ {req.window_size}×{req.n_channels}={expected}",
         )
 
+    # ── 모델 학습 window_size 와 요청 window_size 불일치 처리 ─────────────────
+    # 모델이 256 샘플로 학습됐는데 클라이언트가 1024를 보내는 경우 등:
+    # 요청 윈도우 끝(가장 최신) 에서 모델 window_size 만큼 슬라이싱해서 사용.
+    model_window_size = int(meta.get("window_size", req.window_size))
+    if model_window_size != req.window_size:
+        need = model_window_size * req.n_channels
+        if len(req.window) < need:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"모델 window_size={model_window_size} 이지만 "
+                    f"요청 데이터({len(req.window)} 샘플)가 부족합니다."
+                ),
+            )
+        # 가장 최신 데이터(끝 부분) 사용
+        effective_window = list(req.window[-need:])
+        effective_window_size = model_window_size
+        print(
+            f"[inference] window_size 조정: {req.window_size}→{model_window_size} "
+            f"({req.sensor_type} axis={req.axis})",
+            flush=True,
+        )
+    else:
+        effective_window      = req.window
+        effective_window_size = req.window_size
+
     # 실제 사용된 모델 파일명 (meta에 source_file 없으면 axis로 추정)
     model_file = meta.get("source_file")
 
     try:
         # (1, T, C) float32
-        raw_arr  = np.array(req.window, dtype=np.float32).reshape(1, req.window_size, req.n_channels)
+        raw_arr  = np.array(effective_window, dtype=np.float32).reshape(
+                       1, effective_window_size, req.n_channels)
         norm_arr = _zscore(raw_arr)
         if req.sensor_type == "accel":
             print(
                 f"[accel] axis={req.axis} first8={raw_arr.reshape(-1)[:8].tolist()} "
-                f"mean={raw_arr.mean():.6f} std={raw_arr.std():.6f}",
+                f"mean={raw_arr.mean():.6f} std={raw_arr.std():.6f} "
+                f"win={effective_window_size}",
                 flush=True
             )
         model_kind = meta.get("kind", "CNN1D")
@@ -292,9 +320,10 @@ def predict(req: PredictRequest):
 
             mae_norm     = mae / max(thr, 1e-8)
             # 가중합: MAE(형태 이상) + RMS(진폭 이상)
-            # RMS 항: z-score 정규화로 MAE가 감지 못하는 진폭 변화(외력 등)를 보완.
-            # 가중치 0.15 → 0.5: 외력처럼 진폭만 크게 바뀌는 경우도 score 1.0 초과 가능
-            score_normed = mae_norm + 0.5 * rms_norm
+            # accel: 외력에 의한 진폭 변화 감지 → RMS 가중치 높게 (0.5)
+            # torque: 부하에 따라 진폭이 자연 변동 → RMS 가중치 낮게 (0.2)
+            rms_weight   = 0.2 if req.sensor_type == "torque" else 0.5
+            score_normed = mae_norm + rms_weight * rms_norm
             is_anomaly   = score_normed >= 1.0
 
             return PredictResponse(
