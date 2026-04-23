@@ -38,7 +38,8 @@ namespace PHM_Project_DockPanel.Services.Core
         // 추론 주기 (ms)
         private const int IntervalMs     = 250;   // 동작 중 추론 간격 (외력 응답성 향상)
         private const int IdleIntervalMs = 1000;  // 정지 중 외력 감지 간격
-        private const int IdleWindowSize = 256;   // 정지 중 사용 윈도우 크기 (빠른 응답성)
+        private const int WindowSize     = 256;   // 동작 중 윈도우 크기 (모델 학습 기준)
+        private const int IdleWindowSize = 256;   // 정지 중 사용 윈도우 크기
 
         // 마지막으로 감지된 이동 축 — GetMovingAxis() 타이밍 문제 보완
         // (추론 직전에 축이 Idle로 돌아와도 직전 Pos 축으로 추론)
@@ -151,7 +152,8 @@ namespace PHM_Project_DockPanel.Services.Core
                         {
                             if (string.IsNullOrEmpty(p) || !File.Exists(p)) continue;
                             // per-axis 모델: 움직이는 축 전달 → ae_fd_ax{n}.onnx 우선
-                            await RunInferenceForCsvAsync(p, "accel", _movingAxis, ct)
+                            await RunInferenceForCsvAsync(p, "accel", _movingAxis, ct,
+                                      windowSize: WindowSize)
                                   .ConfigureAwait(false);
                             break; // 첫 번째 모듈만 사용
                         }
@@ -165,7 +167,8 @@ namespace PHM_Project_DockPanel.Services.Core
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
                         // 토크: per-axis 모델(ae_torque_ax{n}.onnx) 우선,
                         // 미존재 시 서버가 자동으로 전축 모델(ae_torque.onnx)로 폴백
-                        await RunInferenceForCsvAsync(p, "torque", _movingAxis, ct)
+                        await RunInferenceForCsvAsync(p, "torque", _movingAxis, ct,
+                                  windowSize: WindowSize)
                               .ConfigureAwait(false);
                 }
             }
