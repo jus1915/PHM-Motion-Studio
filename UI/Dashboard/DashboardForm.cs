@@ -392,10 +392,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2")
         private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
         private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
+        private double _accelChartThreshold  = 1.0; // 가속도 차트 임계값 (서버 결과로 업데이트)
+        private double _torqueChartThreshold = 1.0; // 토크 차트 임계값 (서버 결과로 업데이트)
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
-        private readonly Dictionary<string, Panel> _statusChips      = new Dictionary<string, Panel>();
-        private readonly Dictionary<string, Label> _liveStatusLabels = new Dictionary<string, Label>();
-        private readonly Dictionary<string, Label> _liveScoreLabels  = new Dictionary<string, Label>();
+        private readonly Dictionary<string, Panel>  _statusChips      = new Dictionary<string, Panel>();
+        private readonly Dictionary<string, Label>  _liveStatusLabels = new Dictionary<string, Label>();
+        private readonly Dictionary<string, Label>  _liveScoreLabels  = new Dictionary<string, Label>();
+        private readonly Dictionary<string, double> _liveThresholds   = new Dictionary<string, double>();
         private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
             = new ConcurrentQueue<Tuple<string, DateTime, double>>();
 
@@ -831,7 +834,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Padding = Padding.Empty, Margin = Padding.Empty
             };
             contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));   // 상태 바
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));   // 상태 바 (칩 36px + 마진 + 패딩)
             contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 42));    // 추론 스코어 차트
             contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 58));    // 하단
 
@@ -860,7 +863,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false, AutoScroll = true, Padding = Padding.Empty
+                WrapContents = false, AutoScroll = false, Padding = Padding.Empty
+            };
+            // 칩이 많아 넘칠 때 마우스휠로 좌우 스크롤 (스크롤바 없이)
+            _statusFlow.MouseWheel += (s, e) =>
+            {
+                var hScroll = _statusFlow.HorizontalScroll;
+                int delta   = -e.Delta / 3;
+                int newVal  = Math.Max(hScroll.Minimum, Math.Min(hScroll.Maximum, hScroll.Value + delta));
+                _statusFlow.HorizontalScroll.Value = newVal;
+                _statusFlow.PerformLayout();
             };
             statusBarPanel.Controls.Add(_statusFlow);
             statusBarPanel.Controls.Add(lblStatusTitle);
@@ -1217,7 +1229,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             ca.AxisY.MajorGrid.LineColor = Color.FromArgb(228, 228, 234);
             ca.AxisY.LabelStyle.Format   = "0.00";
             ca.AxisY.Minimum             = 0;
-            // 임계값 1.0 점선
+            // 임계값 점선 (서버 결과 수신 시 IntervalOffset 동적 갱신)
             ca.AxisY.StripLines.Add(new StripLine
             {
                 IntervalOffset  = 1.0,
@@ -1225,7 +1237,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 BorderColor     = Color.FromArgb(215, 50, 60),
                 BorderWidth     = 1,
                 BorderDashStyle = ChartDashStyle.Dash,
-                Text            = "임계값 1.0",
+                Text            = "임계값",
                 ForeColor       = Color.FromArgb(215, 50, 60),
                 Font            = new Font("Segoe UI", 7f)
             });
@@ -4415,8 +4427,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             var chip = new Panel
             {
-                Width = 122, Height = 36,
-                Margin = new Padding(0, 2, 8, 2),
+                Width = 128, Height = 42,
+                Margin = new Padding(0, 4, 8, 4),
                 BackColor = Color.FromArgb(243, 244, 246),
                 BorderStyle = BorderStyle.FixedSingle
             };
@@ -4424,21 +4436,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 Text = displayName,
                 Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
-                Left = 5, Top = 3, Width = 112, Height = 15,
+                Left = 5, Top = 4, Width = 118, Height = 15,
                 ForeColor = Color.FromArgb(55, 55, 65)
             };
             var lblState = new Label
             {
                 Text = "—",
                 Font = new Font("Segoe UI", 8f),
-                Left = 5, Top = 19, Width = 66, Height = 15,
+                Left = 5, Top = 21, Width = 70, Height = 16,
                 ForeColor = Color.Gray
             };
             var lblScore = new Label
             {
                 Text = "",
                 Font = new Font("Segoe UI", 7.5f),
-                Left = 70, Top = 21, Width = 48, Height = 13,
+                Left = 74, Top = 23, Width = 50, Height = 14,
                 ForeColor = Color.FromArgb(80, 80, 90),
                 TextAlign = ContentAlignment.MiddleRight
             };
@@ -4485,6 +4497,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _liveScoreLabels.TryGetValue(key, out Label lblScore);
                 _statusChips.TryGetValue(key, out Panel chip);
                 if (lblStatus == null) return;
+
+                // 서버에서 전달된 threshold 추적 (차트 임계선 동적 업데이트용)
+                if (result.Threshold > 0)
+                {
+                    _liveThresholds[key] = result.Threshold;
+                    // 해당 센서 타입의 차트 임계값: 등록된 키 중 최솟값 사용
+                    double newThr = double.MaxValue;
+                    foreach (var kv in _liveThresholds)
+                        if (kv.Key.StartsWith(isAccel ? "accel" : "torque", StringComparison.OrdinalIgnoreCase))
+                            if (kv.Value < newThr) newThr = kv.Value;
+                    if (newThr < double.MaxValue)
+                    {
+                        if (isAccel)  _accelChartThreshold  = newThr;
+                        else          _torqueChartThreshold = newThr;
+                        // 차트 임계선 즉시 반영
+                        Chart tgtChart = isAccel ? _chartAccel : _chartTorque;
+                        if (tgtChart?.ChartAreas.Count > 0 &&
+                            tgtChart.ChartAreas[0].AxisY.StripLines.Count > 0)
+                            tgtChart.ChartAreas[0].AxisY.StripLines[0].IntervalOffset = newThr;
+                    }
+                }
 
                 bool anomaly    = result.IsAnomaly;
                 string stateText = anomaly ? "⚠ 이상" : "✓ 정상";
