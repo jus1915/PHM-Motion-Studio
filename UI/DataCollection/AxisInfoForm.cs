@@ -463,6 +463,11 @@ namespace PHM_Project_DockPanel.Windows
                 return;
             }
 
+            // per-axis 결과: 선택된 축과 다른 축이면 무시
+            // (result.Axis == null 이면 레거시 전역 모델 결과 → 항상 표시)
+            if (result.Axis.HasValue && _selectedAxis >= 0 && result.Axis.Value != _selectedAxis)
+                return;
+
             if (result.IsError)
             {
                 _lblDaqStatus.Text      = $"[{sensorType}] 추론 오류";
@@ -471,9 +476,10 @@ namespace PHM_Project_DockPanel.Windows
             }
 
             string tag   = sensorType == "accel" ? "가속" : "토크";
+            string axTag = result.Axis.HasValue ? $" Ax{result.Axis.Value}" : "";
             string state = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
             string cls   = !string.IsNullOrEmpty(result.ClassName) ? $" ({result.ClassName})" : "";
-            _lblDaqStatus.Text      = $"[{tag}] {state}{cls}  {result.AnomalyScore:F3}";
+            _lblDaqStatus.Text      = $"[{tag}{axTag}] {state}{cls}  {result.AnomalyScore:F3}";
             _lblDaqStatus.ForeColor = result.IsAnomaly
                 ? System.Drawing.Color.OrangeRed
                 : System.Drawing.Color.DarkGreen;
