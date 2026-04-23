@@ -264,7 +264,12 @@ def predict(req: PredictRequest):
         # (1, T, C) float32
         raw_arr  = np.array(req.window, dtype=np.float32).reshape(1, req.window_size, req.n_channels)
         norm_arr = _zscore(raw_arr)
-
+        if req.sensor_type == "accel":
+            print(
+                f"[accel] axis={req.axis} first8={raw_arr.reshape(-1)[:8].tolist()} "
+                f"mean={raw_arr.mean():.6f} std={raw_arr.std():.6f}",
+                flush=True
+            )
         model_kind = meta.get("kind", "CNN1D")
         input_name = sess.get_inputs()[0].name
 
@@ -275,16 +280,21 @@ def predict(req: PredictRequest):
             thr   = float(meta.get("threshold", 0.1))
 
             rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
-            rms_thr  = float(meta.get("rms_thr", float("inf")))
+            rms_thr  = float(meta.get("rms_thr",  float("inf")))
             rms_mean = float(meta.get("rms_mean", 0.0))
-            rms_norm = max(0.0, (rms - rms_mean) / max(rms_thr - rms_mean, 1e-8)) \
-                       if rms_thr < 1e30 else 0.0
+            # rms_std가 meta에 있으면 1-std 단위로 정규화, 없으면 기존 방식(thr-mean 기준)
+            rms_std_m = meta.get("rms_std")
+            if rms_thr < 1e30:
+                denom    = float(rms_std_m) if rms_std_m else max(rms_thr - rms_mean, 1e-8)
+                rms_norm = max(0.0, (rms - rms_mean) / denom)
+            else:
+                rms_norm = 0.0
 
             mae_norm     = mae / max(thr, 1e-8)
-            # 가중합: MAE(주) + RMS 초과(보조)
-            # amp_dev 항 제거: standardize_per_sample=True 환경에서 왕복 운동의
-            # 정상적인 진폭 변동(가속·감속)을 이상으로 오인하는 문제 방지
-            score_normed = mae_norm + 0.15 * rms_norm
+            # 가중합: MAE(형태 이상) + RMS(진폭 이상)
+            # RMS 항: z-score 정규화로 MAE가 감지 못하는 진폭 변화(외력 등)를 보완.
+            # 가중치 0.15 → 0.5: 외력처럼 진폭만 크게 바뀌는 경우도 score 1.0 초과 가능
+            score_normed = mae_norm + 0.5 * rms_norm
             is_anomaly   = score_normed >= 1.0
 
             return PredictResponse(
