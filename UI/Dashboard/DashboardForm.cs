@@ -878,8 +878,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             _chartAccel  = BuildLiveInferenceChart(isAccel: true);
             _chartTorque = BuildLiveInferenceChart(isAccel: false);
+            dualChartPanel.SuspendLayout();
             dualChartPanel.Controls.Add(WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166)),  0, 0);
             dualChartPanel.Controls.Add(WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15)), 1, 0);
+            dualChartPanel.ResumeLayout(false);
 
             // ── Row 2: Bottom ──────────────────────────────────────────────────
             var bottomPanel = new TableLayoutPanel
@@ -929,11 +931,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var gaugeLocalPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
-                Margin = Padding.Empty, Padding = Padding.Empty
+                Margin = Padding.Empty, Padding = Padding.Empty,
+                MinimumSize = new Size(1, 1)
             };
             gaugeLocalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
             gaugeLocalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
             gaugeLocalPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            gaugeLocalPanel.SuspendLayout();
 
             // 결함 게이지
             var gaugeWrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 4, 0) };
@@ -968,7 +972,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             gaugeWrap.Controls.Add(lblGaugeTitle);
 
             // 로컬 진단 차트
-            chartLine = new Chart { Dock = DockStyle.Fill, BackColor = Color.White };
+            chartLine = new Chart { Dock = DockStyle.Fill, BackColor = Color.White, MinimumSize = new Size(1, 1) };
             {
                 var ca = new ChartArea("a");
                 ca.BackColor = Color.White;
@@ -994,10 +998,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
             gaugeLocalPanel.Controls.Add(gaugeWrap, 0, 0);
             gaugeLocalPanel.Controls.Add(WrapChartInPanel("로컬 진단 스코어", chartLine, Color.FromArgb(60, 60, 75)), 1, 0);
+            gaugeLocalPanel.ResumeLayout(false);
 
+            leftColPanel.SuspendLayout();
             leftColPanel.Controls.Add(lblKpiTitle,    0, 0);
             leftColPanel.Controls.Add(kpiPanel,       0, 1);
             leftColPanel.Controls.Add(gaugeLocalPanel,0, 2);
+            leftColPanel.ResumeLayout(false);
 
             // Bottom-Right: 이벤트 로그 + 그리드 + 샘플 차트
             var rightColPanel = new TableLayoutPanel
@@ -1072,16 +1079,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             sampleHost.Controls.Add(sampleWrap);
             sampleHost.Controls.Add(lblSample);
 
+            rightColPanel.SuspendLayout();
             rightColPanel.Controls.Add(lblEvents,    0, 0);
             rightColPanel.Controls.Add(eventsLayout, 0, 1);
             rightColPanel.Controls.Add(sampleHost,   0, 2);
+            rightColPanel.ResumeLayout(false);
 
+            bottomPanel.SuspendLayout();
             bottomPanel.Controls.Add(leftColPanel,  0, 0);
             bottomPanel.Controls.Add(rightColPanel, 1, 0);
+            bottomPanel.ResumeLayout(false);
 
+            contentPanel.SuspendLayout();
             contentPanel.Controls.Add(statusBarPanel, 0, 0);
             contentPanel.Controls.Add(dualChartPanel, 0, 1);
             contentPanel.Controls.Add(bottomPanel,    0, 2);
+            contentPanel.ResumeLayout(false);
 
             Controls.Add(contentPanel);
             Controls.Add(leftWrap);
@@ -1194,7 +1207,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         /// <summary>서버 추론 전용 차트를 생성합니다 (임계값 1.0 점선 포함).</summary>
         private Chart BuildLiveInferenceChart(bool isAccel)
         {
-            var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White };
+            var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White, MinimumSize = new Size(1, 1) };
             var ca = new ChartArea("a") { BackColor = Color.White };
             ca.AxisX.LabelStyle.Format   = "HH:mm:ss";
             ca.AxisX.IntervalAutoMode    = IntervalAutoMode.VariableCount;
@@ -1243,7 +1256,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var panel = new Panel
             {
                 Dock = DockStyle.Fill, BackColor = Color.White,
-                Margin = new Padding(3), Padding = Padding.Empty
+                Margin = new Padding(3), Padding = Padding.Empty,
+                MinimumSize = new Size(1, 10)
             };
             panel.Paint += (s, e) =>
             {
