@@ -390,7 +390,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         // ── 서버 실시간 추론 UI ──────────────────────────────────────────────────
         // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2")
-        private TableLayoutPanel _tlLive;
+        private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
+        private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
+        private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
+        private readonly Dictionary<string, Panel> _statusChips      = new Dictionary<string, Panel>();
         private readonly Dictionary<string, Label> _liveStatusLabels = new Dictionary<string, Label>();
         private readonly Dictionary<string, Label> _liveScoreLabels  = new Dictionary<string, Label>();
         private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
@@ -633,35 +636,29 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         #region UI 구성
         private void BuildUI()
         {
-            // ====== Root ======
-            var root = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 2,
-                BackColor = Color.White,
-                Padding = new Padding(0, 8, 12, 12)
-            };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 상단
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 하단 
+            SuspendLayout();
+            const int SidebarW = 220;
+            const int BtnH = 28;
+            BackColor = Color.FromArgb(245, 247, 250);
 
-            // ====== Left Sidebar ======
-            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 250 };
+            // ══════════════════════════════════════════════════
+            //  Left Sidebar
+            // ══════════════════════════════════════════════════
+            var leftWrap = new Panel { Dock = DockStyle.Left, Width = SidebarW, BackColor = Color.White };
+            leftWrap.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(Color.FromArgb(215, 215, 222)))
+                    e.Graphics.DrawLine(pen, leftWrap.Width - 1, 0, leftWrap.Width - 1, leftWrap.Height);
+            };
             var left = new FlowLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoScroll = false,
-                Padding = new Padding(4, 4, 4, 30),
-                Margin = Padding.Empty
+                Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
+                WrapContents = false, AutoScroll = false,
+                Padding = new Padding(6, 6, 6, 30), Margin = Padding.Empty
             };
             left.SuspendLayout();
-            // left.Padding.Horizontal(=8) + 컨트롤 Margin.Horizontal(=4) 를 빼서 수평 스크롤 없음
-            int ctrlWidth = leftWrap.Width - 12;
-            int btnH = 28;
+            int ctrlWidth = SidebarW - 14;
+            int btnH = BtnH;
 
             // ── [A] 모델 로드 GroupBox ──────────────────────────────────────────
             var gbModels = new GroupBox
@@ -818,331 +815,308 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             gridModelPaths.Columns.AddRange(new DataGridViewColumn[] { colAxis, colPath });
             gbModelPaths.Controls.Add(gridModelPaths);
 
-            // ── [E] 서버 실시간 추론 현황 ────────────────────────────────────────
-            var gbLive = new GroupBox
-            {
-                Text = "서버 실시간 추론", Width = ctrlWidth,
-                Padding = new Padding(6, 4, 6, 6),
-                Margin = new Padding(2, 4, 2, 4),
-                AutoSize = true
-            };
-            // 추론 결과가 도착할 때 EnsureLiveRow() 로 동적으로 행이 추가됩니다.
-            _tlLive = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 0,
-                AutoSize = true, Margin = Padding.Empty
-            };
-            _tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));   // 센서명+축
-            _tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));   // 상태
-            _tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 점수/클래스
-            gbLive.Controls.Add(_tlLive);
-
             left.Controls.AddRange(new Control[] {
-                gbModels, gbSource,
-                btnStart, btnStop, lblStatus,
-                gbLive,
-                gbModelPaths
+                gbModels, gbSource, btnStart, btnStop, lblStatus, gbModelPaths
             });
             left.ResumeLayout(false);
-
-            // 초기 표시
             RefreshModelPathList();
-
             leftWrap.Controls.Add(left);
 
-            // ====== KPI 패널 + 최근 샘플(좌측 상단 2열) ======
-            var leftTop = new Panel
+            // ══════════════════════════════════════════════════
+            //  Content Area (상태바 + 추론차트 + 하단)
+            // ══════════════════════════════════════════════════
+            var contentPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
+                Padding = Padding.Empty, Margin = Padding.Empty
+            };
+            contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));   // 상태 바
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 42));    // 추론 스코어 차트
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 58));    // 하단
+
+            // ── Row 0: Live Status Bar ─────────────────────────────────────────
+            var statusBarPanel = new Panel
+            {
+                Dock = DockStyle.Fill, BackColor = Color.White,
+                Padding = new Padding(10, 7, 8, 5)
+            };
+            statusBarPanel.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(Color.FromArgb(215, 215, 222)))
+                    e.Graphics.DrawLine(pen, 0, statusBarPanel.Height - 1,
+                                        statusBarPanel.Width, statusBarPanel.Height - 1);
+            };
+            var lblStatusTitle = new Label
+            {
+                Text = "실시간 추론 상태",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                AutoSize = true, Dock = DockStyle.Left,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 2, 12, 2),
+                ForeColor = Color.FromArgb(55, 55, 65)
+            };
+            _statusFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty,
-                MinimumSize = new Size(120, 120)
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, AutoScroll = true, Padding = Padding.Empty
             };
+            statusBarPanel.Controls.Add(_statusFlow);
+            statusBarPanel.Controls.Add(lblStatusTitle);
 
-            // 2열 그리드 (좌: KPI, 우: 샘플 차트)
-            var leftTopGrid = new TableLayoutPanel
+            // ── Row 1: Dual Inference Score Charts ────────────────────────────
+            var dualChartPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 2,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+                Padding = new Padding(6, 4, 6, 2), Margin = Padding.Empty,
+                BackColor = Color.FromArgb(245, 247, 250)
             };
-            // 헤더 라벨 행이 0이 되지 않도록 고정 높이
-            leftTopGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32f));
-            leftTopGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            leftTopGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55f));
-            leftTopGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45f));
+            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            dualChartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            // 좌측: KPI 라벨 + 카드
-            var lblKpi = new Label
+            _chartAccel  = BuildLiveInferenceChart(isAccel: true);
+            _chartTorque = BuildLiveInferenceChart(isAccel: false);
+            dualChartPanel.Controls.Add(WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166)),  0, 0);
+            dualChartPanel.Controls.Add(WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15)), 1, 0);
+
+            // ── Row 2: Bottom ──────────────────────────────────────────────────
+            var bottomPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+                Padding = new Padding(6, 2, 6, 6), Margin = Padding.Empty,
+                BackColor = Color.FromArgb(245, 247, 250)
+            };
+            bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+            bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+            bottomPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            // Bottom-Left: KPI 카드 + 결함 분류 게이지 + 로컬 진단 차트
+            var leftColPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
+                Margin = new Padding(0, 0, 4, 0), Padding = Padding.Empty
+            };
+            leftColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));   // section 제목
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));  // KPI 카드
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 게이지 + 로컬 차트
+
+            var lblKpiTitle = new Label
             {
                 Text = "설비 상태 현황",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Left,
-                Padding = new Padding(12, 6, 0, 0),
-                AutoSize = true
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, 0, 0, 0), ForeColor = Color.FromArgb(30, 30, 40)
             };
             var kpiPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 3,
-                RowCount = 1,
-                Padding = new Padding(2),
-                Margin = new Padding(0, 0, 6, 0),
-                MinimumSize = new Size(80, 80)
+                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1,
+                Padding = new Padding(2), Margin = new Padding(0, 0, 0, 4), MinimumSize = new Size(60, 60)
             };
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-
-            cardDanger  = new KpiCard { Title = "위험 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
-            cardWarning = new KpiCard { Title = "경고 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
-            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
-            kpiPanel.Controls.Add(cardDanger, 0, 0);
+            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 80) };
+            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 80) };
+            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 80) };
+            kpiPanel.Controls.Add(cardDanger,  0, 0);
             kpiPanel.Controls.Add(cardWarning, 1, 0);
-            kpiPanel.Controls.Add(cardCycles, 2, 0);
+            kpiPanel.Controls.Add(cardCycles,  2, 0);
 
-            var lblDefect = new Label
+            // 결함 분류 게이지 + 로컬 차트 (하단 2열)
+            var gaugeLocalPanel = new TableLayoutPanel
             {
-                Text = "결함 분류 결과",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Left,
-                Padding = new Padding(12, 8, 0, 4),
-                AutoSize = true
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+                Margin = Padding.Empty, Padding = Padding.Empty
             };
+            gaugeLocalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
+            gaugeLocalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+            gaugeLocalPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            btnTestProbs = new Button
+            // 결함 게이지
+            var gaugeWrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 4, 0) };
+            var lblGaugeTitle = new Label
             {
-                Text = "확률 랜덤",
-                AutoSize = true,
-                Anchor = AnchorStyles.Right,
-                Margin = new Padding(0, 4, 8, 4)
+                Text = "결함 분류 확률",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                Dock = DockStyle.Top, Height = 24,
+                TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0)
             };
-            btnTestProbs.Click += (s, e) => RandomizeClassProbsForAllAxes(); // 클릭 이벤트 연결
-
-            var defectHeader = new Panel { Dock = DockStyle.Fill, Height = 32, Padding = new Padding(0) };
-            defectHeader.Controls.Add(btnTestProbs);
-            defectHeader.Controls.Add(lblDefect);
-
-            // 버튼을 오른쪽 정렬
-            btnTestProbs.Dock = DockStyle.Right;
-            lblDefect.Dock = DockStyle.Left;
-
-            var gaugeHostPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 4, 6, 0) };
+            btnTestProbs = new Button { Text = "확률 랜덤", AutoSize = true, Dock = DockStyle.Right, Margin = new Padding(0, 2, 2, 2) };
+            btnTestProbs.Click += (s, e) => RandomizeClassProbsForAllAxes();
+            var defectBtnRow = new Panel { Dock = DockStyle.Top, Height = 28, Padding = Padding.Empty };
+            defectBtnRow.Controls.Add(btnTestProbs);
+            var gaugeHostPanel = new Panel { Dock = DockStyle.Fill, Padding = Padding.Empty };
             axisGaugeFlow = new FlowLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoScroll = true,
-                Padding = new Padding(0, 2, 6, 2),   // ← 좌우/상하 패딩 축소
-                Margin = Padding.Empty
+                Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
+                WrapContents = false, AutoScroll = true,
+                Padding = new Padding(0, 2, 4, 2), Margin = Padding.Empty
             };
             gaugeHostPanel.Controls.Add(axisGaugeFlow);
             axisGaugeFlow.Resize += (s, e) =>
             {
-                int w = Math.Max(axisGaugeFlow.ClientSize.Width - 12, 240);
+                int w = Math.Max(axisGaugeFlow.ClientSize.Width - 12, 160);
                 foreach (Control c in axisGaugeFlow.Controls)
                     if (c is GroupBox gb) gb.Width = w;
-
-                // 높이도 재분배
                 ReflowGaugeHeights();
             };
+            gaugeWrap.Controls.Add(gaugeHostPanel);
+            gaugeWrap.Controls.Add(defectBtnRow);
+            gaugeWrap.Controls.Add(lblGaugeTitle);
 
-            // 그리드 배치
-            leftTopGrid.Controls.Add(lblKpi, 0, 0);
-            leftTopGrid.Controls.Add(defectHeader, 1, 0);
-            leftTopGrid.Controls.Add(kpiPanel, 0, 1);
-            leftTopGrid.Controls.Add(gaugeHostPanel, 1, 1);
-
-            leftTop.Controls.Add(leftTopGrid);
-
-            // ====== 라인차트 ======
-            var rightTop = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, MinimumSize = new Size(120, 120)
-            };
-            var lblchart = new Label { Text = "Anomaly Score", Font = new Font("Segoe UI", 12, FontStyle.Bold), Dock = DockStyle.Top, Padding = new Padding(12, 8, 0, 4), AutoSize = true };
-            chartLine = new Chart { Dock = DockStyle.Fill, Margin = Padding.Empty };
-            var ca = new ChartArea("a");
-            ca.AxisX.LabelStyle.Format = "HH:mm:ss";
-            ca.AxisX.IntervalAutoMode = IntervalAutoMode.VariableCount;
-            ca.AxisX.MajorGrid.Enabled = true;
-            ca.AxisY.MajorGrid.Enabled = true;
-            ca.AxisX.MajorGrid.LineColor = Color.Gainsboro;
-            ca.AxisY.MajorGrid.LineColor = Color.Gainsboro;
-            ca.AxisY.LabelStyle.Format = "0.0";
-            chartLine.ChartAreas.Add(ca);
-
-            chartLine.Legends.Clear();
-            chartLine.Legends.Add(new Legend
+            // 로컬 진단 차트
+            chartLine = new Chart { Dock = DockStyle.Fill, BackColor = Color.White };
             {
-                Docking = Docking.Top,
-                Alignment = StringAlignment.Near
-            });
+                var ca = new ChartArea("a");
+                ca.BackColor = Color.White;
+                ca.AxisX.LabelStyle.Format  = "HH:mm:ss";
+                ca.AxisX.IntervalAutoMode   = IntervalAutoMode.VariableCount;
+                ca.AxisX.MajorGrid.Enabled  = true;
+                ca.AxisX.MajorGrid.LineColor = Color.FromArgb(230, 230, 235);
+                ca.AxisY.MajorGrid.Enabled  = true;
+                ca.AxisY.MajorGrid.LineColor = Color.FromArgb(230, 230, 235);
+                ca.AxisY.LabelStyle.Format  = "0.0";
+                chartLine.ChartAreas.Add(ca);
+                chartLine.Legends.Clear();
+                chartLine.Legends.Add(new Legend { Docking = Docking.Top, Alignment = StringAlignment.Near, Font = new Font("Segoe UI", 7.5f) });
+                var now2 = DateTime.Now;
+                var dummy = new Series(SkeletonSeriesName)
+                {
+                    ChartType = SeriesChartType.FastLine, XValueType = ChartValueType.DateTime,
+                    IsVisibleInLegend = false, Color = Color.Transparent
+                };
+                dummy.Points.AddXY(now2.AddMinutes(-5), 0);
+                dummy.Points.AddXY(now2, 0);
+                chartLine.Series.Add(dummy);
+            }
+            gaugeLocalPanel.Controls.Add(gaugeWrap, 0, 0);
+            gaugeLocalPanel.Controls.Add(WrapChartInPanel("로컬 진단 스코어", chartLine, Color.FromArgb(60, 60, 75)), 1, 0);
 
-            var now = DateTime.Now;
-            var dummy = new Series(SkeletonSeriesName)
+            leftColPanel.Controls.Add(lblKpiTitle,    0, 0);
+            leftColPanel.Controls.Add(kpiPanel,       0, 1);
+            leftColPanel.Controls.Add(gaugeLocalPanel,0, 2);
+
+            // Bottom-Right: 이벤트 로그 + 그리드 + 샘플 차트
+            var rightColPanel = new TableLayoutPanel
             {
-                ChartType = SeriesChartType.FastLine,
-                XValueType = ChartValueType.DateTime,
-                IsVisibleInLegend = false,
-                Color = Color.Transparent   // 화면에는 안 보임
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
+                Margin = new Padding(4, 0, 0, 0), Padding = Padding.Empty
             };
+            rightColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));   // section 제목
+            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 45));    // 이벤트 로그 + 그리드
+            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 55));    // 샘플 차트
 
-            dummy.Points.AddXY(now.AddMinutes(-5), 0);
-            dummy.Points.AddXY(now, 0);
-            chartLine.Series.Add(dummy);
-            
-            rightTop.Controls.Add(chartLine);
-            rightTop.Controls.Add(lblchart);
-
-            // ====== 하단: 이벤트 ======
-            var leftBottom = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, MinimumSize = new Size(120, 120) };
-
-            // 상단 제목 라벨
             var lblEvents = new Label
             {
-                Text = "발생한 이벤트",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Top,
-                Padding = new Padding(12, 8, 0, 4),
-                AutoSize = true
+                Text = "발생 이벤트",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, 0, 0, 0), ForeColor = Color.FromArgb(30, 30, 40)
             };
-
-            // 상단 로그 + 하단 그리드 배치용 레이아웃
             var eventsLayout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+                Margin = Padding.Empty, Padding = Padding.Empty
             };
-            eventsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));          // 제목
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));     // 실시간 로그 영역 높이
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));     // 그리드
+            eventsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
+            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
 
-            // 상단: 실시간 로그 텍스트박스(읽기전용)
             txtEventLog = new TextBox
             {
-                Multiline = true,
-                ReadOnly = true,
-                Dock = DockStyle.Fill,
+                Multiline = true, ReadOnly = true, Dock = DockStyle.Fill,
                 ScrollBars = ScrollBars.Vertical,
-                BackColor = Color.WhiteSmoke,
+                BackColor = Color.FromArgb(251, 252, 253),
                 BorderStyle = BorderStyle.FixedSingle,
-                Font = new Font("Consolas", 9f),
-                WordWrap = false
+                Font = new Font("Consolas", 8.5f), WordWrap = false
             };
-
-            // 하단: 경고/위험만 남길 그리드
             grid = new DataGridView
             {
-                Dock = DockStyle.Fill,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
+                Dock = DockStyle.Fill, ReadOnly = true,
+                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 DataSource = rows
             };
+            eventsLayout.Controls.Add(txtEventLog, 0, 0);
+            eventsLayout.Controls.Add(grid,        0, 1);
 
-            // 배치
-            eventsLayout.Controls.Add(lblEvents, 0, 0);
-            eventsLayout.Controls.Add(txtEventLog, 0, 1);
-            eventsLayout.Controls.Add(grid, 0, 2);
-
-            leftBottom.Controls.Add(eventsLayout);
-
-            // ====== 하단: 샘플(축별 그리드) ======
-            var rightBottom = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty,
-                MinimumSize = new Size(120, 120)
-            };
             var lblSample = new Label
             {
                 Text = "최근 감지 샘플 (축별)",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Top,
-                Padding = new Padding(12, 8, 0, 4),
-                AutoSize = true
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                Dock = DockStyle.Top, Height = 24,
+                TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0)
             };
-
-            // 축별 차트를 담을 그리드(동적으로 행/열 재배치)
             sampleGrid = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 1,
-                Margin = new Padding(6),
-                Padding = Padding.Empty,
-                AutoScroll = false,
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 1,
+                Margin = new Padding(2), Padding = Padding.Empty, AutoScroll = false,
                 GrowStyle = TableLayoutPanelGrowStyle.AddRows
             };
-            sampleGrid.ColumnStyles.Clear();
-            sampleGrid.RowStyles.Clear();
-            sampleGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            sampleGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-
-            // 사이즈 변할 때마다 레이아웃 재계산(창/도킹 영역 리사이즈 대응)
+            sampleGrid.ColumnStyles.Clear(); sampleGrid.RowStyles.Clear();
+            sampleGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            sampleGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             sampleGrid.Resize += (s, e) => UpdateSampleGridLayout();
 
-            rightBottom.Controls.Add(sampleGrid);
-            rightBottom.Controls.Add(lblSample);
+            var sampleWrap = new Panel
+            {
+                Dock = DockStyle.Fill, Padding = Padding.Empty,
+                BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle
+            };
+            sampleWrap.Controls.Add(sampleGrid);
+            var sampleHost = new Panel { Dock = DockStyle.Fill, Padding = Padding.Empty };
+            sampleHost.Controls.Add(sampleWrap);
+            sampleHost.Controls.Add(lblSample);
 
-            // ====== 컨트롤 추가 ======
-            Controls.Add(root);
+            rightColPanel.Controls.Add(lblEvents,    0, 0);
+            rightColPanel.Controls.Add(eventsLayout, 0, 1);
+            rightColPanel.Controls.Add(sampleHost,   0, 2);
+
+            bottomPanel.Controls.Add(leftColPanel,  0, 0);
+            bottomPanel.Controls.Add(rightColPanel, 1, 0);
+
+            contentPanel.Controls.Add(statusBarPanel, 0, 0);
+            contentPanel.Controls.Add(dualChartPanel, 0, 1);
+            contentPanel.Controls.Add(bottomPanel,    0, 2);
+
+            Controls.Add(contentPanel);
             Controls.Add(leftWrap);
 
-            root.Controls.Add(leftTop, 0, 0);
-            root.Controls.Add(rightTop, 1, 0);
-            root.Controls.Add(leftBottom, 0, 1);
-            root.Controls.Add(rightBottom, 1, 1);
-
-            // ====== 타이머 ======
+            // ── 타이머 ────────────────────────────────────────────────────────
             var timer = new System.Windows.Forms.Timer { Interval = 300 };
             timer.Tick += (s, e) =>
             {
                 FlushLineChart();
 
-                // 1분에 한 번 스냅샷
                 if ((DateTime.Now - _lastSnap).TotalSeconds >= 60)
                 {
                     _lastSnap = DateTime.Now;
                     _history.AddLast(new Snapshot { T = _lastSnap, D = cntDanger, W = cntWarning, C = cycles });
-                    // 3시간보다 오래된 스냅샷 정리
                     while (_history.First != null && (DateTime.Now - _history.First.Value.T).TotalHours > 3)
                         _history.RemoveFirst();
                 }
-
-                // 2시간 전 기준 찾기 (가장 가까운 과거)
                 DateTime anchor = DateTime.Now.AddHours(-2);
                 Snapshot? baseSnap = null;
                 for (var node = _history.Last; node != null; node = node.Previous)
-                {
                     if (node.Value.T <= anchor) { baseSnap = node.Value; break; }
-                }
+
                 if (baseSnap.HasValue)
                 {
-                    int dD = cntDanger - baseSnap.Value.D;
+                    int dD = cntDanger  - baseSnap.Value.D;
                     int dW = cntWarning - baseSnap.Value.W;
-                    int dC = cycles - baseSnap.Value.C;
-
-                    cardDanger.DeltaText = (dD >= 0 ? "+" : "") + dD + "건";
+                    int dC = cycles     - baseSnap.Value.C;
+                    cardDanger.DeltaText  = (dD >= 0 ? "+" : "") + dD + "건";
                     cardWarning.DeltaText = (dW >= 0 ? "+" : "") + dW + "건";
-                    cardCycles.DeltaText = (dC >= 0 ? "+" : "") + dC + " 회";
-
-                    cardDanger.Footnote = "2시간 전 대비";
-                    cardWarning.Footnote = "2시간 전 대비";
-                    cardCycles.Footnote = "2시간 전 대비";
+                    cardCycles.DeltaText  = (dC >= 0 ? "+" : "") + dC + " 회";
+                    cardDanger.Footnote = cardWarning.Footnote = cardCycles.Footnote = "2시간 전 대비";
                 }
                 else
                 {
-                    cardDanger.DeltaText = "—";
-                    cardWarning.DeltaText = "—";
+                    cardDanger.DeltaText = cardWarning.DeltaText = "—";
                     cardCycles.DeltaText = "—";
                     cardDanger.Footnote = cardWarning.Footnote = cardCycles.Footnote = "2시간 전 대비";
                 }
@@ -1161,7 +1135,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     {
                         int w = Math.Max(axisGaugeFlow.ClientSize.Width
                                          - axisGaugeFlow.Padding.Horizontal
-                                         - gb.Margin.Horizontal, 240);
+                                         - gb.Margin.Horizontal, 160);
                         gb.Width = w;
                     }
                 axisGaugeFlow.PerformLayout();
@@ -1171,8 +1145,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             void LayoutLeftAuto()
             {
                 if (leftWrap == null || left == null) return;
-
-                // 고정 높이 컨트롤 합산
                 int fixedH = 0;
                 Control[] fixedControls = { gbModels, gbSource, btnStart, btnStop, lblStatus };
                 foreach (var c in fixedControls)
@@ -1181,35 +1153,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     fixedH += c.Height + c.Margin.Vertical;
                 }
                 fixedH += left.Padding.Vertical;
-
-                // 남은 공간을 gbModelPaths에 할당
-                int availH = Math.Max(gbModelPaths.MinimumSize.Height,
-                                      leftWrap.ClientSize.Height - fixedH);
+                int availH = Math.Max(gbModelPaths.MinimumSize.Height, leftWrap.ClientSize.Height - fixedH);
                 gbModelPaths.Height = availH;
-
-                int w = Math.Max(160, leftWrap.ClientSize.Width - left.Padding.Horizontal);
-                gbModelPaths.Width = w;
-
+                int w2 = Math.Max(160, leftWrap.ClientSize.Width - left.Padding.Horizontal);
+                gbModelPaths.Width = w2;
                 left.PerformLayout();
             }
 
             leftWrap.Resize += (s, e) =>
             {
                 int w = Math.Max(180, leftWrap.ClientSize.Width - 12);
-
-                // 최상위 컨트롤 폭 조정
                 foreach (Control c in new Control[] { gbModels, gbSource, btnStart, btnStop, gbModelPaths })
                     if (c != null) c.Width = w;
-
-                // pnlCsvSource 내부
                 if (btnSelectFolder != null)
                 {
                     btnSelectFolder.Width = w - 38;
                     if (btnQuickFolder != null) btnQuickFolder.Left = btnSelectFolder.Right + 2;
                     lblFolder.MaximumSize = new Size(w - 12, 0);
                 }
-
-                // pnlDbSource 내부 너비 조정
                 if (pnlDbSource != null)
                 {
                     int lw = 52, inner = w - 12;
@@ -1218,37 +1179,89 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     if (dtpDbFrom    != null) { dtpDbFrom.Width    = inner - lw - 28; btnDbFullRange.Left = inner - 24; }
                     if (dtpDbTo      != null)   dtpDbTo.Width      = inner - lw - 2;
                 }
-
                 LayoutLeftAuto();
             };
+            this.HandleCreated += (s, e) =>
+                BeginInvoke((Action)(() => { LayoutLeftAuto(); left.PerformLayout(); left.Refresh(); }));
+            this.Shown += (s, e) =>
+                BeginInvoke((Action)(() => { LayoutLeftAuto(); left.PerformLayout(); left.Refresh(); }));
             this.Resize += (s, e) => LayoutLeftAuto();
 
             LayoutLeftAuto();
+            ResumeLayout(false);
+        }
 
-            this.HandleCreated += (s, e) =>
+        /// <summary>서버 추론 전용 차트를 생성합니다 (임계값 1.0 점선 포함).</summary>
+        private Chart BuildLiveInferenceChart(bool isAccel)
+        {
+            var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White };
+            var ca = new ChartArea("a") { BackColor = Color.White };
+            ca.AxisX.LabelStyle.Format   = "HH:mm:ss";
+            ca.AxisX.IntervalAutoMode    = IntervalAutoMode.VariableCount;
+            ca.AxisX.MajorGrid.Enabled   = true;
+            ca.AxisX.MajorGrid.LineColor = Color.FromArgb(228, 228, 234);
+            ca.AxisY.MajorGrid.Enabled   = true;
+            ca.AxisY.MajorGrid.LineColor = Color.FromArgb(228, 228, 234);
+            ca.AxisY.LabelStyle.Format   = "0.00";
+            ca.AxisY.Minimum             = 0;
+            // 임계값 1.0 점선
+            ca.AxisY.StripLines.Add(new StripLine
             {
-                BeginInvoke((Action)(() =>
-                {
-                    LayoutLeftAuto();
-                    left.PerformLayout();
-                    left.Refresh();
-                }));
-            };
-
-            // 폼이 실제 표시된 뒤에도 한 번 더 안전하게
-            this.Shown += (s, e) =>
+                IntervalOffset  = 1.0,
+                StripWidth      = 0,
+                BorderColor     = Color.FromArgb(215, 50, 60),
+                BorderWidth     = 1,
+                BorderDashStyle = ChartDashStyle.Dash,
+                Text            = "임계값 1.0",
+                ForeColor       = Color.FromArgb(215, 50, 60),
+                Font            = new Font("Segoe UI", 7f)
+            });
+            chart.ChartAreas.Add(ca);
+            chart.Legends.Clear();
+            chart.Legends.Add(new Legend
             {
-                BeginInvoke((Action)(() =>
-                {
-                    LayoutLeftAuto();
-                    left.PerformLayout();
-                    left.Refresh();
-                }));
+                Docking   = Docking.Top,
+                Alignment = StringAlignment.Near,
+                Font      = new Font("Segoe UI", 7.5f)
+            });
+            // 스켈레톤 (X축 초기화용)
+            var now3 = DateTime.Now;
+            var sk = new Series("_sk_")
+            {
+                ChartType = SeriesChartType.FastLine, XValueType = ChartValueType.DateTime,
+                IsVisibleInLegend = false, Color = Color.Transparent
             };
+            sk.Points.AddXY(now3.AddMinutes(-5), 0);
+            sk.Points.AddXY(now3, 0);
+            chart.Series.Add(sk);
+            return chart;
+        }
 
-            // 사이즈 변화 때마다 재분배 (이미 있다면 유지)
-            this.Resize += (s, e) => LayoutLeftAuto();
-            leftWrap.Resize += (s, e) => LayoutLeftAuto();
+        /// <summary>차트를 제목 라벨과 함께 패널에 감쌉니다.</summary>
+        private Panel WrapChartInPanel(string title, Chart chart, Color titleColor)
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Fill, BackColor = Color.White,
+                Margin = new Padding(3), Padding = Padding.Empty
+            };
+            panel.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(Color.FromArgb(210, 210, 220)))
+                    e.Graphics.DrawRectangle(pen, 0, 0, panel.Width - 1, panel.Height - 1);
+            };
+            var lbl = new Label
+            {
+                Text      = title,
+                Font      = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                Dock      = DockStyle.Top, Height = 26,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding   = new Padding(8, 0, 0, 0),
+                ForeColor = titleColor, BackColor = Color.White
+            };
+            panel.Controls.Add(chart);
+            panel.Controls.Add(lbl);
+            return panel;
         }
         #endregion
 
@@ -4275,53 +4288,56 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         private void FlushLineChart()
         {
-            if (chartLine.IsDisposed) return;
-            if (scoreSeries.IsEmpty) return;
+            if (chartLine == null || chartLine.IsDisposed) return;
 
-            // --- 첫 Flush: 더미 제거 + 자동 스케일 복귀 ---
-            if (_lineFirstFlush)
+            // ─ 로컬 진단 스코어 (KNN / DL ONNX) ─────────────────────────────
+            if (!scoreSeries.IsEmpty)
             {
-                var dmy = chartLine.Series.FindByName(SkeletonSeriesName);
-                if (dmy != null) chartLine.Series.Remove(dmy);
-
-                var area = chartLine.ChartAreas["a"];
-                area.AxisX.Minimum = double.NaN;
-                area.AxisX.Maximum = double.NaN;
-                area.AxisY.Minimum = double.NaN;
-                area.AxisY.Maximum = double.NaN;
-
-                _lineFirstFlush = false;
+                if (_lineFirstFlush)
+                {
+                    var dmy = chartLine.Series.FindByName(SkeletonSeriesName);
+                    if (dmy != null) chartLine.Series.Remove(dmy);
+                    var area = chartLine.ChartAreas["a"];
+                    area.AxisX.Minimum = area.AxisX.Maximum = double.NaN;
+                    area.AxisY.Minimum = area.AxisY.Maximum = double.NaN;
+                    _lineFirstFlush = false;
+                }
+                Tuple<int, DateTime, double> item;
+                while (scoreSeries.TryDequeue(out item))
+                {
+                    var s = EnsureAxisSeries(item.Item1);
+                    s.Points.AddXY(item.Item2.ToOADate(), item.Item3);
+                }
+                foreach (Series s in chartLine.Series)
+                {
+                    if (s.Name == SkeletonSeriesName) continue;
+                    while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
+                }
+                chartLine.ChartAreas["a"].RecalculateAxesScale();
             }
 
-            // --- 큐 비우면서 축별로 포인트 추가 ---
-            Tuple<int, DateTime, double> item;
-            while (scoreSeries.TryDequeue(out item))
-            {
-                int ax = item.Item1;
-                DateTime t = item.Item2;
-                double y = item.Item3;
+            // ─ 서버 추론 스코어 → _chartAccel / _chartTorque ─────────────────
+            if (_chartAccel == null || _chartTorque == null) return;
+            if (_liveScoreQueue.IsEmpty) return;
 
-                var s = EnsureAxisSeries(ax);
-                s.Points.AddXY(t.ToOADate(), y);
-            }
-
-            // --- 서버 실시간 추론 점수 추가 ---
             Tuple<string, DateTime, double> liveItem;
             while (_liveScoreQueue.TryDequeue(out liveItem))
             {
-                var ls = EnsureLiveSeries(liveItem.Item1);
+                bool isAccel = liveItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
+                Chart target = isAccel ? _chartAccel : _chartTorque;
+                var ls = EnsureLiveSeries(target, liveItem.Item1, isAccel);
                 ls.Points.AddXY(liveItem.Item2.ToOADate(), liveItem.Item3);
             }
-
-            // --- 오래된 포인트 정리(시리즈별) ---
-            foreach (Series s in chartLine.Series)
+            foreach (Chart ch in new[] { _chartAccel, _chartTorque })
             {
-                if (s.Name == SkeletonSeriesName) continue;
-                var pts = s.Points;
-                while (pts.Count > ChartKeepPoints) pts.RemoveAt(0);
+                if (ch == null || ch.IsDisposed || ch.ChartAreas.Count == 0) continue;
+                foreach (Series s in ch.Series)
+                {
+                    if (s.Name == "_sk_") continue;
+                    while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
+                }
+                ch.ChartAreas[0].RecalculateAxesScale();
             }
-
-            chartLine.ChartAreas["a"].RecalculateAxesScale();
         }
 
         private Series EnsureAxisSeries(int axis)
@@ -4341,66 +4357,82 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             return s;
         }
 
-        /// <summary>서버 실시간 추론 전용 차트 시리즈를 반환 (없으면 생성).</summary>
+        /// <summary>서버 추론 전용 시리즈를 chart 에서 찾거나 생성합니다.</summary>
+        /// <param name="chart">대상 차트 (_chartAccel 또는 _chartTorque)</param>
         /// <param name="key">예: "accel_ax0", "torque_ax2"</param>
-        private Series EnsureLiveSeries(string key)
+        /// <param name="isAccel">가속도 여부 (색상 팔레트 선택)</param>
+        private Series EnsureLiveSeries(Chart chart, string key, bool isAccel)
         {
-            string seriesName = "서버-" + key;
-            var s = chartLine.Series.FindByName(seriesName);
+            string seriesName = "srv-" + key;
+            var s = chart.Series.FindByName(seriesName);
             if (s != null) return s;
 
-            bool isAccel = key.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
             int axIdx = 0;
             int ux = key.LastIndexOf("_ax", StringComparison.OrdinalIgnoreCase);
             if (ux >= 0) int.TryParse(key.Substring(ux + 3), out axIdx);
 
-            // 축 인덱스별 색상 팔레트
-            Color[] accelColors  = { Color.DodgerBlue,  Color.DeepSkyBlue,   Color.SteelBlue,  Color.CornflowerBlue };
-            Color[] torqueColors = { Color.OrangeRed,   Color.Tomato,        Color.DarkOrange, Color.Coral };
+            Color[] accelColors  = { Color.FromArgb(0, 112, 204),  Color.FromArgb(0, 170, 230),  Color.FromArgb(70, 130, 210), Color.FromArgb(100, 160, 240) };
+            Color[] torqueColors = { Color.FromArgb(210, 55, 20),  Color.FromArgb(240, 100, 40), Color.FromArgb(255, 150, 0),  Color.FromArgb(200, 75, 55)  };
             Color c = isAccel ? accelColors[axIdx % accelColors.Length]
                                : torqueColors[axIdx % torqueColors.Length];
 
-            string legend = isAccel ? $"가속도-Ax{axIdx}" : $"토크-Ax{axIdx}";
-
             s = new Series(seriesName)
             {
-                ChartType       = SeriesChartType.FastLine,
-                XValueType      = ChartValueType.DateTime,
-                BorderWidth     = 2,
-                LegendText      = legend,
-                Color           = c,
-                BorderDashStyle = ChartDashStyle.Dot,
+                ChartType   = SeriesChartType.FastLine,
+                XValueType  = ChartValueType.DateTime,
+                BorderWidth = 2,
+                LegendText  = isAccel ? $"Ax{axIdx} 가속" : $"Ax{axIdx} 토크",
+                Color       = c
             };
-            chartLine.Series.Add(s);
+            // 스켈레톤 제거 (첫 실제 시리즈 추가 시)
+            var sk = chart.Series.FindByName("_sk_");
+            if (sk != null) chart.Series.Remove(sk);
+            chart.Series.Add(s);
             return s;
         }
 
         /// <summary>
-        /// 센서+축 조합 행이 _tlLive 에 없으면 동적으로 추가합니다.
+        /// 센서+축 조합 칩이 _statusFlow 에 없으면 동적으로 추가합니다.
         /// UI 스레드에서만 호출해야 합니다.
         /// </summary>
-        private void EnsureLiveRow(string key, string displayName)
+        private void EnsureLiveChip(string key, string displayName)
         {
-            if (_liveStatusLabels.ContainsKey(key)) return;
+            if (_statusChips.ContainsKey(key) || _statusFlow == null) return;
 
-            int row = _tlLive.RowCount;
-            _tlLive.RowCount = row + 1;
-            _tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+            var chip = new Panel
+            {
+                Width = 122, Height = 36,
+                Margin = new Padding(0, 2, 8, 2),
+                BackColor = Color.FromArgb(243, 244, 246),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            var lblName = new Label
+            {
+                Text = displayName,
+                Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+                Left = 5, Top = 3, Width = 112, Height = 15,
+                ForeColor = Color.FromArgb(55, 55, 65)
+            };
+            var lblState = new Label
+            {
+                Text = "—",
+                Font = new Font("Segoe UI", 8f),
+                Left = 5, Top = 19, Width = 66, Height = 15,
+                ForeColor = Color.Gray
+            };
+            var lblScore = new Label
+            {
+                Text = "",
+                Font = new Font("Segoe UI", 7.5f),
+                Left = 70, Top = 21, Width = 48, Height = 13,
+                ForeColor = Color.FromArgb(80, 80, 90),
+                TextAlign = ContentAlignment.MiddleRight
+            };
+            chip.Controls.AddRange(new Control[] { lblName, lblState, lblScore });
+            _statusFlow.Controls.Add(chip);
 
-            var lblTag    = new Label { Text = displayName, Dock = DockStyle.Fill,
-                                        TextAlign = ContentAlignment.MiddleLeft,
-                                        Font = new Font(Font, FontStyle.Bold) };
-            var lblStatus = new Label { Text = "—", Dock = DockStyle.Fill,
-                                        TextAlign = ContentAlignment.MiddleCenter,
-                                        ForeColor = Color.Gray };
-            var lblScore  = new Label { Text = "",  Dock = DockStyle.Fill,
-                                        TextAlign = ContentAlignment.MiddleLeft };
-
-            _tlLive.Controls.Add(lblTag,    0, row);
-            _tlLive.Controls.Add(lblStatus, 1, row);
-            _tlLive.Controls.Add(lblScore,  2, row);
-
-            _liveStatusLabels[key] = lblStatus;
+            _statusChips[key]      = chip;
+            _liveStatusLabels[key] = lblState;
             _liveScoreLabels[key]  = lblScore;
         }
 
@@ -4429,46 +4461,51 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
-                // 해당 축+센서 행이 없으면 동적 추가
-                string axLabel      = result.Axis.HasValue ? $" Ax{result.Axis.Value}" : "";
-                string displayName  = (isAccel ? "가속도" : "토크") + axLabel;
-                EnsureLiveRow(key, displayName);
+                string axLabel     = result.Axis.HasValue ? $" Ax{result.Axis.Value}" : "";
+                string displayName = (isAccel ? "가속도" : "토크") + axLabel;
+
+                // 칩이 없으면 상태 바에 동적 추가
+                EnsureLiveChip(key, displayName);
 
                 _liveStatusLabels.TryGetValue(key, out Label lblStatus);
                 _liveScoreLabels.TryGetValue(key, out Label lblScore);
-                if (lblStatus == null || lblScore == null) return;
+                _statusChips.TryGetValue(key, out Panel chip);
+                if (lblStatus == null) return;
 
-                string stateText = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
-                Color  stateClr  = result.IsAnomaly ? Color.Red : Color.Green;
+                bool anomaly    = result.IsAnomaly;
+                string stateText = anomaly ? "⚠ 이상" : "✓ 정상";
+                Color  stateClr  = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
 
                 lblStatus.Text      = stateText;
                 lblStatus.ForeColor = stateClr;
-                lblStatus.Font      = new Font(Font, FontStyle.Bold);
+                if (lblScore != null) lblScore.Text = $"{result.AnomalyScore:F3}";
+
+                // 칩 배경 색상 (이상=연빨강, 정상=연초록, 처음=연회색)
+                if (chip != null)
+                    chip.BackColor = anomaly
+                        ? Color.FromArgb(254, 226, 226)
+                        : Color.FromArgb(220, 252, 231);
 
                 string cls = !string.IsNullOrEmpty(result.ClassName) &&
                              !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
                              !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase)
-                             ? $" {result.ClassName}" : "";
-                lblScore.Text = $"{result.AnomalyScore:F3}{cls}";
+                             ? $" ({result.ClassName})" : "";
 
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
-                if (result.IsAnomaly)
+                if (anomaly)
                 {
                     cntDanger++;
                     cardDanger.ValueText = cntDanger + " 건";
-
                     AppendEventLog(
                         $"[{DateTime.Now:HH:mm:ss}] ⚠ {displayName} 이상  " +
-                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}" +
-                        (string.IsNullOrEmpty(result.ClassName) ? "" : $"  class={result.ClassName}"));
-
+                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}");
                     rows.Add(new EventRow
                     {
                         TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
                         Axis         = result.Axis ?? (isAccel ? -1 : -2),
                         AnomalyScore = Math.Round(result.AnomalyScore, 4),
                         Threshold    = Math.Round(result.Threshold, 4),
-                        Alarm        = displayName + " 이상"
+                        Alarm        = displayName + " 이상" + cls
                     });
                     if (rows.Count > 500) rows.RemoveAt(0);
                 }
