@@ -595,37 +595,44 @@ namespace PHM_Project_DockPanel
         // ────────────────────────────────────────────────────────────────────
         private IDockContent DeserializeDockContent(string persistString)
         {
-            if (persistString == typeof(AxisInfoForm).ToString())
-                return _axisInfo ?? (_axisInfo = new AxisInfoForm(_motion, _axisConfigs));
-
-            if (persistString == typeof(TeachingForm).ToString())
-                return _teaching ?? (_teaching = new TeachingForm(_motion));
-
-            if (persistString == typeof(SimulatorForm).ToString())
-                return _simulator ?? (_simulator = new SimulatorForm());
-
-            if (persistString == typeof(LogWriterForm).ToString())
-                return _logWriter ?? (_logWriter = new LogWriterForm());
-
-            if (persistString == typeof(LogGraphForm).ToString())
-                return _logGraph ?? (_logGraph = new LogGraphForm());
-
-            if (persistString == typeof(PassiveMonitorForm).ToString())
+            try
             {
-                var pmf = new PassiveMonitorForm();
-                if (_influxPublisher != null)
-                    pmf.BlockPublished += _influxPublisher.Feed;
-                return pmf;
+                if (persistString == typeof(AxisInfoForm).ToString())
+                    return _axisInfo ?? (_axisInfo = new AxisInfoForm(_motion, _axisConfigs));
+
+                if (persistString == typeof(TeachingForm).ToString())
+                    return _teaching ?? (_teaching = new TeachingForm(_motion));
+
+                if (persistString == typeof(SimulatorForm).ToString())
+                    return _simulator ?? (_simulator = new SimulatorForm());
+
+                if (persistString == typeof(LogWriterForm).ToString())
+                    return _logWriter ?? (_logWriter = new LogWriterForm());
+
+                if (persistString == typeof(LogGraphForm).ToString())
+                    return _logGraph ?? (_logGraph = new LogGraphForm());
+
+                if (persistString == typeof(PassiveMonitorForm).ToString())
+                {
+                    var pmf = new PassiveMonitorForm();
+                    if (_influxPublisher != null)
+                        pmf.BlockPublished += _influxPublisher.Feed;
+                    return pmf;
+                }
+
+                // 데이터 분석 폼 — 상태 없으므로 매번 새로 생성
+                if (persistString == typeof(PHMPipelineWizard).ToString()) return new PHMPipelineWizard();
+                if (persistString == typeof(SignalExplorerForm).ToString() ||
+                    persistString == "PHM_Project_DockPanel.UI.DataAnalysis.PreprocessingForm") return new SignalExplorerForm();
+                if (persistString == typeof(AnomalyDetectionForm).ToString()) return new AnomalyDetectionForm();
+                if (persistString == typeof(AIForm).ToString()) return new AIForm();
+                if (persistString == typeof(DashboardForm).ToString()) return new DashboardForm();
             }
-
-            // 데이터 분석 폼 — 상태 없으므로 매번 새로 생성
-            if (persistString == typeof(PHMPipelineWizard).ToString()) return new PHMPipelineWizard();
-            if (persistString == typeof(SignalExplorerForm).ToString() ||
-                persistString == "PHM_Project_DockPanel.UI.DataAnalysis.PreprocessingForm") return new SignalExplorerForm();
-            if (persistString == typeof(AnomalyDetectionForm).ToString()) return new AnomalyDetectionForm();
-            if (persistString == typeof(AIForm).ToString()) return new AIForm();
-            if (persistString == typeof(DashboardForm).ToString()) return new DashboardForm();
-
+            catch (Exception ex)
+            {
+                // 개별 폼 복원 실패 시 해당 폼만 건너뜁니다 (나머지 레이아웃 유지)
+                AppEvents.RaiseLog($"[레이아웃 복원] '{persistString}' 생성 실패, 건너뜀: {ex.Message}");
+            }
             return null;
         }
 
