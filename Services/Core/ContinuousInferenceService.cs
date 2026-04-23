@@ -36,7 +36,7 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly int[]               _axes;              // 모니터링 대상 축
 
         // 추론 주기 (ms)
-        private const int IntervalMs     = 500;   // 동작 중 추론 간격
+        private const int IntervalMs     = 250;   // 동작 중 추론 간격 (외력 응답성 향상)
         private const int IdleIntervalMs = 1000;  // 정지 중 외력 감지 간격
         private const int IdleWindowSize = 256;   // 정지 중 사용 윈도우 크기 (빠른 응답성)
 

@@ -405,6 +405,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
             = new ConcurrentQueue<Tuple<string, DateTime, double>>();
 
+        // ── 외력 감지: EMA 베이스라인 대비 급증(spike) 감지 ─────────────────────
+        // key → (EMA 베이스라인, 누적 샘플 수)
+        // 샘플이 충분히 쌓인 후(>= SpikeWarmup) 현재 스코어가 EMA의 SpikeFactor배 이상이면 anomaly
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double ema, int count)>
+            _scoreBaseline = new System.Collections.Concurrent.ConcurrentDictionary<string, (double, int)>();
+        private const double SpikeEmaAlpha  = 0.1;  // EMA 감쇠율 (느릴수록 베이스라인 안정적)
+        private const double SpikeFactor    = 2.0;  // EMA 대비 이 배수 이상이면 spike 판정
+        private const int    SpikeWarmup    = 10;   // 워밍업 후 spike 판정 시작
+
         // DB 모드 UI 컨트롤
         private RadioButton rbtnCsvMode, rbtnDbMode;
         private Panel pnlCsvSource, pnlDbSource;
@@ -4622,9 +4631,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 // 클라이언트 임계값 기준 이상 판정 (per-axis threshold 반영)
                 double clientThr = _axisThresholds.TryGetValue(key, out double ct) ? ct : 1.0;
-                bool anomaly     = (double)result.AnomalyScore >= clientThr;
-                string stateText = anomaly ? "⚠ 이상" : "✓ 정상";
-                Color  stateClr  = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
+                double rawScore  = (double)result.AnomalyScore;
+                bool   threshAnomaly = rawScore >= clientThr;
+
+                // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상) ─────────────
+                var baseline = _scoreBaseline.GetOrAdd(key, (rawScore, 0));
+                double ema   = baseline.ema;
+                int    cnt   = baseline.count;
+                bool   spikeAnomaly = cnt >= SpikeWarmup && rawScore > ema * SpikeFactor;
+                // EMA 업데이트: spike 구간은 베이스라인을 오염시키지 않도록 정상일 때만 반영
+                double newEma = spikeAnomaly ? ema : ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
+                _scoreBaseline[key] = (newEma, cnt + 1);
+
+                bool   anomaly    = threshAnomaly || spikeAnomaly;
+                string spikeTag   = (spikeAnomaly && !threshAnomaly) ? " ↑급증" : "";
+                string stateText  = anomaly ? "⚠ 이상" : "✓ 정상";
+                Color  stateClr   = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
 
                 lblStatus.Text      = stateText;
                 lblStatus.ForeColor = stateClr;
@@ -4649,16 +4671,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 {
                     cntDanger++;
                     cardDanger.ValueText = cntDanger + " 건";
+                    string spikeInfo = spikeAnomaly && !threshAnomaly
+                        ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
                     AppendEventLog(
-                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {displayName} 이상  " +
-                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}");
+                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {displayName} 이상{spikeTag}  " +
+                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}{spikeInfo}");
                     rows.Add(new EventRow
                     {
                         TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
                         Axis         = result.Axis ?? (isAccel ? -1 : -2),
                         AnomalyScore = Math.Round(result.AnomalyScore, 4),
                         Threshold    = Math.Round(result.Threshold, 4),
-                        Alarm        = displayName + " 이상" + cls
+                        Alarm        = displayName + " 이상" + spikeTag + cls
                     });
                     if (rows.Count > 500) rows.RemoveAt(0);
                 }
