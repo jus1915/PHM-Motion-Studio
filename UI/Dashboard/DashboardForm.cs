@@ -392,13 +392,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2")
         private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
         private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
-        private double _accelChartThreshold  = 1.0; // 가속도 차트 임계값 (서버 결과로 업데이트)
-        private double _torqueChartThreshold = 1.0; // 토크 차트 임계값 (서버 결과로 업데이트)
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
         private readonly Dictionary<string, Panel>  _statusChips      = new Dictionary<string, Panel>();
         private readonly Dictionary<string, Label>  _liveStatusLabels = new Dictionary<string, Label>();
         private readonly Dictionary<string, Label>  _liveScoreLabels  = new Dictionary<string, Label>();
-        private readonly Dictionary<string, double> _liveThresholds   = new Dictionary<string, double>();
+        private readonly ToolTip                    _chipToolTip      = new ToolTip();
+        // 축별 임계값: key → threshold (서버값으로 자동 초기화, UI에서 재설정 가능)
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
+            _axisThresholds = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        private static readonly string ThresholdsFile =
+            Path.Combine(DefaultLogsPath, "axis_thresholds.txt");
         private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
             = new ConcurrentQueue<Tuple<string, DateTime, double>>();
 
@@ -567,11 +570,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             this.Text = "실시간 대시보드";
             this.MinimumSize = new Size(1000, 600);
+            LoadAxisThresholds();
             BuildUI();
             _notifier = new NotifyIcon
             {
                 Visible = true,
-                Icon = SystemIcons.Warning, // 필요시 커스텀 아이콘 가능
+                Icon = SystemIcons.Warning,
                 Text = "PHM 알림"
             };
 
@@ -582,6 +586,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             AppEvents.InferenceResultReceived -= OnLiveInferenceResult;
+            SaveAxisThresholds();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
             base.OnFormClosing(e);
@@ -4454,12 +4459,123 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 ForeColor = Color.FromArgb(80, 80, 90),
                 TextAlign = ContentAlignment.MiddleRight
             };
+            // 우클릭 컨텍스트 메뉴: 임계값 설정
+            var cms = new ContextMenuStrip();
+            var miSet = new ToolStripMenuItem("임계값 설정...");
+            string capturedKey = key;
+            miSet.Click += (s, e) => ShowThresholdDialog(capturedKey);
+            cms.Items.Add(miSet);
+            chip.ContextMenuStrip = cms;
+            foreach (Control c in new Control[] { lblName, lblState, lblScore })
+                c.ContextMenuStrip = cms;
+
             chip.Controls.AddRange(new Control[] { lblName, lblState, lblScore });
             _statusFlow.Controls.Add(chip);
 
             _statusChips[key]      = chip;
             _liveStatusLabels[key] = lblState;
             _liveScoreLabels[key]  = lblScore;
+        }
+
+        /// <summary>
+        /// 축별 임계값을 설정하는 다이얼로그를 표시합니다.
+        /// </summary>
+        private void ShowThresholdDialog(string key)
+        {
+            double current = _axisThresholds.TryGetValue(key, out double v) ? v : 1.0;
+
+            using (var dlg = new Form
+            {
+                Text            = $"임계값 설정 — {key}",
+                Size            = new Size(300, 145),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition   = FormStartPosition.CenterParent,
+                MaximizeBox     = false, MinimizeBox = false
+            })
+            {
+                var lbl = new Label
+                {
+                    Text     = $"[{key}] 이상 판정 임계값:",
+                    Left = 12, Top = 14, Width = 270, Height = 18,
+                    Font = new Font("Segoe UI", 9f)
+                };
+                var nud = new NumericUpDown
+                {
+                    Left = 12, Top = 36, Width = 120, Height = 26,
+                    Minimum = 0.001M, Maximum = 9999M,
+                    DecimalPlaces = 3, Increment = 0.1M,
+                    Value = (decimal)Math.Max(0.001, Math.Min(9999, current)),
+                    Font = new Font("Segoe UI", 10f)
+                };
+                var lblNote = new Label
+                {
+                    Text      = "차트에는 score ÷ threshold 정규화 값이 표시됩니다.",
+                    Left = 12, Top = 68, Width = 270, Height = 16,
+                    Font = new Font("Segoe UI", 7.5f), ForeColor = Color.Gray
+                };
+                var btnOk = new Button
+                {
+                    Text = "확인", Left = 140, Top = 88, Width = 70, Height = 26,
+                    DialogResult = DialogResult.OK
+                };
+                var btnCancel = new Button
+                {
+                    Text = "취소", Left = 218, Top = 88, Width = 60, Height = 26,
+                    DialogResult = DialogResult.Cancel
+                };
+                dlg.AcceptButton = btnOk;
+                dlg.CancelButton = btnCancel;
+                dlg.Controls.AddRange(new Control[] { lbl, nud, lblNote, btnOk, btnCancel });
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    _axisThresholds[key] = (double)nud.Value;
+                    SaveAxisThresholds();
+                    // 툴팁 즉시 갱신
+                    if (_statusChips.TryGetValue(key, out Panel chip))
+                        _chipToolTip.SetToolTip(chip, $"임계값: {nud.Value:F3}  (우클릭 → 변경)");
+                    AppEvents.RaiseLog($"[임계값] {key} = {nud.Value:F3} 설정됨");
+                }
+            }
+        }
+
+        /// <summary>
+        /// 축별 임계값을 파일에서 읽어옵니다 (앱 시작 시 호출).
+        /// 파일 형식: key=value (한 줄에 하나)
+        /// </summary>
+        private void LoadAxisThresholds()
+        {
+            try
+            {
+                if (!File.Exists(ThresholdsFile)) return;
+                foreach (string line in File.ReadAllLines(ThresholdsFile))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = line.Substring(0, eq).Trim();
+                    if (double.TryParse(line.Substring(eq + 1).Trim(),
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out double val) && val > 0)
+                        _axisThresholds[k] = val;
+                }
+            }
+            catch { /* 무시 — 파일 없으면 서버 전달값으로 자동 초기화 */ }
+        }
+
+        /// <summary>
+        /// 현재 축별 임계값을 파일에 저장합니다 (폼 닫힐 때 + 설정 변경 시 호출).
+        /// </summary>
+        private void SaveAxisThresholds()
+        {
+            try
+            {
+                Directory.CreateDirectory(DefaultLogsPath);
+                var lines = _axisThresholds
+                    .OrderBy(kv => kv.Key)
+                    .Select(kv => $"{kv.Key}={kv.Value.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}");
+                File.WriteAllLines(ThresholdsFile, lines);
+            }
+            catch { }
         }
 
         /// <summary>
@@ -4475,8 +4591,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                          ? $"{sensorType}_ax{result.Axis.Value}"
                          : sensorType;
 
-            // 차트에 넣을 점수를 큐에 추가 (스레드 안전)
-            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, (double)result.AnomalyScore));
+            // 축별 임계값 초기화: 파일에 저장된 값 없으면 서버 전달값으로 초기화
+            if (result.Threshold > 0)
+                _axisThresholds.TryAdd(key, result.Threshold);
+
+            // 정규화 스코어를 차트 큐에 추가 (score / threshold → 임계선 항상 1.0)
+            double axThr      = _axisThresholds.TryGetValue(key, out double t) ? t : 1.0;
+            double normScore  = axThr > 0 ? (double)result.AnomalyScore / axThr : (double)result.AnomalyScore;
+            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, normScore));
             while (_liveScoreQueue.Count > 1200)
             {
                 Tuple<string, DateTime, double> _discard;
@@ -4498,34 +4620,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _statusChips.TryGetValue(key, out Panel chip);
                 if (lblStatus == null) return;
 
-                // 서버에서 전달된 threshold 추적 (차트 임계선 동적 업데이트용)
-                if (result.Threshold > 0)
-                {
-                    _liveThresholds[key] = result.Threshold;
-                    // 해당 센서 타입의 차트 임계값: 등록된 키 중 최솟값 사용
-                    double newThr = double.MaxValue;
-                    foreach (var kv in _liveThresholds)
-                        if (kv.Key.StartsWith(isAccel ? "accel" : "torque", StringComparison.OrdinalIgnoreCase))
-                            if (kv.Value < newThr) newThr = kv.Value;
-                    if (newThr < double.MaxValue)
-                    {
-                        if (isAccel)  _accelChartThreshold  = newThr;
-                        else          _torqueChartThreshold = newThr;
-                        // 차트 임계선 즉시 반영
-                        Chart tgtChart = isAccel ? _chartAccel : _chartTorque;
-                        if (tgtChart?.ChartAreas.Count > 0 &&
-                            tgtChart.ChartAreas[0].AxisY.StripLines.Count > 0)
-                            tgtChart.ChartAreas[0].AxisY.StripLines[0].IntervalOffset = newThr;
-                    }
-                }
-
-                bool anomaly    = result.IsAnomaly;
+                // 클라이언트 임계값 기준 이상 판정 (per-axis threshold 반영)
+                double clientThr = _axisThresholds.TryGetValue(key, out double ct) ? ct : 1.0;
+                bool anomaly     = (double)result.AnomalyScore >= clientThr;
                 string stateText = anomaly ? "⚠ 이상" : "✓ 정상";
                 Color  stateClr  = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
 
                 lblStatus.Text      = stateText;
                 lblStatus.ForeColor = stateClr;
                 if (lblScore != null) lblScore.Text = $"{result.AnomalyScore:F3}";
+
+                // 칩 툴팁: 현재 임계값 표시
+                _chipToolTip.SetToolTip(chip, $"임계값: {clientThr:F3}  (우클릭 → 변경)");
 
                 // 칩 배경 색상 (이상=연빨강, 정상=연초록, 처음=연회색)
                 if (chip != null)
