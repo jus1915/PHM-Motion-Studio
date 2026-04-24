@@ -63,12 +63,18 @@ _FALLBACK_CANDIDATES = {
     "torque": ["ae_torque.onnx", "cnn1d_torque.onnx"],
 }
 
+# CLS(결함진단) 전용 후보 파일 — 신규 cls_ 접두사 우선, cnn1d_ 레거시 폴백
+_CLS_CANDIDATES = {
+    "accel":  ["cls_fd.onnx",     "cnn1d_fd.onnx"],
+    "torque": ["cls_torque.onnx", "cnn1d_torque.onnx"],
+}
+
 # 최대 지원 축 수 (health 엔드포인트에서 스캔용)
 _MAX_AXIS_SCAN = 8
 
 
 def _per_axis_candidates(sensor_type: str, axis: int) -> List[str]:
-    """per-axis 모델 후보 파일명 목록 (우선순위 높은 순)."""
+    """AE per-axis 모델 후보 파일명 목록 (우선순위 높은 순)."""
     if sensor_type == "accel":
         return [
             f"ae_fd_ax{axis}.onnx",
@@ -82,8 +88,27 @@ def _per_axis_candidates(sensor_type: str, axis: int) -> List[str]:
     return []
 
 
+def _per_axis_cls_candidates(sensor_type: str, axis: int) -> List[str]:
+    """CLS per-axis 모델 후보 파일명 목록 (신규 cls_ 접두사 우선)."""
+    if sensor_type == "accel":
+        return [
+            f"cls_fd_ax{axis}.onnx",
+            f"cnn1d_fd_ax{axis}.onnx",
+        ]
+    if sensor_type == "torque":
+        return [
+            f"cls_torque_ax{axis}.onnx",
+            f"cnn1d_torque_ax{axis}.onnx",
+        ]
+    return []
+
+
 def _cache_key(sensor_type: str, axis: Optional[int]) -> str:
     return f"{sensor_type}_ax{axis}" if axis is not None else sensor_type
+
+
+def _cls_cache_key(sensor_type: str, axis: Optional[int]) -> str:
+    return f"cls_{sensor_type}_ax{axis}" if axis is not None else f"cls_{sensor_type}"
 
 
 def _load_model(sensor_type: str, axis: Optional[int] = None):
@@ -133,6 +158,50 @@ def _load_model(sensor_type: str, axis: Optional[int] = None):
     return None, None
 
 
+def _load_cls_model(sensor_type: str, axis: Optional[int] = None):
+    """CLS 결함진단 모델 로드 (AE 캐시와 독립 관리).
+
+    axis 지정 시: per-axis CLS 후보 → 전역 CLS 폴백 순으로 탐색.
+    AE 모델(kind에 "AE" 포함)이 발견되면 건너뜀 — AE 모델이 CLS 슬롯에 로드되는 것 방지.
+    """
+    key = _cls_cache_key(sensor_type, axis)
+    if key in _sessions:
+        return _sessions[key]
+
+    if axis is not None:
+        candidates = _per_axis_cls_candidates(sensor_type, axis) + \
+                     _CLS_CANDIDATES.get(sensor_type, [])
+    else:
+        candidates = list(_CLS_CANDIDATES.get(sensor_type, []))
+        for _ax in range(_MAX_AXIS_SCAN):
+            for _fname in _per_axis_cls_candidates(sensor_type, _ax):
+                if (MODELS_ROOT / _fname).exists():
+                    candidates.append(_fname)
+                    break
+
+    for fname in candidates:
+        model_path = MODELS_ROOT / fname
+        if not model_path.exists():
+            continue
+        meta_path = MODELS_ROOT / (fname.replace(".onnx", "_meta.json"))
+        try:
+            sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+            meta: dict = {}
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            # AE 모델이 CLS 슬롯에 로드되지 않도록 확인
+            model_kind = meta.get("kind", "CNN1D")
+            if "AE" in model_kind.upper():
+                continue
+            _sessions[key] = (sess, meta)
+            print(f"[inference] CLS모델 로드: {fname}  key={key}  kind={model_kind}", flush=True)
+            return sess, meta
+        except Exception as e:
+            print(f"[inference] CLS모델 로드 실패 {fname}: {e}", flush=True)
+
+    return None, None
+
+
 # ── Pydantic 모델 ─────────────────────────────────────────────────────────────
 class PredictRequest(BaseModel):
     sensor_type: str = "accel"     # "accel" | "torque"
@@ -140,6 +209,34 @@ class PredictRequest(BaseModel):
     window: List[float]            # flat float32 배열, 길이 = window_size × n_channels
     window_size: int = 1024
     n_channels: int = 3
+
+
+class CombinedPredictRequest(BaseModel):
+    """AE 이상탐지 + CLS 결함진단 동시 요청."""
+    sensor_type: str = "accel"
+    axis: Optional[int] = None
+    window: List[float]
+    window_size: int = 256
+    n_channels: int = 3
+
+
+class CombinedPredictResponse(BaseModel):
+    """AE 이상탐지 결과(필수) + CLS 결함진단 결과(선택)."""
+    sensor_type: str
+    axis: Optional[int] = None
+    # ── AE 이상탐지 ──────────────────────────────
+    ae_model_file: Optional[str] = None
+    is_anomaly: bool
+    anomaly_score: float           # 정규화 스코어 (>1.0 이상)
+    threshold: float = 1.0
+    raw_mae: Optional[float] = None
+    raw_threshold: Optional[float] = None
+    # ── CLS 결함진단 ─────────────────────────────
+    cls_available: bool = False    # True이면 CLS 모델이 있고 결과도 유효
+    cls_model_file: Optional[str] = None
+    cls_class_name: Optional[str] = None   # 예: "looseness", "normal"
+    cls_confidence: Optional[float] = None
+    cls_is_fault: Optional[bool] = None    # True이면 결함 클래스
 
 
 class PredictResponse(BaseModel):
@@ -179,27 +276,40 @@ def _loaded_model_file(sensor_type: str, axis: Optional[int]) -> Optional[str]:
 def health():
     loaded = {k: v[1].get("kind", "?") for k, v in _sessions.items()}
 
-    # 사용 가능한 모델 스캔
-    available: dict = {}
+    # 사용 가능한 AE 모델 스캔
+    available_ae: dict = {}
     for st, fallbacks in _FALLBACK_CANDIDATES.items():
         files = []
-        # per-axis 모델 스캔 (ae_fd_ax0.onnx ~ ae_fd_ax7.onnx)
         for ax in range(_MAX_AXIS_SCAN):
             for fname in _per_axis_candidates(st, ax):
                 if (MODELS_ROOT / fname).exists():
                     files.append(fname)
-                    break   # 해당 축의 최우선 모델만 1개 표시
-        # 폴백(레거시) 모델
+                    break
         for fname in fallbacks:
             if (MODELS_ROOT / fname).exists():
                 files.append(fname)
-        available[st] = files
+        available_ae[st] = files
+
+    # 사용 가능한 CLS 모델 스캔
+    available_cls: dict = {}
+    for st, fallbacks in _CLS_CANDIDATES.items():
+        files = []
+        for ax in range(_MAX_AXIS_SCAN):
+            for fname in _per_axis_cls_candidates(st, ax):
+                if (MODELS_ROOT / fname).exists():
+                    files.append(fname)
+                    break
+        for fname in fallbacks:
+            if (MODELS_ROOT / fname).exists():
+                files.append(fname)
+        available_cls[st] = files
 
     return {
-        "status":           "ok",
-        "loaded_models":    loaded,
-        "available_models": available,
-        "models_root":      str(MODELS_ROOT),
+        "status":               "ok",
+        "loaded_models":        loaded,
+        "available_ae_models":  available_ae,
+        "available_cls_models": available_cls,
+        "models_root":          str(MODELS_ROOT),
     }
 
 
@@ -297,43 +407,9 @@ def predict(req: PredictRequest):
 
         # ── AE-CNN1D: 재구성 오차로 이상 탐지 ────────────────────────────────
         if model_kind == "AE-CNN1D":
-            recon = sess.run(None, {input_name: norm_arr})[0]   # (1, T, C)
-            mae   = float(np.abs(norm_arr - recon).mean())
-            thr   = float(meta.get("threshold", 0.1))
-
-            rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
-            rms_thr  = float(meta.get("rms_thr",  float("inf")))
-            rms_mean = float(meta.get("rms_mean", 0.0))
-            # rms_std가 meta에 있으면 1-std 단위로 정규화, 없으면 기존 방식(thr-mean 기준)
-            rms_std_m = meta.get("rms_std")
-            if rms_thr < 1e30:
-                denom    = float(rms_std_m) if rms_std_m else max(rms_thr - rms_mean, 1e-8)
-                rms_norm = max(0.0, (rms - rms_mean) / denom)
-            else:
-                rms_norm = 0.0
-
-            # ── sensor별 설정 ─────────────────────────
-            # TH_SCALE : score = mae / (thr * TH_SCALE) + RMS_WEIGHT * rms_norm
-            #   낮을수록 민감 (정상 MAE 대비 적은 배율 증가만으로도 score≥1.0 도달)
-            # RMS_WEIGHT : 에너지(진폭) 기여도.
-            #   accel: 구조 느슨함·볼트 이완 → 진동 진폭 증가
-            #   torque: 유격·저크 충격 → 토크 에너지 급등. RMS_WEIGHT를 높게 설정
-            if req.sensor_type == "accel":
-                TH_SCALE          = 2.0   # 정상 MAE의 2배면 감지
-                RMS_WEIGHT        = 0.25  # 진폭 기여도
-                ANOMALY_THRESHOLD = 1.5
-            else:  # torque
-                TH_SCALE          = 1.3   # 1.8 → 1.3: 유격 충격의 MAE 증가분이 작아 민감도 강화
-                RMS_WEIGHT        = 0.35  # 0.15 → 0.35: 저크 충격 = 토크 에너지 급등 → RMS가 핵심 지표
-                ANOMALY_THRESHOLD = 1.3
-
-            # ── score 계산 ───────────────────────────
-            mae_norm = mae / max(thr * TH_SCALE, 1e-8)
-            score_normed = mae_norm + RMS_WEIGHT * rms_norm
-
-            # ── 판정 ────────────────────────────────
-            is_anomaly = score_normed >= ANOMALY_THRESHOLD
-
+            is_anomaly, score_normed, mae, thr = _ae_score(
+                norm_arr, raw_arr, sess, meta, req.sensor_type
+            )
             return PredictResponse(
                 model_type="AE-CNN1D",
                 sensor_type=req.sensor_type,
@@ -368,6 +444,159 @@ def predict(req: PredictRequest):
             threshold=0.5,
             class_name=pred_class,
             confidence=round(confidence, 6),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"추론 실패: {type(e).__name__}: {e}")
+
+
+# ── AE 스코어링 헬퍼 (predict / predict_combined 공용) ───────────────────────
+def _ae_score(
+    norm_arr: "np.ndarray",
+    raw_arr:  "np.ndarray",
+    sess,
+    meta: dict,
+    sensor_type: str,
+) -> tuple:
+    """AE 재구성 오차 기반 이상 점수를 계산합니다.
+
+    Returns:
+        (is_anomaly, score_normed, mae, thr)
+    """
+    input_name = sess.get_inputs()[0].name
+    recon  = sess.run(None, {input_name: norm_arr})[0]
+    mae    = float(np.abs(norm_arr - recon).mean())
+    thr    = float(meta.get("threshold", 0.1))
+
+    rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
+    rms_thr  = float(meta.get("rms_thr",  float("inf")))
+    rms_mean = float(meta.get("rms_mean", 0.0))
+    rms_std_m = meta.get("rms_std")
+    if rms_thr < 1e30:
+        denom    = float(rms_std_m) if rms_std_m else max(rms_thr - rms_mean, 1e-8)
+        rms_norm = max(0.0, (rms - rms_mean) / denom)
+    else:
+        rms_norm = 0.0
+
+    if sensor_type == "accel":
+        TH_SCALE = 2.0; RMS_WEIGHT = 0.25; ANOMALY_THRESHOLD = 1.5
+    else:
+        TH_SCALE = 1.3; RMS_WEIGHT = 0.35; ANOMALY_THRESHOLD = 1.3
+
+    mae_norm     = mae / max(thr * TH_SCALE, 1e-8)
+    score_normed = mae_norm + RMS_WEIGHT * rms_norm
+    is_anomaly   = score_normed >= ANOMALY_THRESHOLD
+    return is_anomaly, score_normed, mae, thr
+
+
+# ── /predict/combined ─────────────────────────────────────────────────────────
+@app.post("/predict/combined", response_model=CombinedPredictResponse)
+def predict_combined(req: CombinedPredictRequest):
+    """AE 이상탐지 + CLS 결함진단을 한 번에 수행합니다.
+
+    - AE 모델은 필수 (없으면 404).
+    - CLS 모델은 선택 — 없으면 cls_available=False, cls_* 필드 null.
+    - window 전처리(z-score, window_size 조정)는 AE/CLS 각각 독립 수행.
+    """
+    # ── AE 모델 로드 ─────────────────────────────────────────────
+    ae_sess, ae_meta = _load_model(req.sensor_type, req.axis)
+    if ae_sess is None:
+        avail: List[str] = []
+        if req.axis is not None:
+            for fn in _per_axis_candidates(req.sensor_type, req.axis):
+                if (MODELS_ROOT / fn).exists():
+                    avail.append(fn)
+        for fn in _FALLBACK_CANDIDATES.get(req.sensor_type, []):
+            if (MODELS_ROOT / fn).exists():
+                avail.append(fn)
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"AE 모델 없음 (sensor_type={req.sensor_type!r}, axis={req.axis}). "
+                f"사용 가능: {avail if avail else '없음 — Airflow 학습(AE)을 먼저 실행하세요.'}"
+            ),
+        )
+
+    expected = req.window_size * req.n_channels
+    if len(req.window) != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"window 길이 {len(req.window)} ≠ {req.window_size}×{req.n_channels}={expected}",
+        )
+
+    # ── AE window 전처리 ─────────────────────────────────────────
+    ae_window_size = int(ae_meta.get("window_size", req.window_size))
+    if ae_window_size != req.window_size:
+        need = ae_window_size * req.n_channels
+        if len(req.window) < need:
+            raise HTTPException(status_code=400,
+                detail=f"AE 모델 window_size={ae_window_size} 이지만 데이터({len(req.window)}샘플) 부족")
+        eff_win = list(req.window[-need:])
+        eff_ws  = ae_window_size
+    else:
+        eff_win = req.window
+        eff_ws  = req.window_size
+
+    try:
+        raw_arr  = np.array(eff_win, dtype=np.float32).reshape(1, eff_ws, req.n_channels)
+        norm_arr = _zscore(raw_arr)
+
+        # ── AE 추론 ──────────────────────────────────────────────
+        ae_model_kind = ae_meta.get("kind", "AE-CNN1D")
+        if "AE" not in ae_model_kind.upper():
+            # AE 슬롯에 CLS 모델이 로드된 경우 경고 후 진행
+            print(f"[inference] 경고: AE 슬롯에 CLS 모델({ae_model_kind}) 로드됨", flush=True)
+
+        is_anomaly, ae_score, mae, thr = _ae_score(norm_arr, raw_arr, ae_sess, ae_meta, req.sensor_type)
+        ae_model_file = ae_meta.get("source_file")
+
+        # ── CLS 모델 로드 & 추론 (선택) ─────────────────────────
+        cls_sess, cls_meta = _load_cls_model(req.sensor_type, req.axis)
+        cls_available   = cls_sess is not None
+        cls_class_name: Optional[str]  = None
+        cls_confidence: Optional[float] = None
+        cls_is_fault:   Optional[bool]  = None
+        cls_model_file: Optional[str]   = None
+
+        if cls_sess is not None:
+            cls_ws = int(cls_meta.get("window_size", eff_ws))
+            if cls_ws != eff_ws:
+                need2 = cls_ws * req.n_channels
+                if len(req.window) >= need2:
+                    cls_raw  = np.array(req.window[-need2:], dtype=np.float32).reshape(1, cls_ws, req.n_channels)
+                    cls_norm = _zscore(cls_raw)
+                else:
+                    cls_norm = norm_arr  # 길이 부족 시 AE 윈도우 재사용
+            else:
+                cls_norm = norm_arr
+
+            cls_input_name = cls_sess.get_inputs()[0].name
+            logits     = cls_sess.run(None, {cls_input_name: cls_norm})[0]
+            exp_l      = np.exp(logits - logits.max(axis=1, keepdims=True))
+            probs      = exp_l / exp_l.sum(axis=1, keepdims=True)
+            pred_idx   = int(np.argmax(probs[0]))
+            cls_confidence = float(probs[0][pred_idx])
+            cls_names  = cls_meta.get("class_names", ["normal", "fault"])
+            cls_class_name = cls_names[pred_idx] if pred_idx < len(cls_names) else str(pred_idx)
+            cls_is_fault   = cls_class_name.lower() != "normal"
+            cls_model_file = cls_meta.get("source_file")
+
+        return CombinedPredictResponse(
+            sensor_type    = req.sensor_type,
+            axis           = req.axis,
+            ae_model_file  = ae_model_file,
+            is_anomaly     = is_anomaly,
+            anomaly_score  = round(ae_score, 6),
+            threshold      = 1.0,
+            raw_mae        = round(mae, 6),
+            raw_threshold  = round(thr, 6),
+            cls_available  = cls_available,
+            cls_model_file = cls_model_file,
+            cls_class_name = cls_class_name,
+            cls_confidence = round(cls_confidence, 6) if cls_confidence is not None else None,
+            cls_is_fault   = cls_is_fault,
         )
 
     except HTTPException:

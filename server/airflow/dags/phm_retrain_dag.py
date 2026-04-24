@@ -57,20 +57,24 @@ _INFERENCE_URL   = os.getenv("PHM_INFERENCE_URL",   "http://phm-inference:8000")
 
 # C# 앱이 conf 를 전달하지 않을 때 사용하는 기본값
 _DEFAULT_CONF: dict = {
-    "data_dir":     _DATA_ROOT,
-    "channels":     ["x", "y", "z"],
-    "sensor_type":  "accel",
-    "label_column": "",
-    "class_names":  ["normal", "fault"],
-    "window_size":  1024,
-    "stride":       512,
-    "epochs":       30,
-    "batch_size":   32,
-    "lr":           0.001,
-    "val_split":    0.2,
-    "seed":         42,
-    # "AD" = AE 이상탐지(단일 클래스), "FD" = 분류(2개 이상 클래스 필요)
-    "session":      "AD",
+    "data_dir":       _DATA_ROOT,
+    "channels":       ["x", "y", "z"],
+    "sensor_type":    "accel",
+    "label_column":   "",
+    # AE 기본: 정상 데이터 폴더명. CLS 사용 시 conf 로 class_names 를 재정의하세요.
+    # 예: {"session": "FD", "class_names": ["normal", "looseness"]}
+    "class_names":    ["normal", "looseness"],
+    "normal_classes": ["normal"],       # AE 모드: 정상으로 취급할 클래스 (학습 대상)
+    "window_size":    256,              # 1024 → 256 (학습·추론 동일 윈도우)
+    "stride":         128,              # 512  → 128 (오버랩 50%)
+    "epochs":         30,
+    "batch_size":     32,
+    "lr":             0.001,
+    "val_split":      0.2,
+    "seed":           42,
+    # "AE" = AE 이상탐지(normal_classes 만 학습), "CLS" = 분류(class_names 전체)
+    # 구버전 호환: "AD"→"AE", "FD"→"CLS" (train_dl_model.py 내부에서 자동 변환)
+    "session":        "AE",
 }
 
 # Windows 드라이브 패턴 (예: C:\, D:\)
@@ -244,7 +248,7 @@ def run_training_accel(**context) -> None:
         params["channels"]         = ["x", "y", "z"]
         params["output"]           = str(Path(_MODELS_ROOT) / f"ae_fd_ax{ax}.onnx")
         params["filter_op_column"] = f"Op_Ax{ax}"
-        params.setdefault("session", "AD")    # AE 이상탐지 기본
+        params.setdefault("session", "AE")    # AE 이상탐지 기본
         _execute_training(params, f"{run_id}_ax{ax}")
 
     print(f"\n[PHM] 가속도 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
@@ -285,7 +289,7 @@ def run_training_torque(**context) -> None:
         params["channels"]         = [f"Ax{ax}_Trq(%)"]   # 해당 축 토크 단일 채널
         params["output"]           = str(Path(_MODELS_ROOT) / f"ae_torque_ax{ax}.onnx")
         params["filter_op_column"] = f"Op_Ax{ax}"
-        params.setdefault("session", "AD")
+        params.setdefault("session", "AE")
         _execute_training(params, f"{run_id}_torque_ax{ax}")
 
     print(f"\n[PHM] 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
