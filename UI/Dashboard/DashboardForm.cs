@@ -4698,7 +4698,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 lblStatus.Text      = stateText;
                 lblStatus.ForeColor = stateClr;
-                if (lblScore != null) lblScore.Text = $"{result.AnomalyScore:F3}";
+
+                // 점수 표시: RawMae+RawThreshold가 있으면 uncapped 정규화 점수 사용
+                // (서버가 anomaly_score를 1.0으로 cap하는 경우 raw 값으로 보정)
+                float displayScore = (result.RawMae.HasValue && result.RawThreshold.HasValue
+                                      && result.RawThreshold.Value > 0)
+                    ? result.RawMae.Value / result.RawThreshold.Value
+                    : result.AnomalyScore;
+                if (lblScore != null) lblScore.Text = $"{displayScore:F3}";
 
                 // 칩 툴팁: 현재 임계값 표시
                 _chipToolTip.SetToolTip(chip, $"임계값: {clientThr:F3}  (우클릭 → 변경)");
@@ -4713,10 +4720,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 if (result.Axis.HasValue)
                     UpdateClassMatrix(result.Axis.Value, isAccel, normScore);
 
-                string cls = !string.IsNullOrEmpty(result.ClassName) &&
-                             !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
-                             !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase)
-                             ? $" ({result.ClassName})" : "";
+                bool hasCls = !string.IsNullOrEmpty(result.ClassName) &&
+                              !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
+                              !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase);
+                string cls = hasCls ? $" ({result.ClassName})" : "";
+
+                // /predict fallback 경로: ClassName이 있으면 CLS 매트릭스도 갱신
+                // (/predict/combined 성공 시에는 OnLiveClsInferenceResult에서 처리되므로 중복 업데이트 방지)
+                if (hasCls && result.Axis.HasValue)
+                {
+                    object confVal = result.Confidence.HasValue
+                        ? (object)result.Confidence.Value
+                        : (object)"-";
+                    UpdateClassMatrixCls(result.Axis.Value, isAccel, result.ClassName, confVal);
+                }
 
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
                 if (anomaly)
