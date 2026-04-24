@@ -1062,8 +1062,8 @@ def save_meta(
     sensor_type = params.get("sensor_type", "accel")
 
     meta = {
-        "kind":        "AE-CNN1D" if is_ae else "CNN1D",
-        "session":     session,
+        "kind":        "AE-CNN1D" if is_ae else "CNN1D-CLS",
+        "session":     session,   # "AE" | "CLS"
         "sensor_type": sensor_type,
         "y_column":    channels[0] if channels else "",
         "channels":    channels,
@@ -1240,8 +1240,11 @@ def main() -> None:
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
-    session    = params.get("session", "FD").upper()
-    is_ae      = session == "AD"
+    session_raw = params.get("session", "CLS").upper()
+    # 구버전 호환: AD → AE,  FD → CLS
+    _SESSION_ALIAS = {"AD": "AE", "FD": "CLS"}
+    session    = _SESSION_ALIAS.get(session_raw, session_raw)
+    is_ae      = session == "AE"
     n_channels = len(channels)
     n_classes  = len(class_names)
 
