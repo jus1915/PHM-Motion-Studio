@@ -1377,12 +1377,18 @@ def main() -> None:
                 filter_op_column=filter_op_column,
             )
 
-        # 출력 파일명도 AE 용으로 변경 (cnn1d_fd → ae_fd, cnn1d_torque → ae_torque)
-        for old, new in [("cnn1d_fd", "ae_fd"), ("cnn1d_torque", "ae_torque")]:
+        # 출력 파일명을 AE 용으로 변경
+        # CLS 요청 파일명(cls_fd / cls_torque) 또는 레거시(cnn1d_fd / cnn1d_torque) 모두 처리
+        for old, new in [
+            ("cls_fd",       "ae_fd"),
+            ("cls_torque",   "ae_torque"),
+            ("cnn1d_fd",     "ae_fd"),
+            ("cnn1d_torque", "ae_torque"),
+        ]:
             if old in output_path:
                 output_path = output_path.replace(old, new)
                 params["output"] = output_path
-                print(f"[main] 출력 경로 변경: {output_path}", file=sys.stderr)
+                print(f"[main] 출력 경로 변경 (AE 자동전환): {output_path}", file=sys.stderr)
                 break
 
     mlflow_tracking_uri = params.get("mlflow_tracking_uri") or os.environ.get("MLFLOW_TRACKING_URI", "")

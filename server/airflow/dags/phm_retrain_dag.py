@@ -204,34 +204,61 @@ _default_args = {
 
 
 # ── 태스크 함수 ───────────────────────────────────────────────────────────────
+def _resolve_session(params: dict) -> str:
+    """session 값을 정규화합니다 (AD→AE, FD→CLS)."""
+    raw = str(params.get("session", "AE")).upper()
+    return {"AD": "AE", "FD": "CLS"}.get(raw, raw)
+
+
+def _output_prefix(session: str, sensor: str) -> str:
+    """session·sensor_type 에 따른 모델 파일명 prefix를 반환합니다.
+
+    AE  + accel  → ae_fd
+    AE  + torque → ae_torque
+    CLS + accel  → cls_fd
+    CLS + torque → cls_torque
+    """
+    if session == "CLS":
+        return "cls_fd" if sensor == "accel" else "cls_torque"
+    else:
+        return "ae_fd"  if sensor == "accel" else "ae_torque"
+
+
 def run_training(**context) -> None:
     """
     dag_run.conf 의 params 를 그대로 train_dl_model.py 에 전달합니다.
     sensor_type / output 을 직접 지정할 때 사용하는 범용 태스크입니다.
+
+    output 미지정 시 session·sensor_type 에 따라 자동 결정:
+      AE  + accel  → ae_fd.onnx
+      AE  + torque → ae_torque.onnx
+      CLS + accel  → cls_fd.onnx
+      CLS + torque → cls_torque.onnx
     """
     conf: dict = context["dag_run"].conf or {}
     params = {**_DEFAULT_CONF, **conf}
     if "output" not in params:
-        params["output"] = str(Path(_MODELS_ROOT) / "cnn1d_fd.onnx")
+        session = _resolve_session(params)
+        sensor  = params.get("sensor_type", "accel")
+        prefix  = _output_prefix(session, sensor)
+        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}.onnx")
     _execute_training(params, context.get("run_id", "manual"))
 
 
 def run_training_accel(**context) -> None:
     """
-    가속도 전용 학습 태스크 — 축별 per-axis AE 모델 학습.
+    가속도 전용 학습 태스크 — 축별 per-axis 모델 학습.
 
     conf 파라미터:
-      axis_count  : 학습할 축 수 (기본 1). 각 축마다 ae_fd_ax{n}.onnx 생성.
-      session     : "AD" (기본, AE 이상탐지) | "FD" (분류)
+      axis_count  : 학습할 축 수 (기본 0 → CSV 헤더 자동 감지).
+      session     : "AE" (기본, AE 이상탐지) | "CLS" (결함진단 분류)
       그 외 _DEFAULT_CONF 참조.
 
-    출력 파일:
-      /opt/phm/models/ae_fd_ax0.onnx  ← Op_Ax0 데이터만 학습
-      /opt/phm/models/ae_fd_ax1.onnx  ← Op_Ax1 데이터만 학습
-      ...
+    출력 파일 (session에 따라 자동 결정):
+      AE  → ae_fd_ax0.onnx,  ae_fd_ax1.onnx  ...
+      CLS → cls_fd_ax0.onnx, cls_fd_ax1.onnx ...
     """
     conf = dict(context["dag_run"].conf or {})
-    # axis_count=0 또는 미지정 시 → CSV 헤더 스캔으로 자동 감지
     _raw_ax = int(conf.pop("axis_count", 0))
     run_id  = str(context.get("run_id", "manual"))
     if _raw_ax <= 0:
@@ -246,9 +273,13 @@ def run_training_accel(**context) -> None:
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "accel"
         params["channels"]         = ["x", "y", "z"]
-        params["output"]           = str(Path(_MODELS_ROOT) / f"ae_fd_ax{ax}.onnx")
         params["filter_op_column"] = f"Op_Ax{ax}"
-        params.setdefault("session", "AE")    # AE 이상탐지 기본
+        params.setdefault("session", "AE")
+        # session에 따라 출력 파일명 결정 (AE→ae_fd, CLS→cls_fd)
+        session = _resolve_session(params)
+        prefix  = _output_prefix(session, "accel")
+        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}  (session={session})", flush=True)
         _execute_training(params, f"{run_id}_ax{ax}")
 
     print(f"\n[PHM] 가속도 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
@@ -256,20 +287,19 @@ def run_training_accel(**context) -> None:
 
 def run_training_torque(**context) -> None:
     """
-    토크 전용 학습 태스크 — 축별 per-axis AE 모델 학습.
+    토크 전용 학습 태스크 — 축별 per-axis 모델 학습.
 
     conf 파라미터:
       axis_count : 학습할 축 수 (0 또는 미지정 → CSV 스캔으로 자동 감지).
-                   각 축마다 ae_torque_ax{n}.onnx 생성.
+      session    : "AE" (기본, AE 이상탐지) | "CLS" (결함진단 분류)
 
     각 축별로:
       channels         = ["Ax{n}_Trq(%)"]   ← 해당 축 토크만
       filter_op_column = "Op_Ax{n}"         ← 해당 축이 움직인 행만
 
-    출력 파일:
-      /opt/phm/models/ae_torque_ax0.onnx
-      /opt/phm/models/ae_torque_ax1.onnx
-      ...
+    출력 파일 (session에 따라 자동 결정):
+      AE  → ae_torque_ax0.onnx,  ae_torque_ax1.onnx  ...
+      CLS → cls_torque_ax0.onnx, cls_torque_ax1.onnx ...
     """
     conf = dict(context["dag_run"].conf or {})
     _raw_ax = int(conf.pop("axis_count", 0))
@@ -286,10 +316,14 @@ def run_training_torque(**context) -> None:
         print(f"\n[PHM] ━━━ 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "torque"
-        params["channels"]         = [f"Ax{ax}_Trq(%)"]   # 해당 축 토크 단일 채널
-        params["output"]           = str(Path(_MODELS_ROOT) / f"ae_torque_ax{ax}.onnx")
+        params["channels"]         = [f"Ax{ax}_Trq(%)"]
         params["filter_op_column"] = f"Op_Ax{ax}"
         params.setdefault("session", "AE")
+        # session에 따라 출력 파일명 결정 (AE→ae_torque, CLS→cls_torque)
+        session = _resolve_session(params)
+        prefix  = _output_prefix(session, "torque")
+        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}  (session={session})", flush=True)
         _execute_training(params, f"{run_id}_torque_ax{ax}")
 
     print(f"\n[PHM] 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
