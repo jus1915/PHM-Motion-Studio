@@ -393,6 +393,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
         private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
+
+        // ── 실시간 분류 현황 매트릭스 ─────────────────────────────────────────
+        // 행=축, 열=가속도점수/상태/토크점수/상태 → 3단계 색 코딩
+        private DataGridView _classMatrixDgv;
+        private readonly Dictionary<int, int> _classMatrixAxisRow = new Dictionary<int, int>(); // axis → rowIdx
+        private const int CMG_COL_AXIS  = 0;
+        private const int CMG_COL_AS    = 1;   // 가속도 점수
+        private const int CMG_COL_ASTATE= 2;   // 가속도 상태
+        private const int CMG_COL_TS    = 3;   // 토크 점수
+        private const int CMG_COL_TSTATE= 4;   // 토크 상태
+        // 마지막 스코어 보관 (색 재계산용)
+        private readonly Dictionary<string, double> _classMatrixLastScore = new Dictionary<string, double>();
         private readonly Dictionary<string, Panel>  _statusChips      = new Dictionary<string, Panel>();
         private readonly Dictionary<string, Label>  _liveStatusLabels = new Dictionary<string, Label>();
         private readonly Dictionary<string, Label>  _liveScoreLabels  = new Dictionary<string, Label>();
@@ -937,16 +949,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
             bottomPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            // Bottom-Left: KPI 카드 + 결함 분류 게이지 + 로컬 진단 차트
+            // Bottom-Left: KPI 카드 + 실시간 분류 현황 + 결함 분류 게이지 + 로컬 진단 차트
             var leftColPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4,
                 Margin = new Padding(0, 0, 4, 0), Padding = Padding.Empty
             };
             leftColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));   // section 제목
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));  // KPI 카드
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 게이지 + 로컬 차트
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // section 제목
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));   // KPI 카드
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 160));   // 실시간 분류 현황
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 게이지 + 로컬 차트
 
             var lblKpiTitle = new Label
             {
@@ -1043,10 +1056,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             gaugeLocalPanel.Controls.Add(WrapChartInPanel("로컬 진단 스코어", chartLine, Color.FromArgb(60, 60, 75)), 1, 0);
             gaugeLocalPanel.ResumeLayout(false);
 
+            // ── 실시간 분류 현황 매트릭스 패널 ──────────────────────────────────
+            var classMatrixPanel = BuildClassMatrixPanel();
+
             leftColPanel.SuspendLayout();
-            leftColPanel.Controls.Add(lblKpiTitle,    0, 0);
-            leftColPanel.Controls.Add(kpiPanel,       0, 1);
-            leftColPanel.Controls.Add(gaugeLocalPanel,0, 2);
+            leftColPanel.Controls.Add(lblKpiTitle,      0, 0);
+            leftColPanel.Controls.Add(kpiPanel,         0, 1);
+            leftColPanel.Controls.Add(classMatrixPanel, 0, 2);
+            leftColPanel.Controls.Add(gaugeLocalPanel,  0, 3);
             leftColPanel.ResumeLayout(false);
 
             // Bottom-Right: 이벤트 로그 + 그리드 + 샘플 차트
@@ -4684,6 +4701,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         ? Color.FromArgb(254, 226, 226)
                         : Color.FromArgb(220, 252, 231);
 
+                // 실시간 분류 현황 매트릭스 갱신 (정상/경고/위험 모두 반영)
+                if (result.Axis.HasValue)
+                    UpdateClassMatrix(result.Axis.Value, isAccel, normScore);
+
                 string cls = !string.IsNullOrEmpty(result.ClassName) &&
                              !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
                              !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase)
@@ -4738,6 +4759,161 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 cardCycles.ValueText = cycles + " 회";
             }));
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 실시간 분류 현황 매트릭스
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// 실시간 분류 현황 패널을 생성합니다. (행=축, 열=가속도/토크 점수+상태)
+        /// </summary>
+        private Panel BuildClassMatrixPanel()
+        {
+            var wrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 4) };
+
+            var lbl = new Label
+            {
+                Text = "실시간 분류 현황",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                Dock = DockStyle.Top, Height = 22,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, 0, 0, 0)
+            };
+
+            _classMatrixDgv = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                AutoGenerateColumns = false,
+                EnableHeadersVisualStyles = false,
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 22,
+                BackgroundColor = SystemColors.Window,
+                BorderStyle = BorderStyle.None,
+                GridColor = Color.FromArgb(220, 220, 225),
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    Font = new Font("Segoe UI", 8.5f),
+                    Alignment = DataGridViewContentAlignment.MiddleCenter
+                },
+                ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    Font = new Font("Segoe UI", 8f, FontStyle.Bold),
+                    BackColor = Color.FromArgb(50, 50, 65),
+                    ForeColor = Color.White,
+                    Alignment = DataGridViewContentAlignment.MiddleCenter
+                }
+            };
+            _classMatrixDgv.RowTemplate.Height = 24;
+
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "Axis",    HeaderText = "축",    Width = 38, ReadOnly = true });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "AScore",  HeaderText = "가속도 점수", Width = 88, ReadOnly = true,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "AState",  HeaderText = "가속도 판정", Width = 75, ReadOnly = true });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TScore",  HeaderText = "토크 점수",   Width = 88, ReadOnly = true,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TState",  HeaderText = "토크 판정",   Width = 75, ReadOnly = true });
+
+            // 마지막 열은 남은 공간 채우기
+            _classMatrixDgv.Columns[CMG_COL_TSTATE].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+
+            _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
+
+            wrap.Controls.Add(_classMatrixDgv);
+            wrap.Controls.Add(lbl);   // Top 먼저 배치
+            return wrap;
+        }
+
+        /// <summary>
+        /// 실시간 분류 현황 매트릭스 셀 색상 (점수 기반 3단계)
+        /// </summary>
+        private void ClassMatrixDgv_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.ColumnIndex != CMG_COL_AS    && e.ColumnIndex != CMG_COL_ASTATE &&
+                e.ColumnIndex != CMG_COL_TS    && e.ColumnIndex != CMG_COL_TSTATE) return;
+
+            // 같은 센서 쌍의 점수 컬럼에서 score를 읽어 색 결정
+            bool isAccelCol = e.ColumnIndex == CMG_COL_AS || e.ColumnIndex == CMG_COL_ASTATE;
+            int scoreCol    = isAccelCol ? CMG_COL_AS : CMG_COL_TS;
+
+            var cell = _classMatrixDgv.Rows[e.RowIndex].Cells[scoreCol];
+            double score = 0;
+            if (cell.Value != null)
+                double.TryParse(cell.Value.ToString(), System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out score);
+
+            Color bg, fg;
+            if (score <= 0)
+            {
+                bg = Color.FromArgb(245, 245, 248); fg = Color.Gray;
+            }
+            else if (score >= DangerMultiplier)
+            {
+                bg = Color.FromArgb(255, 220, 220); fg = Color.FromArgb(160, 20, 20);
+            }
+            else if (score >= WarnMultiplier)
+            {
+                bg = Color.FromArgb(255, 248, 210); fg = Color.FromArgb(150, 100, 0);
+            }
+            else
+            {
+                bg = Color.FromArgb(220, 248, 228); fg = Color.FromArgb(20, 110, 50);
+            }
+
+            e.CellStyle.BackColor = bg;
+            e.CellStyle.ForeColor = fg;
+            e.CellStyle.SelectionBackColor = bg;
+            e.CellStyle.SelectionForeColor = fg;
+        }
+
+        /// <summary>
+        /// 실시간 분류 현황 매트릭스 갱신 (UI 스레드에서만 호출)
+        /// </summary>
+        private void UpdateClassMatrix(int axis, bool isAccel, double normScore)
+        {
+            if (_classMatrixDgv == null || axis < 0) return;
+
+            // 행 확보
+            if (!_classMatrixAxisRow.TryGetValue(axis, out int rowIdx))
+            {
+                rowIdx = _classMatrixDgv.Rows.Add();
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value = axis;
+                // 초기값 — 업데이트 전까지 "-" 표시
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AS].Value     = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ASTATE].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value     = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value = "-";
+                _classMatrixAxisRow[axis] = rowIdx;
+            }
+
+            // 상태 텍스트
+            string stateText;
+            if (normScore <= 0)            stateText = "-";
+            else if (normScore >= DangerMultiplier) stateText = "🔴 위험";
+            else if (normScore >= WarnMultiplier)   stateText = "🟡 경고";
+            else                                    stateText = "✓ 정상";
+
+            int scoreColIdx = isAccel ? CMG_COL_AS    : CMG_COL_TS;
+            int stateColIdx = isAccel ? CMG_COL_ASTATE : CMG_COL_TSTATE;
+
+            _classMatrixDgv.Rows[rowIdx].Cells[scoreColIdx].Value = normScore;
+            _classMatrixDgv.Rows[rowIdx].Cells[stateColIdx].Value = stateText;
+
+            // 색 갱신을 위해 해당 행 무효화
+            _classMatrixDgv.InvalidateRow(rowIdx);
         }
 
         private static bool HasYColumns(string[] headers, OnnxAxisModel om, int axis)
