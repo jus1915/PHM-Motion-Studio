@@ -291,13 +291,7 @@ def predict(req: PredictRequest):
         raw_arr  = np.array(effective_window, dtype=np.float32).reshape(
                        1, effective_window_size, req.n_channels)
         norm_arr = _zscore(raw_arr)
-        if req.sensor_type == "accel":
-            print(
-                f"[accel] axis={req.axis} first8={raw_arr.reshape(-1)[:8].tolist()} "
-                f"mean={raw_arr.mean():.6f} std={raw_arr.std():.6f} "
-                f"win={effective_window_size}",
-                flush=True
-            )
+
         model_kind = meta.get("kind", "CNN1D")
         input_name = sess.get_inputs()[0].name
 
@@ -318,13 +312,22 @@ def predict(req: PredictRequest):
             else:
                 rms_norm = 0.0
 
-            mae_norm     = mae / max(thr, 1e-8)
-            # 가중합: MAE(형태 이상) + RMS(진폭 이상)
-            # accel: 외력에 의한 진폭 변화 감지 → RMS 가중치 높게 (0.5)
-            # torque: 부하에 따라 진폭이 자연 변동 → RMS 가중치 낮게 (0.2)
-            rms_weight   = 0.2 if req.sensor_type == "torque" else 0.5
-            score_normed = mae_norm + rms_weight * rms_norm
-            is_anomaly   = score_normed >= 1.0
+            # ── sensor별 설정 ─────────────────────────
+            if req.sensor_type == "accel":
+                TH_SCALE = 2.5
+                RMS_WEIGHT = 0.15
+                ANOMALY_THRESHOLD = 1.5
+            else:
+                TH_SCALE = 1.8
+                RMS_WEIGHT = 0.15
+                ANOMALY_THRESHOLD = 1.3
+
+            # ── score 계산 ───────────────────────────
+            mae_norm = mae / max(thr * TH_SCALE, 1e-8)
+            score_normed = mae_norm + RMS_WEIGHT * rms_norm
+
+            # ── 판정 ────────────────────────────────
+            is_anomaly = score_normed >= ANOMALY_THRESHOLD
 
             return PredictResponse(
                 model_type="AE-CNN1D",
