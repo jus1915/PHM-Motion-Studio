@@ -14,8 +14,8 @@ params JSON 구조:
     "channels": ["X", "Y", "Z"],             // 입력 채널 컬럼명
     "label_column": "Label",                 // 레이블 컬럼명 (기본 "Label")
     "class_names": ["normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness"],
-    "window_size": 1024,
-    "stride": 512,
+    "window_size": 256,
+    "stride": 128,
     "epochs": 50,
     "batch_size": 32,
     "lr": 0.001,
