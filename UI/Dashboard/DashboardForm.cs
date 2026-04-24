@@ -414,6 +414,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private const double SpikeFactor    = 2.0;  // EMA 대비 이 배수 이상이면 spike 판정
         private const int    SpikeWarmup    = 10;   // 워밍업 후 spike 판정 시작
 
+        // ── 위험/경고 등급 임계 배수 (normScore = rawScore / threshold 기준) ──
+        // normScore ∈ [WarnMultiplier, DangerMultiplier) → 경고
+        // normScore ≥ DangerMultiplier                   → 위험
+        private const double WarnMultiplier   = 1.0;  // 임계값 초과 즉시 경고
+        private const double DangerMultiplier = 2.0;  // 임계값의 2배 이상이면 위험
+
         // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
         // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
         // 이상 판정(threshAnomaly/spikeAnomaly)은 raw score 기반으로 유지.
@@ -598,11 +604,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // 서버 실시간 추론 결과 구독
             AppEvents.InferenceResultReceived += OnLiveInferenceResult;
+            AppEvents.LoopCompleted           += OnLoopCompleted;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             AppEvents.InferenceResultReceived -= OnLiveInferenceResult;
+            AppEvents.LoopCompleted           -= OnLoopCompleted;
             SaveAxisThresholds();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
@@ -4683,12 +4691,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
                 if (anomaly)
                 {
-                    cntDanger++;
-                    cardDanger.ValueText = cntDanger + " 건";
+                    // normScore 기준으로 위험/경고 등급 분류
+                    // spike-only 이상(normScore < DangerMultiplier)은 경고로 처리
+                    bool isDanger = normScore >= DangerMultiplier;
+
                     string spikeInfo = spikeAnomaly && !threshAnomaly
                         ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
+                    string levelTag = isDanger ? "🔴 위험" : "🟡 경고";
+
+                    if (isDanger)
+                    {
+                        cntDanger++;
+                        cardDanger.ValueText = cntDanger + " 건";
+                    }
+                    else
+                    {
+                        cntWarning++;
+                        cardWarning.ValueText = cntWarning + " 건";
+                    }
+
                     AppendEventLog(
-                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {displayName} 이상{spikeTag}  " +
+                        $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
                         $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}{spikeInfo}");
                     rows.Add(new EventRow
                     {
@@ -4696,10 +4719,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         Axis         = result.Axis ?? (isAccel ? -1 : -2),
                         AnomalyScore = Math.Round(result.AnomalyScore, 4),
                         Threshold    = Math.Round(result.Threshold, 4),
-                        Alarm        = displayName + " 이상" + spikeTag + cls
+                        Alarm        = levelTag + " " + displayName + " 이상" + spikeTag + cls
                     });
                     if (rows.Count > 500) rows.RemoveAt(0);
                 }
+            }));
+        }
+
+        /// <summary>
+        /// Teaching Sequence 한 회차 완료 → 설비 사용률(cycles) 카드 갱신
+        /// </summary>
+        private void OnLoopCompleted(int count)
+        {
+            cycles = count;
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                cardCycles.ValueText = cycles + " 회";
             }));
         }
 

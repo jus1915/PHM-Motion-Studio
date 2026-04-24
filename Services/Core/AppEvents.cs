@@ -96,5 +96,14 @@ namespace PHM_Project_DockPanel.Services
         public static event Action<string, InferenceResult> InferenceResultReceived;
         public static void RaiseInferenceResult(string sensorType, InferenceResult result)
             => InferenceResultReceived?.Invoke(sensorType, result);
+
+        // ── Teaching Sequence 루프 완료 ──────────────────────────────────────
+        /// <summary>
+        /// TeachingForm 에서 시퀀스 한 회차가 완료될 때마다 발생합니다.
+        /// count = 현재까지 완료된 총 회차 수
+        /// </summary>
+        public static event Action<int> LoopCompleted;
+        public static void RaiseLoopCompleted(int count)
+            => LoopCompleted?.Invoke(count);
     }
 }

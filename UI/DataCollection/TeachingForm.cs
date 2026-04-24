@@ -532,6 +532,9 @@ namespace PHM_Project_DockPanel.Windows
                     if (abort) break;
                     iterDone++;
 
+                    // 회차 완료 알림 → DashboardForm 설비 사용률 업데이트
+                    AppEvents.RaiseLoopCompleted(iterDone);
+
                     if (plan.Loop)   // 무한 반복이면 done 카운트만 증가(표시는 n/∞)
                         UpdateIterationStatus(iterDone, -1);
                 }
