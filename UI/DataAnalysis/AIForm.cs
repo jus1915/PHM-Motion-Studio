@@ -868,7 +868,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (_selectedKeys == null || _selectedKeys.Length == 0) { MessageBox.Show("특징 선택이 비었습니다."); return; }
 
             string modelTypeName = cmbModelType.SelectedItem?.ToString() ?? "kNN";
-            string sessionStr = _session == SessionType.AnomalyDetection ? "AD" : "FD";
+            string sessionStr = _session == SessionType.AnomalyDetection ? "AE" : "CLS";
             string defaultName = $"{modelTypeName.ToLower().Replace(' ', '_').Replace('-', '_')}_{sessionStr.ToLower()}_model.onnx";
 
             using (var sfd = new SaveFileDialog { Filter = "ONNX Model (*.onnx)|*.onnx", FileName = defaultName })
@@ -1674,7 +1674,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ["seed"]                = 42,
                 ["mlflow_tracking_uri"] = Services.ServerSettings.Current.MlflowUrl ?? "",
                 ["mlflow_experiment"]   = "PHM-DL",
-                ["session"]             = isAe ? "AD" : "FD",
+                ["session"]             = isAe ? "AE" : "CLS",
             };
             // AE: 어떤 폴더를 "정상"으로 볼지 명시
             if (isAe) p["normal_classes"] = classNames.ToArray();

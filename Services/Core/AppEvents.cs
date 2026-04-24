@@ -90,12 +90,22 @@ namespace PHM_Project_DockPanel.Services
 
         // ── 서버 추론 결과 ────────────────────────────────────────────────────
         /// <summary>
-        /// ContinuousInferenceService 가 추론 결과를 수신했을 때 발생합니다.
+        /// ContinuousInferenceService 가 AE 이상탐지 결과를 수신했을 때 발생합니다.
         /// sensorType = "accel" | "torque"
         /// </summary>
         public static event Action<string, InferenceResult> InferenceResultReceived;
         public static void RaiseInferenceResult(string sensorType, InferenceResult result)
             => InferenceResultReceived?.Invoke(sensorType, result);
+
+        /// <summary>
+        /// ContinuousInferenceService 가 CLS 결함진단 결과를 수신했을 때 발생합니다.
+        /// combined.ClsAvailable = false 이면 CLS 모델 없음(AE 전용 상태).
+        /// combined.ClsAvailable = true  이면 CLS 결과(ClsClassName/ClsConfidence/ClsIsFault) 유효.
+        /// sensorType = "accel" | "torque"
+        /// </summary>
+        public static event Action<string, CombinedInferenceResult> ClsInferenceResultReceived;
+        public static void RaiseClsInferenceResult(string sensorType, CombinedInferenceResult result)
+            => ClsInferenceResultReceived?.Invoke(sensorType, result);
 
         // ── Teaching Sequence 루프 완료 ──────────────────────────────────────
         /// <summary>
