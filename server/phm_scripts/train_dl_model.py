@@ -402,11 +402,24 @@ def load_windows_from_dir(
         windows = _extract_windows(signal, label_int, window_size, stride, normalize=normalize)
         all_windows.extend(windows)
 
+    # 클래스별 윈도우 수 진단 출력
+    cls_dist: Dict[str, int] = {}
+    for _, lbl in all_windows:
+        name = class_names[lbl] if lbl < len(class_names) else str(lbl)
+        cls_dist[name] = cls_dist.get(name, 0) + 1
+    dist_log = ", ".join(f"{k}={v}" for k, v in sorted(cls_dist.items()))
     print(
         f"[data] 디렉터리 로드 완료: {len(csv_files) - skipped}개 파일, "
-        f"{len(all_windows)}개 윈도우 (건너뜀={skipped})",
+        f"{len(all_windows)}개 윈도우 (건너뜀={skipped}) | 클래스별: {dist_log or '없음'}",
         file=sys.stderr,
     )
+    if skipped > 0:
+        print(
+            f"[data] ⚠ {skipped}개 파일이 건너뛰어짐. "
+            f"원인: Label 컬럼 없음, 경로에 클래스명 없음, 또는 샘플 수 부족. "
+            f"class_names={class_names}, label_column 확인 필요.",
+            file=sys.stderr,
+        )
     return all_windows
 
 
@@ -1301,8 +1314,31 @@ def main() -> None:
     )
     print(f"[main] {'정상 데이터' if is_ae else '클래스'} 분포: {dist_str}", file=sys.stderr)
 
-    # ── 단일 클래스 → AE 이상탐지 모드 자동 전환 ────────────────────────────
+    # ── 단일 클래스 검사 ─────────────────────────────────────────────────────
     if not is_ae and len(label_counts) < 2:
+        # 요청된 클래스가 2개 이상인데 데이터가 부족한 경우 → 진단 오류 (자동 전환 금지)
+        # 요청된 클래스가 1개인 경우 → AE 이상탐지 모드로 자동 전환 (기존 동작 유지)
+        if len(class_names) >= 2:
+            found_names   = [class_names[i] for i in sorted(label_counts.keys())
+                             if i < len(class_names)]
+            missing_names = [c for c in class_names
+                             if c.lower() not in {class_names[i].lower()
+                                                  for i in label_counts.keys()
+                                                  if i < len(class_names)}]
+            diag = (
+                f"CLS 학습 실패: 요청된 {len(class_names)}개 클래스 중 "
+                f"{len(found_names)}개만 발견되었습니다. "
+                f"발견={found_names}, 누락={missing_names}. "
+                f"\n\n해결 방법:"
+                f"\n  (1) 폴더 구조 확인: data_dir/{'/'.join(missing_names)}/Accel/*.csv 가 존재해야 합니다."
+                f"\n  (2) CSV Label 컬럼 확인: label_column='{label_column}' 에 {missing_names} 값이 있어야 합니다."
+                f"\n  (3) 해당 클래스의 학습 데이터를 먼저 수집 후 재시도하세요."
+            )
+            print(f"[main] ❌ {diag}", file=sys.stderr)
+            print(json.dumps({"error": diag}), flush=True)
+            sys.exit(1)
+
+        # class_names가 1개인 경우: AE 이상탐지 모드로 자동 전환
         print(
             f"[main] ⚠ 클래스 수 {len(label_counts)}개 (분류 학습 불가) "
             f"→ AE 이상탐지 모드로 자동 전환합니다.",
