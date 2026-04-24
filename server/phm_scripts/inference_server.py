@@ -257,12 +257,39 @@ def predict(req: PredictRequest):
             detail=f"window 길이 {len(req.window)} ≠ {req.window_size}×{req.n_channels}={expected}",
         )
 
+    # ── 모델 학습 window_size 와 요청 window_size 불일치 처리 ─────────────────
+    # 모델이 256 샘플로 학습됐는데 클라이언트가 1024를 보내는 경우 등:
+    # 요청 윈도우 끝(가장 최신) 에서 모델 window_size 만큼 슬라이싱해서 사용.
+    model_window_size = int(meta.get("window_size", req.window_size))
+    if model_window_size != req.window_size:
+        need = model_window_size * req.n_channels
+        if len(req.window) < need:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"모델 window_size={model_window_size} 이지만 "
+                    f"요청 데이터({len(req.window)} 샘플)가 부족합니다."
+                ),
+            )
+        # 가장 최신 데이터(끝 부분) 사용
+        effective_window = list(req.window[-need:])
+        effective_window_size = model_window_size
+        print(
+            f"[inference] window_size 조정: {req.window_size}→{model_window_size} "
+            f"({req.sensor_type} axis={req.axis})",
+            flush=True,
+        )
+    else:
+        effective_window      = req.window
+        effective_window_size = req.window_size
+
     # 실제 사용된 모델 파일명 (meta에 source_file 없으면 axis로 추정)
     model_file = meta.get("source_file")
 
     try:
         # (1, T, C) float32
-        raw_arr  = np.array(req.window, dtype=np.float32).reshape(1, req.window_size, req.n_channels)
+        raw_arr  = np.array(effective_window, dtype=np.float32).reshape(
+                       1, effective_window_size, req.n_channels)
         norm_arr = _zscore(raw_arr)
 
         model_kind = meta.get("kind", "CNN1D")
@@ -275,17 +302,32 @@ def predict(req: PredictRequest):
             thr   = float(meta.get("threshold", 0.1))
 
             rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
-            rms_thr  = float(meta.get("rms_thr", float("inf")))
+            rms_thr  = float(meta.get("rms_thr",  float("inf")))
             rms_mean = float(meta.get("rms_mean", 0.0))
-            rms_norm = max(0.0, (rms - rms_mean) / max(rms_thr - rms_mean, 1e-8)) \
-                       if rms_thr < 1e30 else 0.0
+            # rms_std가 meta에 있으면 1-std 단위로 정규화, 없으면 기존 방식(thr-mean 기준)
+            rms_std_m = meta.get("rms_std")
+            if rms_thr < 1e30:
+                denom    = float(rms_std_m) if rms_std_m else max(rms_thr - rms_mean, 1e-8)
+                rms_norm = max(0.0, (rms - rms_mean) / denom)
+            else:
+                rms_norm = 0.0
 
-            mae_norm     = mae / max(thr, 1e-8)
-            # 가중합: MAE(주) + RMS 초과(보조)
-            # amp_dev 항 제거: standardize_per_sample=True 환경에서 왕복 운동의
-            # 정상적인 진폭 변동(가속·감속)을 이상으로 오인하는 문제 방지
-            score_normed = mae_norm + 0.15 * rms_norm
-            is_anomaly   = score_normed >= 1.0
+            # ── sensor별 설정 ─────────────────────────
+            if req.sensor_type == "accel":
+                TH_SCALE = 2.5
+                RMS_WEIGHT = 0.15
+                ANOMALY_THRESHOLD = 1.5
+            else:
+                TH_SCALE = 1.8
+                RMS_WEIGHT = 0.15
+                ANOMALY_THRESHOLD = 1.3
+
+            # ── score 계산 ───────────────────────────
+            mae_norm = mae / max(thr * TH_SCALE, 1e-8)
+            score_normed = mae_norm + RMS_WEIGHT * rms_norm
+
+            # ── 판정 ────────────────────────────────
+            is_anomaly = score_normed >= ANOMALY_THRESHOLD
 
             return PredictResponse(
                 model_type="AE-CNN1D",

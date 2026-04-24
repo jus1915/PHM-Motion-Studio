@@ -759,10 +759,10 @@ def train_ae(
 
     print(
         f"[train_ae] 완료 — best_val_mae={best_val_mae:.6f}  "
-        f"mae_thr={mae_thr:.6f}  rms_thr={rms_thr:.4f}  epochs={epochs_trained}",
+        f"mae_thr={mae_thr:.6f}  rms_mean={rms_mean:.4f}  rms_std={rms_std:.4f}  rms_thr={rms_thr:.4f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr
+    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -1033,6 +1033,7 @@ def save_meta(
     threshold: Optional[float] = None,
     rms_mean: Optional[float] = None,
     rms_thr:  Optional[float] = None,
+    rms_std:  Optional[float] = None,
     n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
@@ -1066,11 +1067,13 @@ def save_meta(
         meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (z-score 공간)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
-        # RMS 진폭 이상 감지용 통계
+        # RMS 진폭 이상 감지용 통계 (외력 등 진폭 변화 감지)
         if rms_mean is not None:
             meta["rms_mean"] = round(float(rms_mean), 6)
         if rms_thr is not None:
             meta["rms_thr"]  = round(float(rms_thr),  6)
+        if rms_std is not None:
+            meta["rms_std"]  = round(float(rms_std),  6)
     else:
         meta["class_names"] = class_names
         meta["n_classes"]   = len(class_names)
@@ -1352,7 +1355,7 @@ def main() -> None:
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
-        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr = train_ae(
+        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std = train_ae(
             params=params,
             windows=windows,
             n_channels=n_channels,
@@ -1378,6 +1381,7 @@ def main() -> None:
             threshold=threshold,
             rms_mean=rms_mean,
             rms_thr=rms_thr,
+            rms_std=rms_std,
             n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
         )
 
