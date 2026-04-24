@@ -414,6 +414,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private const double SpikeFactor    = 2.0;  // EMA 대비 이 배수 이상이면 spike 판정
         private const int    SpikeWarmup    = 10;   // 워밍업 후 spike 판정 시작
 
+        // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
+        // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
+        // 이상 판정(threshAnomaly/spikeAnomaly)은 raw score 기반으로 유지.
+        // alpha=0.3: 약 4~5 윈도우(~500ms) 내에 새 값으로 수렴
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
+            _chartEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        private const double ChartEmaAlpha = 0.3;
+
         // DB 모드 UI 컨트롤
         private RadioButton rbtnCsvMode, rbtnDbMode;
         private Panel pnlCsvSource, pnlDbSource;
@@ -4607,7 +4615,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 정규화 스코어를 차트 큐에 추가 (score / threshold → 임계선 항상 1.0)
             double axThr      = _axisThresholds.TryGetValue(key, out double t) ? t : 1.0;
             double normScore  = axThr > 0 ? (double)result.AnomalyScore / axThr : (double)result.AnomalyScore;
-            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, normScore));
+
+            // EMA 평활화 적용 (차트 노이즈 감소 — 이상 판정은 rawScore 기반으로 별도 수행)
+            double prevEma    = _chartEma.GetOrAdd(key, normScore);
+            double smoothed   = ChartEmaAlpha * normScore + (1.0 - ChartEmaAlpha) * prevEma;
+            _chartEma[key]    = smoothed;
+
+            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, smoothed));
             while (_liveScoreQueue.Count > 1200)
             {
                 Tuple<string, DateTime, double> _discard;
