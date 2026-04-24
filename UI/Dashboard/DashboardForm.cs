@@ -411,8 +411,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double ema, int count)>
             _scoreBaseline = new System.Collections.Concurrent.ConcurrentDictionary<string, (double, int)>();
         private const double SpikeEmaAlpha  = 0.1;  // EMA 감쇠율 (느릴수록 베이스라인 안정적)
-        private const double SpikeFactor    = 2.0;  // EMA 대비 이 배수 이상이면 spike 판정
-        private const int    SpikeWarmup    = 10;   // 워밍업 후 spike 판정 시작
+        private const double SpikeFactor    = 4.0;  // EMA 대비 이 배수 이상이면 spike 판정
+                                                    // (2.0 → 오탐 과다: 가감속 구간 score가 ema×2 초과 빈발)
+        private const int    SpikeWarmup    = 30;   // 워밍업 후 spike 판정 시작 (충분한 베이스라인 수집)
 
         // ── 위험/경고 등급 임계 배수 (normScore = rawScore / threshold 기준) ──
         // normScore ∈ [WarnMultiplier, DangerMultiplier) → 경고
@@ -4661,8 +4662,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 double ema   = baseline.ema;
                 int    cnt   = baseline.count;
                 bool   spikeAnomaly = cnt >= SpikeWarmup && rawScore > ema * SpikeFactor;
-                // EMA 업데이트: spike 구간은 베이스라인을 오염시키지 않도록 정상일 때만 반영
-                double newEma = spikeAnomaly ? ema : ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
+                // EMA 업데이트: 항상 반영 (스파이크 구간만 제외하면 베이스라인이 낮게 고착됨)
+                double newEma = ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
                 _scoreBaseline[key] = (newEma, cnt + 1);
 
                 bool   anomaly    = threshAnomaly || spikeAnomaly;
