@@ -395,14 +395,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
 
         // ── 실시간 분류 현황 매트릭스 ─────────────────────────────────────────
-        // 행=축, 열=가속도점수/상태/토크점수/상태 → 3단계 색 코딩
+        // 행=축, 열=AE 점수/상태 + CLS 결함/신뢰도 → 3단계 색 코딩
         private DataGridView _classMatrixDgv;
         private readonly Dictionary<int, int> _classMatrixAxisRow = new Dictionary<int, int>(); // axis → rowIdx
-        private const int CMG_COL_AXIS  = 0;
-        private const int CMG_COL_AS    = 1;   // 가속도 점수
-        private const int CMG_COL_ASTATE= 2;   // 가속도 상태
-        private const int CMG_COL_TS    = 3;   // 토크 점수
-        private const int CMG_COL_TSTATE= 4;   // 토크 상태
+        // ── AE 이상탐지 열 ──────────────────────────────
+        private const int CMG_COL_AXIS   = 0;
+        private const int CMG_COL_AS     = 1;   // [AE] 가속도 점수
+        private const int CMG_COL_ASTATE = 2;   // [AE] 가속도 판정
+        private const int CMG_COL_TS     = 3;   // [AE] 토크 점수
+        private const int CMG_COL_TSTATE = 4;   // [AE] 토크 판정
+        // ── CLS 결함진단 열 ─────────────────────────────
+        private const int CMG_COL_ACLS    = 5;  // [CLS] 가속도 결함명
+        private const int CMG_COL_ACLSCONF= 6;  // [CLS] 가속도 신뢰도
+        private const int CMG_COL_TCLS    = 7;  // [CLS] 토크 결함명
+        private const int CMG_COL_TCLSCONF= 8;  // [CLS] 토크 신뢰도
         // 마지막 스코어 보관 (색 재계산용)
         private readonly Dictionary<string, double> _classMatrixLastScore = new Dictionary<string, double>();
         private readonly Dictionary<string, Panel>  _statusChips      = new Dictionary<string, Panel>();
@@ -615,15 +621,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Text = "PHM 알림"
             };
 
-            // 서버 실시간 추론 결과 구독
-            AppEvents.InferenceResultReceived += OnLiveInferenceResult;
-            AppEvents.LoopCompleted           += OnLoopCompleted;
+            // 서버 실시간 추론 결과 구독 (AE 이상탐지 + CLS 결함진단)
+            AppEvents.InferenceResultReceived    += OnLiveInferenceResult;
+            AppEvents.ClsInferenceResultReceived += OnLiveClsInferenceResult;
+            AppEvents.LoopCompleted              += OnLoopCompleted;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            AppEvents.InferenceResultReceived -= OnLiveInferenceResult;
-            AppEvents.LoopCompleted           -= OnLoopCompleted;
+            AppEvents.InferenceResultReceived    -= OnLiveInferenceResult;
+            AppEvents.ClsInferenceResultReceived -= OnLiveClsInferenceResult;
+            AppEvents.LoopCompleted              -= OnLoopCompleted;
             SaveAxisThresholds();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
@@ -4749,6 +4757,78 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>
+        /// AppEvents.ClsInferenceResultReceived 핸들러 — CLS 결함진단 결과를 분류 매트릭스에 반영합니다.
+        /// ClsAvailable=false이면 "모델없음"으로 표시, true이면 결함명/신뢰도 표시.
+        /// </summary>
+        private void OnLiveClsInferenceResult(string sensorType, CombinedInferenceResult combined)
+        {
+            if (combined == null || combined.IsError || !combined.Axis.HasValue) return;
+            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
+
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                string clsName;
+                object confVal;
+                if (!combined.ClsAvailable)
+                {
+                    clsName = "모델없음";
+                    confVal = "-";
+                }
+                else
+                {
+                    clsName = combined.ClsClassName ?? "-";
+                    confVal = combined.ClsConfidence.HasValue
+                              ? (object)(combined.ClsConfidence.Value)
+                              : (object)"-";
+                }
+                UpdateClassMatrixCls(combined.Axis.Value, isAccel, clsName, confVal);
+
+                // 결함 감지 시 이벤트 로그에도 기록
+                if (combined.ClsAvailable && combined.ClsIsFault == true)
+                {
+                    string axLabel = $" Ax{combined.Axis.Value}";
+                    string sensor  = isAccel ? "가속도" : "토크";
+                    string conf    = combined.ClsConfidence.HasValue
+                                     ? $"  신뢰도={combined.ClsConfidence.Value:P0}" : "";
+                    AppendEventLog(
+                        $"[{DateTime.Now:HH:mm:ss}] 🔶 결함진단 {sensor}{axLabel} = {clsName}{conf}");
+                }
+            }));
+        }
+
+        /// <summary>
+        /// 실시간 분류 현황 매트릭스 CLS 열 갱신 (UI 스레드에서만 호출)
+        /// </summary>
+        private void UpdateClassMatrixCls(int axis, bool isAccel, string className, object confValue)
+        {
+            if (_classMatrixDgv == null || axis < 0) return;
+
+            // 행 확보 (AE 결과보다 먼저 올 수도 있으므로 여기서도 생성)
+            if (!_classMatrixAxisRow.TryGetValue(axis, out int rowIdx))
+            {
+                rowIdx = _classMatrixDgv.Rows.Add();
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axis;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AS].Value       = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ASTATE].Value   = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value   = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLSCONF].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
+                _classMatrixAxisRow[axis] = rowIdx;
+            }
+
+            int clsCol  = isAccel ? CMG_COL_ACLS     : CMG_COL_TCLS;
+            int confCol = isAccel ? CMG_COL_ACLSCONF  : CMG_COL_TCLSCONF;
+
+            _classMatrixDgv.Rows[rowIdx].Cells[clsCol].Value  = className ?? "-";
+            _classMatrixDgv.Rows[rowIdx].Cells[confCol].Value = confValue ?? (object)"-";
+            _classMatrixDgv.InvalidateRow(rowIdx);
+        }
+
+        /// <summary>
         /// Teaching Sequence 한 회차 완료 → 설비 사용률(cycles) 카드 갱신
         /// </summary>
         private void OnLoopCompleted(int count)
@@ -4774,7 +4854,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             var lbl = new Label
             {
-                Text = "실시간 분류 현황",
+                Text = "실시간 분류 현황  ( AE: 이상탐지 점수/판정 │ CLS: 결함진단 결함명/신뢰도 )",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 Dock = DockStyle.Top, Height = 22,
                 TextAlign = ContentAlignment.MiddleLeft,
@@ -4813,21 +4893,33 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             _classMatrixDgv.RowTemplate.Height = 24;
 
+            // ── AE 이상탐지 열 (col 0-4) ─────────────────────────────────────
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "Axis",    HeaderText = "축",    Width = 38, ReadOnly = true });
+                { Name = "Axis",    HeaderText = "축",       Width = 34, ReadOnly = true });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "AScore",  HeaderText = "가속도 점수", Width = 88, ReadOnly = true,
+                { Name = "AScore",  HeaderText = "AE 가속도", Width = 78, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "AState",  HeaderText = "가속도 판정", Width = 75, ReadOnly = true });
+                { Name = "AState",  HeaderText = "판정",     Width = 68, ReadOnly = true });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TScore",  HeaderText = "토크 점수",   Width = 88, ReadOnly = true,
+                { Name = "TScore",  HeaderText = "AE 토크",  Width = 78, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TState",  HeaderText = "토크 판정",   Width = 75, ReadOnly = true });
+                { Name = "TState",  HeaderText = "판정",     Width = 68, ReadOnly = true });
+            // ── CLS 결함진단 열 (col 5-8) ─────────────────────────────────────
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "ACLS",    HeaderText = "가속도 결함", Width = 88, ReadOnly = true });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "ACLSC",   HeaderText = "신뢰도", Width = 52, ReadOnly = true,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TCLS",    HeaderText = "토크 결함",   Width = 88, ReadOnly = true });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TCLSC",   HeaderText = "신뢰도", Width = 52, ReadOnly = true,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
 
             // 마지막 열은 남은 공간 채우기
-            _classMatrixDgv.Columns[CMG_COL_TSTATE].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            _classMatrixDgv.Columns[CMG_COL_TCLSCONF].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
             _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
 
@@ -4842,41 +4934,55 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private void ClassMatrixDgv_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
         {
             if (e.RowIndex < 0) return;
-            if (e.ColumnIndex != CMG_COL_AS    && e.ColumnIndex != CMG_COL_ASTATE &&
-                e.ColumnIndex != CMG_COL_TS    && e.ColumnIndex != CMG_COL_TSTATE) return;
 
-            // 같은 센서 쌍의 점수 컬럼에서 score를 읽어 색 결정
-            bool isAccelCol = e.ColumnIndex == CMG_COL_AS || e.ColumnIndex == CMG_COL_ASTATE;
-            int scoreCol    = isAccelCol ? CMG_COL_AS : CMG_COL_TS;
+            // ── AE 이상탐지 열 색상 (점수 기반 3단계) ──────────────────────
+            if (e.ColumnIndex == CMG_COL_AS    || e.ColumnIndex == CMG_COL_ASTATE ||
+                e.ColumnIndex == CMG_COL_TS    || e.ColumnIndex == CMG_COL_TSTATE)
+            {
+                bool isAccelCol = e.ColumnIndex == CMG_COL_AS || e.ColumnIndex == CMG_COL_ASTATE;
+                int  scoreCol   = isAccelCol ? CMG_COL_AS : CMG_COL_TS;
 
-            var cell = _classMatrixDgv.Rows[e.RowIndex].Cells[scoreCol];
-            double score = 0;
-            if (cell.Value != null)
-                double.TryParse(cell.Value.ToString(), System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out score);
+                double score = 0;
+                var cell = _classMatrixDgv.Rows[e.RowIndex].Cells[scoreCol];
+                if (cell.Value != null)
+                    double.TryParse(cell.Value.ToString(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out score);
 
-            Color bg, fg;
-            if (score <= 0)
-            {
-                bg = Color.FromArgb(245, 245, 248); fg = Color.Gray;
-            }
-            else if (score >= DangerMultiplier)
-            {
-                bg = Color.FromArgb(255, 220, 220); fg = Color.FromArgb(160, 20, 20);
-            }
-            else if (score >= WarnMultiplier)
-            {
-                bg = Color.FromArgb(255, 248, 210); fg = Color.FromArgb(150, 100, 0);
-            }
-            else
-            {
-                bg = Color.FromArgb(220, 248, 228); fg = Color.FromArgb(20, 110, 50);
+                Color bg, fg;
+                if (score <= 0)                            { bg = Color.FromArgb(245,245,248); fg = Color.Gray; }
+                else if (score >= DangerMultiplier)        { bg = Color.FromArgb(255,220,220); fg = Color.FromArgb(160,20,20); }
+                else if (score >= WarnMultiplier)          { bg = Color.FromArgb(255,248,210); fg = Color.FromArgb(150,100,0); }
+                else                                       { bg = Color.FromArgb(220,248,228); fg = Color.FromArgb(20,110,50); }
+
+                e.CellStyle.BackColor          = bg;
+                e.CellStyle.ForeColor          = fg;
+                e.CellStyle.SelectionBackColor = bg;
+                e.CellStyle.SelectionForeColor = fg;
+                return;
             }
 
-            e.CellStyle.BackColor = bg;
-            e.CellStyle.ForeColor = fg;
-            e.CellStyle.SelectionBackColor = bg;
-            e.CellStyle.SelectionForeColor = fg;
+            // ── CLS 결함진단 열 색상 (결함명 기반) ──────────────────────────
+            if (e.ColumnIndex == CMG_COL_ACLS     || e.ColumnIndex == CMG_COL_ACLSCONF ||
+                e.ColumnIndex == CMG_COL_TCLS      || e.ColumnIndex == CMG_COL_TCLSCONF)
+            {
+                bool isAccelCol = e.ColumnIndex == CMG_COL_ACLS || e.ColumnIndex == CMG_COL_ACLSCONF;
+                int  nameCol    = isAccelCol ? CMG_COL_ACLS : CMG_COL_TCLS;
+
+                string cls = _classMatrixDgv.Rows[e.RowIndex].Cells[nameCol].Value?.ToString() ?? "";
+
+                Color bg, fg;
+                if (string.IsNullOrEmpty(cls) || cls == "-" || cls == "모델없음")
+                    { bg = Color.FromArgb(245,245,248); fg = Color.Gray; }
+                else if (string.Equals(cls, "normal", StringComparison.OrdinalIgnoreCase))
+                    { bg = Color.FromArgb(220,248,228); fg = Color.FromArgb(20,110,50); }
+                else
+                    { bg = Color.FromArgb(255,235,200); fg = Color.FromArgb(140,70,0); }  // 결함 = 주황
+
+                e.CellStyle.BackColor          = bg;
+                e.CellStyle.ForeColor          = fg;
+                e.CellStyle.SelectionBackColor = bg;
+                e.CellStyle.SelectionForeColor = fg;
+            }
         }
 
         /// <summary>
@@ -4890,12 +4996,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (!_classMatrixAxisRow.TryGetValue(axis, out int rowIdx))
             {
                 rowIdx = _classMatrixDgv.Rows.Add();
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value = axis;
-                // 초기값 — 업데이트 전까지 "-" 표시
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AS].Value     = 0.0;
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ASTATE].Value = "-";
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value     = 0.0;
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axis;
+                // AE 열 초기값
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AS].Value       = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ASTATE].Value   = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value   = "-";
+                // CLS 열 초기값
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLSCONF].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
                 _classMatrixAxisRow[axis] = rowIdx;
             }
 

@@ -113,6 +113,65 @@ namespace PHM_Project_DockPanel.Services.Core
             }
         }
 
+        // ── /predict/combined 요청 ────────────────────────────────────────────
+        /// <summary>
+        /// AE 이상탐지 + CLS 결함진단을 동시에 요청합니다.
+        /// AE 모델 없으면 IsError=true 반환.
+        /// CLS 모델 없으면 IsError=false, ClsAvailable=false 반환.
+        /// </summary>
+        public async Task<CombinedInferenceResult> PredictCombinedAsync(
+            float[]           window,
+            int               windowSize,
+            int               nChannels,
+            string            sensorType = "accel",
+            int?              axis       = null,
+            CancellationToken ct         = default)
+        {
+            object req = axis.HasValue
+                ? (object)new
+                  {
+                      sensor_type = sensorType,
+                      axis        = axis.Value,
+                      window      = window,
+                      window_size = windowSize,
+                      n_channels  = nChannels,
+                  }
+                : new
+                  {
+                      sensor_type = sensorType,
+                      window      = window,
+                      window_size = windowSize,
+                      n_channels  = nChannels,
+                  };
+
+            string json    = JsonConvert.SerializeObject(req);
+            var    content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            HttpResponseMessage resp;
+            try
+            {
+                resp = await _http.PostAsync("predict/combined", content, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                return CombinedInferenceResult.Fail($"연결 오류: {ex.Message}");
+            }
+
+            string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return CombinedInferenceResult.Fail($"HTTP {(int)resp.StatusCode}: {body}");
+
+            try
+            {
+                return JsonConvert.DeserializeObject<CombinedInferenceResult>(body)
+                       ?? CombinedInferenceResult.Fail("응답 역직렬화 실패");
+            }
+            catch (Exception ex)
+            {
+                return CombinedInferenceResult.Fail($"응답 파싱 오류: {ex.Message}");
+            }
+        }
+
         public void Dispose() => _http.Dispose();
     }
 
@@ -150,5 +209,49 @@ namespace PHM_Project_DockPanel.Services.Core
             string conf  = Confidence.HasValue ? $"  신뢰도={Confidence:P0}" : "";
             return $"{(IsAnomaly ? "⚠ 이상" : "✓ 정상")}{cls}  점수={AnomalyScore:F3}{conf}";
         }
+    }
+
+    // =========================================================================
+    //  CombinedInferenceResult — /predict/combined 응답 DTO
+    //  AE 이상탐지 결과(필수) + CLS 결함진단 결과(선택)
+    // =========================================================================
+    public sealed class CombinedInferenceResult
+    {
+        // ── AE 이상탐지 ───────────────────────────────────────────────────────
+        [JsonProperty("sensor_type")]   public string  SensorType    { get; set; } = "";
+        [JsonProperty("axis")]          public int?    Axis          { get; set; }
+        [JsonProperty("ae_model_file")] public string  AeModelFile   { get; set; }
+        [JsonProperty("is_anomaly")]    public bool    IsAnomaly     { get; set; }
+        [JsonProperty("anomaly_score")] public float   AnomalyScore  { get; set; }
+        [JsonProperty("threshold")]     public float   Threshold     { get; set; } = 1.0f;
+        [JsonProperty("raw_mae")]       public float?  RawMae        { get; set; }
+        [JsonProperty("raw_threshold")] public float?  RawThreshold  { get; set; }
+        // ── CLS 결함진단 ──────────────────────────────────────────────────────
+        [JsonProperty("cls_available")]  public bool    ClsAvailable  { get; set; }
+        [JsonProperty("cls_model_file")] public string  ClsModelFile  { get; set; }
+        [JsonProperty("cls_class_name")] public string  ClsClassName  { get; set; }
+        [JsonProperty("cls_confidence")] public float?  ClsConfidence { get; set; }
+        [JsonProperty("cls_is_fault")]   public bool?   ClsIsFault    { get; set; }
+
+        [JsonIgnore] public string Error    { get; set; }
+        [JsonIgnore] public bool   IsError  => Error != null;
+
+        /// <summary>AE 결과를 기존 InferenceResult 형식으로 변환합니다.</summary>
+        public InferenceResult ToAeResult() => new InferenceResult
+        {
+            ModelType    = "AE-CNN1D",
+            SensorType   = SensorType,
+            Axis         = Axis,
+            ModelFile    = AeModelFile,
+            IsAnomaly    = IsAnomaly,
+            AnomalyScore = AnomalyScore,
+            Threshold    = Threshold,
+            ClassName    = IsAnomaly ? "anomaly" : "normal",
+            RawMae       = RawMae,
+            RawThreshold = RawThreshold,
+        };
+
+        public static CombinedInferenceResult Fail(string error) =>
+            new CombinedInferenceResult { Error = error };
     }
 }

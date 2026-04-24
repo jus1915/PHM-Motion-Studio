@@ -139,10 +139,24 @@ namespace PHM_Project_DockPanel.Services.Core
             var (window, nCh) = ReadLastWindow(csvPath, sensorType, WindowSize, axis);
             if (window == null) return;
 
-            var result = await _client.PredictAsync(
+            // ── /predict/combined 호출 (AE 이상탐지 + CLS 결함진단 동시) ────
+            var combined = await _client.PredictCombinedAsync(
                 window, WindowSize, nCh, sensorType, axis, ct);
 
-            AppEvents.RaiseInferenceResult(sensorType, result);
+            if (combined.IsError)
+            {
+                // combined 엔드포인트 실패(구버전 서버 등) → /predict 폴백
+                var fallback = await _client.PredictAsync(
+                    window, WindowSize, nCh, sensorType, axis, ct);
+                AppEvents.RaiseInferenceResult(sensorType, fallback);
+                return;
+            }
+
+            // AE 결과 발행 (기존 DashboardForm 등 InferenceResultReceived 구독자용)
+            AppEvents.RaiseInferenceResult(sensorType, combined.ToAeResult());
+
+            // CLS 결과 발행 (ClsAvailable=false 이면 "모델 없음" 상태로 발행)
+            AppEvents.RaiseClsInferenceResult(sensorType, combined);
         }
 
         private static (float[] window, int nChannels) ReadLastWindow(
