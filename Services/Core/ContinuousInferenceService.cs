@@ -178,9 +178,11 @@ namespace PHM_Project_DockPanel.Services.Core
 
         // ── Idle 상태 외력 감지 추론 ───────────────────────────────────────────
         /// <summary>
-        /// 정지(Idle) 상태에서도 외력 감지를 위해 추론을 실행합니다.
+        /// 정지(Idle) 상태에서 가속도 외력 감지를 위해 추론을 실행합니다.
         /// - 윈도우 크기: IdleWindowSize (256 샘플, 빠른 응답)
-        /// - Op=Idle 행 포함 (includeIdle=true): 정지 중 토크·가속 변화를 직접 분석
+        /// - Op=Idle 행 포함 (includeIdle=true): 정지 중 가속 변화를 직접 분석
+        /// - 토크 제외: 토크 AE 모델은 동작 중 데이터로만 학습되므로
+        ///   정지 중 토크(일정한 중력 하중)에 적용하면 오탐이 발생합니다.
         /// - 모니터링 대상 축 전체에 대해 순차 추론
         /// </summary>
         private async Task RunIdleInferenceAsync(CancellationToken ct)
@@ -188,7 +190,7 @@ namespace PHM_Project_DockPanel.Services.Core
             // 모니터링 축: per-axis 설정 있으면 사용, 없으면 null (전역 모델)
             int[] axesToRun = (_axes != null && _axes.Length > 0) ? _axes : null;
 
-            // ── 가속도 ────────────────────────────────────────────────────────
+            // ── 가속도만 (Idle 중 토크 추론 제외) ────────────────────────────
             if (_accelLogger?.IsRunning == true)
             {
                 string[] paths = _accelLogger.CsvPathByModule;
@@ -217,29 +219,10 @@ namespace PHM_Project_DockPanel.Services.Core
                 }
             }
 
-            // ── 토크 ──────────────────────────────────────────────────────────
-            if (_torqueLogger?.IsLogging == true)
-            {
-                string p = _torqueLogger.OutputPath;
-                if (!string.IsNullOrEmpty(p) && File.Exists(p))
-                {
-                    if (axesToRun != null)
-                    {
-                        foreach (int ax in axesToRun)
-                            await RunInferenceForCsvAsync(
-                                p, "torque", ax, ct,
-                                windowSize: IdleWindowSize, includeIdle: true)
-                                .ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        await RunInferenceForCsvAsync(
-                            p, "torque", null, ct,
-                            windowSize: IdleWindowSize, includeIdle: true)
-                            .ConfigureAwait(false);
-                    }
-                }
-            }
+            // 토크 Idle 추론 생략:
+            // 토크 AE 모델은 Op=Pos(동작 중) 데이터로만 학습됩니다.
+            // 정지 중 토크는 중력 하중으로 거의 일정 → z-score std≈0 → MAE 폭증 → 오탐.
+            // 토크 이상은 동작 중(Pos) 추론에서만 감지합니다.
         }
 
         // ── CSV → 윈도우 추출 → 추론 ─────────────────────────────────────────
