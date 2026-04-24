@@ -242,7 +242,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         options: FileOptions.SequentialScan);
                     var bs = new BufferedStream(_fsByMod[m], 64 * 1024);
                     // UTF-8, 4KB 내부 버퍼
-                    _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = false };
+                    _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = true };
                     // 헤더
                     var _hdr = new System.Text.StringBuilder("time_s,x,y,z");
                     if (LoggedAxes != null)

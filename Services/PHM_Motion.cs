@@ -529,7 +529,6 @@ namespace PHM_Project_DockPanel.Services
                 int[] _inferAxes = System.Linq.Enumerable.Range(0, _axCntInfer).ToArray();
                 _inferenceService = new ContinuousInferenceService(
                     inferUrl, _accelLogger, _ajinLogger,
-                    getOperation:     GetCurrentOperation,
                     getAxisOperation: GetAxisOperation,
                     axes:             _inferAxes);
                 _inferenceService.Start();
