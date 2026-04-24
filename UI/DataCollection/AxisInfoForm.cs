@@ -930,10 +930,122 @@ namespace PHM_Project_DockPanel.Windows
             grid.SetColumnSpan(btnAlarmClear, 2);
             grid.Controls.Add(btnAlarmClear, 0, 3);
 
+            // ── 전체 축 제어 섹션 ───────────────────────────────────────────
+            var lblAllAxes = new Label
+            {
+                Text = "── 전체 축 제어 ──",
+                AutoSize = true,
+                ForeColor = Color.DimGray,
+                Font = new Font("Segoe UI", 8.5f),
+                Margin = new Padding(0, 12, 0, 4)
+            };
+
+            var gridAll = new TableLayoutPanel
+            {
+                ColumnCount = 2,
+                RowCount = 2,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+            gridAll.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            gridAll.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            gridAll.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            gridAll.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            var btnAllServoOn = new Button
+            {
+                Text = "전체 Servo ON",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 3, 4),
+                BackColor = Color.FromArgb(220, 255, 220)
+            };
+            var btnAllServoOff = new Button
+            {
+                Text = "전체 Servo OFF",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(3, 0, 0, 4),
+                BackColor = Color.FromArgb(255, 240, 220)
+            };
+            var btnAllAlarmClear = new Button
+            {
+                Text = "전체 Alarm Clear",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 0, 0),
+                BackColor = Color.FromArgb(255, 220, 220)
+            };
+
+            btnAllServoOn.Click += (s, e) =>
+            {
+                if (_axisCount <= 0) return;
+                btnAllServoOn.Enabled = false;
+                try
+                {
+                    for (int ax = 0; ax < _axisCount; ax++)
+                        _motion.Controller.SetServo(ax, true);
+                    AppEvents.RaiseLog($"[전체 Servo ON] {_axisCount}축 서보 ON");
+                }
+                catch (Exception ex) { AppEvents.RaiseLog($"[전체 Servo ON] 오류: {ex.Message}"); }
+                finally { btnAllServoOn.Enabled = true; }
+            };
+
+            btnAllServoOff.Click += (s, e) =>
+            {
+                if (_axisCount <= 0) return;
+                btnAllServoOff.Enabled = false;
+                try
+                {
+                    for (int ax = 0; ax < _axisCount; ax++)
+                        _motion.Controller.SetServo(ax, false);
+                    AppEvents.RaiseLog($"[전체 Servo OFF] {_axisCount}축 서보 OFF");
+                }
+                catch (Exception ex) { AppEvents.RaiseLog($"[전체 Servo OFF] 오류: {ex.Message}"); }
+                finally { btnAllServoOff.Enabled = true; }
+            };
+
+            btnAllAlarmClear.Click += async (s, e) =>
+            {
+                if (_axisCount <= 0) return;
+
+                var ajin = _motion?.Controller?.AsAjin;
+                if (ajin == null)
+                {
+                    MessageBox.Show("Alarm Clear는 Ajin 제어기에서만 지원됩니다.",
+                        "전체 Alarm Clear", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                btnAllAlarmClear.Enabled = false;
+                try
+                {
+                    await Task.Run(() =>
+                    {
+                        for (int ax = 0; ax < _axisCount; ax++)
+                            ajin.ClearAlarm(ax);
+                    });
+                    AppEvents.RaiseLog($"[전체 Alarm Clear] {_axisCount}축 알람 클리어");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"알람 클리어 실패: {ex.Message}", "오류",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally { btnAllAlarmClear.Enabled = true; }
+            };
+
+            gridAll.Controls.Add(btnAllServoOn,    0, 0);
+            gridAll.Controls.Add(btnAllServoOff,   1, 0);
+            gridAll.SetColumnSpan(btnAllAlarmClear, 2);
+            gridAll.Controls.Add(btnAllAlarmClear, 0, 1);
+
             root.Controls.Add(lblCheckedAxes);
             root.Controls.Add(lblTarget);
             root.Controls.Add(numTarget);
             root.Controls.Add(grid);
+            root.Controls.Add(lblAllAxes);
+            root.Controls.Add(gridAll);
 
             return root;
         }

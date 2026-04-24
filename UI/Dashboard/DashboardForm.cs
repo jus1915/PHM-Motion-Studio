@@ -411,8 +411,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double ema, int count)>
             _scoreBaseline = new System.Collections.Concurrent.ConcurrentDictionary<string, (double, int)>();
         private const double SpikeEmaAlpha  = 0.1;  // EMA 감쇠율 (느릴수록 베이스라인 안정적)
-        private const double SpikeFactor    = 2.0;  // EMA 대비 이 배수 이상이면 spike 판정
-        private const int    SpikeWarmup    = 10;   // 워밍업 후 spike 판정 시작
+        private const double SpikeFactor    = 4.0;  // EMA 대비 이 배수 이상이면 spike 판정
+                                                    // (2.0 → 오탐 과다: 가감속 구간 score가 ema×2 초과 빈발)
+        private const int    SpikeWarmup    = 30;   // 워밍업 후 spike 판정 시작 (충분한 베이스라인 수집)
+
+        // ── 위험/경고 등급 임계 배수 (normScore = rawScore / threshold 기준) ──
+        // normScore ∈ [WarnMultiplier, DangerMultiplier) → 경고
+        // normScore ≥ DangerMultiplier                   → 위험
+        private const double WarnMultiplier   = 1.0;  // 임계값 초과 즉시 경고
+        private const double DangerMultiplier = 2.0;  // 임계값의 2배 이상이면 위험
+
+        // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
+        // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
+        // 이상 판정(threshAnomaly/spikeAnomaly)은 raw score 기반으로 유지.
+        // alpha=0.3: 약 4~5 윈도우(~500ms) 내에 새 값으로 수렴
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
+            _chartEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        private const double ChartEmaAlpha = 0.3;
 
         // DB 모드 UI 컨트롤
         private RadioButton rbtnCsvMode, rbtnDbMode;
@@ -590,11 +605,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // 서버 실시간 추론 결과 구독
             AppEvents.InferenceResultReceived += OnLiveInferenceResult;
+            AppEvents.LoopCompleted           += OnLoopCompleted;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             AppEvents.InferenceResultReceived -= OnLiveInferenceResult;
+            AppEvents.LoopCompleted           -= OnLoopCompleted;
             SaveAxisThresholds();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
@@ -4607,7 +4624,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 정규화 스코어를 차트 큐에 추가 (score / threshold → 임계선 항상 1.0)
             double axThr      = _axisThresholds.TryGetValue(key, out double t) ? t : 1.0;
             double normScore  = axThr > 0 ? (double)result.AnomalyScore / axThr : (double)result.AnomalyScore;
-            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, normScore));
+
+            // EMA 평활화 적용 (차트 노이즈 감소 — 이상 판정은 rawScore 기반으로 별도 수행)
+            double prevEma    = _chartEma.GetOrAdd(key, normScore);
+            double smoothed   = ChartEmaAlpha * normScore + (1.0 - ChartEmaAlpha) * prevEma;
+            _chartEma[key]    = smoothed;
+
+            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, smoothed));
             while (_liveScoreQueue.Count > 1200)
             {
                 Tuple<string, DateTime, double> _discard;
@@ -4639,8 +4662,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 double ema   = baseline.ema;
                 int    cnt   = baseline.count;
                 bool   spikeAnomaly = cnt >= SpikeWarmup && rawScore > ema * SpikeFactor;
-                // EMA 업데이트: spike 구간은 베이스라인을 오염시키지 않도록 정상일 때만 반영
-                double newEma = spikeAnomaly ? ema : ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
+                // EMA 업데이트: 항상 반영 (스파이크 구간만 제외하면 베이스라인이 낮게 고착됨)
+                double newEma = ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
                 _scoreBaseline[key] = (newEma, cnt + 1);
 
                 bool   anomaly    = threshAnomaly || spikeAnomaly;
@@ -4669,12 +4692,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
                 if (anomaly)
                 {
-                    cntDanger++;
-                    cardDanger.ValueText = cntDanger + " 건";
+                    // normScore 기준으로 위험/경고 등급 분류
+                    // spike-only 이상(normScore < DangerMultiplier)은 경고로 처리
+                    bool isDanger = normScore >= DangerMultiplier;
+
                     string spikeInfo = spikeAnomaly && !threshAnomaly
                         ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
+                    string levelTag = isDanger ? "🔴 위험" : "🟡 경고";
+
+                    if (isDanger)
+                    {
+                        cntDanger++;
+                        cardDanger.ValueText = cntDanger + " 건";
+                    }
+                    else
+                    {
+                        cntWarning++;
+                        cardWarning.ValueText = cntWarning + " 건";
+                    }
+
                     AppendEventLog(
-                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {displayName} 이상{spikeTag}  " +
+                        $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
                         $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}{spikeInfo}");
                     rows.Add(new EventRow
                     {
@@ -4682,10 +4720,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         Axis         = result.Axis ?? (isAccel ? -1 : -2),
                         AnomalyScore = Math.Round(result.AnomalyScore, 4),
                         Threshold    = Math.Round(result.Threshold, 4),
-                        Alarm        = displayName + " 이상" + spikeTag + cls
+                        Alarm        = levelTag + " " + displayName + " 이상" + spikeTag + cls
                     });
                     if (rows.Count > 500) rows.RemoveAt(0);
                 }
+            }));
+        }
+
+        /// <summary>
+        /// Teaching Sequence 한 회차 완료 → 설비 사용률(cycles) 카드 갱신
+        /// </summary>
+        private void OnLoopCompleted(int count)
+        {
+            cycles = count;
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                cardCycles.ValueText = cycles + " 회";
             }));
         }
 
