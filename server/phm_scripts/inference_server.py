@@ -313,12 +313,15 @@ def predict(req: PredictRequest):
                 rms_norm = 0.0
 
             # ── sensor별 설정 ─────────────────────────
+            # TH_SCALE : score = mae / (thr * TH_SCALE) + RMS_WEIGHT * rms_norm
+            #   낮을수록 민감 (정상 MAE 대비 적은 배율 증가만으로도 score≥1.0 도달)
+            # RMS_WEIGHT : 진동 진폭 기여도. 볼트 이완·구조 느슨함 등 진폭 변화에 민감
             if req.sensor_type == "accel":
-                TH_SCALE = 2.5
-                RMS_WEIGHT = 0.15
+                TH_SCALE  = 2.0   # 2.5 → 2.0: 정상 MAE의 2배면 감지 (기존 2.5배)
+                RMS_WEIGHT = 0.25  # 0.15 → 0.25: 진폭 변화 비중 확대
                 ANOMALY_THRESHOLD = 1.5
             else:
-                TH_SCALE = 1.8
+                TH_SCALE  = 1.6   # 1.8 → 1.6: 소폭 민감도 향상
                 RMS_WEIGHT = 0.15
                 ANOMALY_THRESHOLD = 1.3
 
