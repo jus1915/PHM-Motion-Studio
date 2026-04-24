@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -85,7 +85,6 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 string op = GetCurrentOp();
 
-                // ✅ Idle 상태 → 아무 것도 안 함
                 if (op == "Idle")
                 {
                     try { await Task.Delay(100, ct); }
@@ -104,12 +103,12 @@ namespace PHM_Project_DockPanel.Services.Core
                 int? axis = _lastMovingAxis;
 
                 // ── 가속도 ───────────────────────
-                if (_accelLogger?.IsRunning == true)
+                if (_accelLogger != null && _accelLogger.IsRunning)
                 {
-                    var paths = _accelLogger.CsvPathByModule;
+                    string[] paths = _accelLogger.CsvPathByModule;
                     if (paths != null)
                     {
-                        foreach (var p in paths)
+                        foreach (string p in paths)
                         {
                             if (string.IsNullOrEmpty(p) || !File.Exists(p))
                                 continue;
@@ -121,9 +120,9 @@ namespace PHM_Project_DockPanel.Services.Core
                 }
 
                 // ── 토크 ─────────────────────────
-                if (_torqueLogger?.IsLogging == true)
+                if (_torqueLogger != null && _torqueLogger.IsLogging)
                 {
-                    var p = _torqueLogger.OutputPath;
+                    string p = _torqueLogger.OutputPath;
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
                         await RunInference(p, "torque", axis, ct);
                 }
@@ -136,60 +135,70 @@ namespace PHM_Project_DockPanel.Services.Core
             int? axis,
             CancellationToken ct)
         {
-            var (window, nCh) = ReadLastWindow(csvPath, sensorType, WindowSize, axis);
+            int nCh;
+            float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh);
             if (window == null) return;
 
             // ── /predict/combined 호출 (AE 이상탐지 + CLS 결함진단 동시) ────
-            var combined = await _client.PredictCombinedAsync(
+            CombinedInferenceResult combined = await _client.PredictCombinedAsync(
                 window, WindowSize, nCh, sensorType, axis, ct);
 
             if (combined.IsError)
             {
                 // combined 엔드포인트 실패(구버전 서버 등) → /predict 폴백
-                var fallback = await _client.PredictAsync(
+                InferenceResult fallback = await _client.PredictAsync(
                     window, WindowSize, nCh, sensorType, axis, ct);
                 AppEvents.RaiseInferenceResult(sensorType, fallback);
                 return;
             }
 
-            // AE 결과 발행 (기존 DashboardForm 등 InferenceResultReceived 구독자용)
+            // AE 결과 발행 (기존 InferenceResultReceived 구독자용)
             AppEvents.RaiseInferenceResult(sensorType, combined.ToAeResult());
 
             // CLS 결과 발행 (ClsAvailable=false 이면 "모델 없음" 상태로 발행)
             AppEvents.RaiseClsInferenceResult(sensorType, combined);
         }
 
-        private static (float[] window, int nChannels) ReadLastWindow(
-    string csvPath,
-    string sensorType,
-    int windowSize,
-    int? axis = null)
+        /// <summary>
+        /// CSV 끝 windowSize 행에서 신호 윈도우를 읽습니다.
+        /// 성공 시 float 배열 반환, 실패 시 null.
+        /// </summary>
+        private static float[] ReadLastWindow(
+            string csvPath,
+            string sensorType,
+            int windowSize,
+            int? axis,
+            out int nChannels)
         {
+            nChannels = 0;
             try
             {
                 string[] lines;
-
-                using (var fs = new FileStream(csvPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                using (var sr = new StreamReader(fs))
+                using (FileStream fs = new FileStream(
+                    csvPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (StreamReader sr = new StreamReader(fs))
+                {
                     lines = sr.ReadToEnd()
-                        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        .Split(new char[] { '\r', '\n' },
+                               StringSplitOptions.RemoveEmptyEntries);
+                }
 
-                if (lines.Length < 2) return (null, 0);
+                if (lines.Length < 2) return null;
 
                 string[] headers = lines[0].Split(',');
 
                 int[] signalCols = GetSignalColumnIndices(headers, sensorType, axis);
-                if (signalCols.Length == 0) return (null, 0);
+                if (signalCols.Length == 0) return null;
 
+                // Op 컬럼 인덱스 탐색
                 int targetOpCol = -1;
-
                 if (axis.HasValue)
                 {
-                    string opName = $"Op_Ax{axis.Value}";
-
+                    string opName = "Op_Ax" + axis.Value.ToString();
                     for (int i = 0; i < headers.Length; i++)
                     {
-                        if (string.Equals(headers[i].Trim(), opName, StringComparison.OrdinalIgnoreCase))
+                        if (string.Equals(headers[i].Trim(), opName,
+                                StringComparison.OrdinalIgnoreCase))
                         {
                             targetOpCol = i;
                             break;
@@ -198,10 +207,10 @@ namespace PHM_Project_DockPanel.Services.Core
                 }
                 else
                 {
-                    // fallback (거의 안씀)
                     for (int i = 0; i < headers.Length; i++)
                     {
-                        if (string.Equals(headers[i].Trim(), "Op", StringComparison.OrdinalIgnoreCase))
+                        if (string.Equals(headers[i].Trim(), "Op",
+                                StringComparison.OrdinalIgnoreCase))
                         {
                             targetOpCol = i;
                             break;
@@ -209,65 +218,68 @@ namespace PHM_Project_DockPanel.Services.Core
                     }
                 }
 
-                var dataLines = lines.Skip(1)
-                    .Where(line =>
-                    {
-                        if (targetOpCol < 0) return true;
-
-                        var cols = line.Split(',');
-                        if (targetOpCol >= cols.Length) return false;
-
-                        return string.Equals(
-                            cols[targetOpCol].Trim(),
-                            "Pos",
-                            StringComparison.OrdinalIgnoreCase);
-                    })
-                    .ToArray();
-
-                if (dataLines.Length < windowSize)
-                    return (null, 0);
-
-                var slice = dataLines.Skip(dataLines.Length - windowSize).ToArray();
-
-                int nCh = signalCols.Length;
-                float[] w = new float[windowSize * nCh];
-
-                int idx = 0;
-
-                foreach (var row in slice)
+                // Pos 행만 필터
+                List<string> dataLines = new List<string>();
+                for (int li = 1; li < lines.Length; li++)
                 {
-                    var cols = row.Split(',');
-
-                    foreach (var ci in signalCols)
+                    string line = lines[li];
+                    if (targetOpCol < 0)
                     {
-                        if (ci < cols.Length &&
-                            float.TryParse(cols[ci], NumberStyles.Float,
-                                CultureInfo.InvariantCulture, out float v))
-                        {
-                            w[idx] = v;
-                        }
-
-                        idx++;
+                        dataLines.Add(line);
+                        continue;
+                    }
+                    string[] cols = line.Split(',');
+                    if (targetOpCol < cols.Length &&
+                        string.Equals(cols[targetOpCol].Trim(), "Pos",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        dataLines.Add(line);
                     }
                 }
 
-                return (w, nCh);
+                if (dataLines.Count < windowSize) return null;
+
+                int startIdx = dataLines.Count - windowSize;
+                int nCh = signalCols.Length;
+                float[] w = new float[windowSize * nCh];
+
+                int wIdx = 0;
+                for (int ri = startIdx; ri < dataLines.Count; ri++)
+                {
+                    string[] cols = dataLines[ri].Split(',');
+                    for (int si = 0; si < signalCols.Length; si++)
+                    {
+                        int ci = signalCols[si];
+                        float v;
+                        if (ci < cols.Length &&
+                            float.TryParse(cols[ci], NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out v))
+                        {
+                            w[wIdx] = v;
+                        }
+                        wIdx++;
+                    }
+                }
+
+                nChannels = nCh;
+                return w;
             }
             catch
             {
-                return (null, 0);
+                return null;
             }
         }
 
-        private static int[] GetSignalColumnIndices(string[] headers, string sensorType, int? axis)
+        private static int[] GetSignalColumnIndices(
+            string[] headers, string sensorType, int? axis)
         {
-            var result = new List<int>();
+            List<int> result = new List<int>();
 
             if (sensorType == "accel")
             {
                 for (int i = 0; i < headers.Length; i++)
                 {
-                    var h = headers[i].ToLower();
+                    string h = headers[i].ToLower();
                     if (h == "x" || h == "y" || h == "z")
                         result.Add(i);
                 }
@@ -276,17 +288,19 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 if (axis.HasValue)
                 {
-                    string target = $"ax{axis}_trq(%)";
+                    string target = "ax" + axis.Value.ToString() + "_trq(%)";
                     for (int i = 0; i < headers.Length; i++)
+                    {
                         if (headers[i].ToLower() == target)
                             result.Add(i);
+                    }
                 }
 
                 if (result.Count == 0)
                 {
                     for (int i = 0; i < headers.Length; i++)
                     {
-                        var h = headers[i].ToLower();
+                        string h = headers[i].ToLower();
                         if (h.Contains("trq") || h.Contains("torque"))
                             result.Add(i);
                     }
@@ -299,7 +313,7 @@ namespace PHM_Project_DockPanel.Services.Core
         public void Dispose()
         {
             Stop();
-            _client?.Dispose();
+            if (_client != null) _client.Dispose();
         }
     }
 }
