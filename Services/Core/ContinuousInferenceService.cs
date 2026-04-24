@@ -22,8 +22,8 @@ namespace PHM_Project_DockPanel.Services.Core
         private CancellationTokenSource _cts;
         private Task _loopTask;
 
-        private const int IntervalMs = 250;
-        private const int WindowSize = 256;
+        private const int IntervalMs = 128;   // stride(128) / sampleRate(1000Hz) × 1000
+        private const int WindowSize = 256;   // 학습 window_size와 동일
 
         private int? _lastMovingAxis = null;
 
