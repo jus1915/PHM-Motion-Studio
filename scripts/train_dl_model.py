@@ -1098,7 +1098,7 @@ def save_meta(
         저장된 _meta.json 경로
     """
     session     = params.get("session", "FD").upper()
-    is_ae       = session == "AD"
+    is_ae       = session in ("AE", "AD")   # AE = 신규, AD = 구버전 호환
     sensor_type = params.get("sensor_type", "accel")
 
     meta = {
