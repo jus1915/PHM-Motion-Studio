@@ -248,71 +248,87 @@ def _read_signal_csv(
     channels: List[str],
     label_column: str,
     filter_op_column: Optional[str] = None,
-) -> Tuple[np.ndarray, Optional[str]]:
-    """단일 CSV 파일에서 채널 신호와 레이블 열을 읽습니다.
+) -> Tuple[List[np.ndarray], Optional[str]]:
+    """단일 CSV 파일에서 연속 Pos 구간별로 분리된 신호 세그먼트와 레이블을 반환합니다.
+
+    Op 컬럼이 Idle로 바뀌는 시점에 구간을 끊어, 서로 다른 동작 구간이
+    하나의 연속 신호로 이어붙여지는 경계 오염을 방지합니다.
 
     Args:
-        path: CSV 파일 경로
-        channels: 사용할 컬럼명 목록
-        label_column: 레이블 컬럼명
+        path           : CSV 파일 경로
+        channels       : 사용할 컬럼명 목록
+        label_column   : 레이블 컬럼명
+        filter_op_column: 특정 Op 컬럼 명시 시 해당 컬럼만 Idle 판별에 사용.
+                          None 이면 Op_Ax* / Op 컬럼 자동 감지 → 모두 Idle일 때 구간 끊기.
 
     Returns:
-        (signal_array, label_str_or_None)
-        signal_array shape (N, len(channels)), NaN 행 제거됨
+        (segments, label_str_or_None)
+        segments : 각 연속 Pos 구간의 np.ndarray (shape (N_i, C)) 목록.
+                   길이 0인 구간은 포함되지 않음.
     """
     import csv as _csv
 
-    rows: List[List[float]] = []
+    segments: List[np.ndarray] = []
+    current_seg: List[List[float]] = []
     label_value: Optional[str] = None
 
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         reader = _csv.DictReader(f)
         if reader.fieldnames is None:
-            return np.empty((0, len(channels)), dtype=np.float32), None
+            return [], None
 
-        # 축 번호 없는 채널명(e.g. "Trq(%)") → 실제 컬럼명(e.g. "Ax0_Trq(%)") 해석
         actual_channels = _resolve_channels(list(reader.fieldnames), channels)
         has_label = label_column in (reader.fieldnames or [])
-        # Op 필터링: filter_op_column 명시 시 해당 컬럼 사용,
-        # 미명시 시 Op_Ax* 또는 레거시 Op 컬럼 자동 감지 → 모두 Idle이면 행 제외
         fieldnames_lower = [f.strip().lower() for f in (reader.fieldnames or [])]
+
         if filter_op_column:
-            # 명시된 컬럼 하나만 사용
             _foc_lower = filter_op_column.strip().lower()
-            _op_cols = [reader.fieldnames[i] for i, f in enumerate(fieldnames_lower) if f == _foc_lower]
+            _op_cols = [reader.fieldnames[i] for i, f in enumerate(fieldnames_lower)
+                        if f == _foc_lower]
         else:
-            # 자동 감지: Op_Ax* 또는 Op
             _op_cols = [reader.fieldnames[i] for i, f in enumerate(fieldnames_lower)
                         if f.startswith("op_ax") or f == "op"]
 
+        def _flush_seg() -> None:
+            if current_seg:
+                segments.append(np.array(current_seg, dtype=np.float32))
+                current_seg.clear()
+
         for row in reader:
-            # Idle 구간 스킵
-            # filter_op_column 명시: 해당 컬럼이 Idle이면 스킵
-            # 자동: 모든 Op 컬럼이 Idle이면 스킵 (하나라도 Pos면 포함)
+            # ── Op 상태 판별 ──────────────────────────────────────────────
+            is_idle = False
             if _op_cols:
                 values_idle = [(row.get(c) or "").strip().lower() == "idle" for c in _op_cols]
                 if filter_op_column:
-                    if values_idle and values_idle[0]:  # 명시 컬럼이 Idle
-                        continue
+                    is_idle = bool(values_idle and values_idle[0])
                 else:
-                    if all(values_idle):  # 모든 컬럼이 Idle
-                        continue
+                    is_idle = all(values_idle)
+
+            if is_idle:
+                _flush_seg()   # 구간 종료
+                continue
+
+            # ── 값 파싱 ───────────────────────────────────────────────────
             try:
                 vals = [float(row[c]) for c in actual_channels]
             except (KeyError, ValueError, TypeError):
+                _flush_seg()   # 파싱 오류도 구간 끊기
                 continue
-            if any(math.isnan(v) or math.isinf(v) for v in vals):
-                continue
-            rows.append(vals)
 
-            # 첫 번째 유효 레이블 값 사용 (파일 전체가 동일 레이블이라고 가정)
+            if any(math.isnan(v) or math.isinf(v) for v in vals):
+                _flush_seg()
+                continue
+
+            current_seg.append(vals)
+
             if has_label and label_value is None:
                 lv = row.get(label_column, "").strip()
                 if lv:
                     label_value = lv
 
-    signal = np.array(rows, dtype=np.float32) if rows else np.empty((0, len(channels)), dtype=np.float32)
-    return signal, label_value
+        _flush_seg()  # 파일 끝 처리
+
+    return segments, label_value
 
 
 def load_windows_from_dir(
@@ -374,8 +390,8 @@ def load_windows_from_dir(
             print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
-        signal, label_str = _read_signal_csv(str(csv_path), channels, label_column,
-                                              filter_op_column=filter_op_column)
+        segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
+                                               filter_op_column=filter_op_column)
 
         # 레이블 결정: CSV 컬럼 → 경로 컴포넌트 → 부모 폴더명
         if label_str is None:
@@ -391,16 +407,31 @@ def load_windows_from_dir(
             skipped += 1
             continue
 
-        if signal.shape[0] < window_size:
+        # 구간별 윈도우 추출 (경계 오염 방지)
+        file_windows: List[Tuple[np.ndarray, int]] = []
+        short_segs = 0
+        for seg in segments:
+            if seg.shape[0] < window_size:
+                short_segs += 1
+                continue
+            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+
+        if not file_windows:
             print(
-                f"[data] 경고: 샘플 수 {signal.shape[0]} < window_size {window_size}, 건너뜁니다 — {csv_path.name}",
+                f"[data] 경고: 유효 구간 없음 (전체 {len(segments)}구간, "
+                f"window_size={window_size} 미만 {short_segs}개) — {csv_path.name}",
                 file=sys.stderr,
             )
             skipped += 1
             continue
 
-        windows = _extract_windows(signal, label_int, window_size, stride, normalize=normalize)
-        all_windows.extend(windows)
+        if short_segs:
+            print(
+                f"[data] {csv_path.name}: {len(segments)}구간 중 {short_segs}개 스킵 "
+                f"(window_size={window_size} 미만), {len(file_windows)}개 윈도우 추출",
+                file=sys.stderr,
+            )
+        all_windows.extend(file_windows)
 
     # 클래스별 윈도우 수 진단 출력
     cls_dist: Dict[str, int] = {}
@@ -459,8 +490,8 @@ def load_windows_from_file_list(
             skipped += 1
             continue
 
-        signal, csv_label = _read_signal_csv(path, channels, label_column,
-                                             filter_op_column=filter_op_column)
+        segments, csv_label = _read_signal_csv(path, channels, label_column,
+                                              filter_op_column=filter_op_column)
 
         # 레이블 우선순위: entry["label"] > CSV 내 label_column
         label_str = forced_label if forced_label else (csv_label or "")
@@ -469,16 +500,25 @@ def load_windows_from_file_list(
             skipped += 1
             continue
 
-        if signal.shape[0] < window_size:
+        # 구간별 윈도우 추출 (경계 오염 방지)
+        file_windows: List[Tuple[np.ndarray, int]] = []
+        short_segs = 0
+        for seg in segments:
+            if seg.shape[0] < window_size:
+                short_segs += 1
+                continue
+            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+
+        if not file_windows:
             print(
-                f"[data] 경고: 샘플 수 {signal.shape[0]} < window_size {window_size}, 건너뜁니다 — {Path(path).name}",
+                f"[data] 경고: 유효 구간 없음 (전체 {len(segments)}구간, "
+                f"window_size={window_size} 미만 {short_segs}개) — {Path(path).name}",
                 file=sys.stderr,
             )
             skipped += 1
             continue
 
-        windows = _extract_windows(signal, label_int, window_size, stride, normalize=normalize)
-        all_windows.extend(windows)
+        all_windows.extend(file_windows)
 
     print(
         f"[data] 파일 목록 로드 완료: {len(csv_files) - skipped}개 파일, "
