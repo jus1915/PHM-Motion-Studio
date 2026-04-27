@@ -1097,8 +1097,10 @@ def save_meta(
     Returns:
         저장된 _meta.json 경로
     """
-    session     = params.get("session", "FD").upper()
-    is_ae       = session in ("AE", "AD")   # AE = 신규, AD = 구버전 호환
+    session     = params.get("session", "CLS").upper()
+    # 구버전 호환: AD → AE, FD → CLS
+    session     = {"AD": "AE", "FD": "CLS"}.get(session, session)
+    is_ae       = session == "AE"           # AE: 이상탐지, CLS: 결함진단
     sensor_type = params.get("sensor_type", "accel")
 
     meta = {
@@ -1281,10 +1283,12 @@ def main() -> None:
     stride: int = int(params.get("stride", 512))
 
     session_raw = params.get("session", "CLS").upper()
-    # 구버전 호환: AD → AE,  FD → CLS
+    # 구버전 호환: AD → AE, FD → CLS
     _SESSION_ALIAS = {"AD": "AE", "FD": "CLS"}
-    session    = _SESSION_ALIAS.get(session_raw, session_raw)
-    is_ae      = session == "AE"
+    session = _SESSION_ALIAS.get(session_raw, session_raw)
+    if session != session_raw:
+        print(f"[main] session 별칭 변환: {session_raw!r} → {session!r}  (AE=이상탐지, CLS=결함진단)", file=sys.stderr)
+    is_ae = session == "AE"
     n_channels = len(channels)
     n_classes  = len(class_names)
 
@@ -1388,8 +1392,8 @@ def main() -> None:
             file=sys.stderr,
         )
         is_ae   = True
-        session = "AD"
-        params["session"] = "AD"
+        session = "AE"
+        params["session"] = "AE"
 
         # AE는 RAW 데이터 필요 (RMS 통계 계산) — normalize=False 로 재로드
         print("[main] AE 모드 데이터 재로드 (normalize=False)...", file=sys.stderr)
