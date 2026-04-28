@@ -45,6 +45,12 @@ namespace PHM_Project_DockPanel.Windows
         private Label _lblRealtimeStatus;
         private Label _lblDaqStatus;
 
+        // ── CLS 결함 진단 상태 배지 라벨 ──
+        private Label _lblClsNormal;
+        private Label _lblClsOverload;
+        private Label _lblClsLooseBolt;
+        private Label _lblClsOverspeed;
+
         // (선택) 외부에서 접근할 수 있도록 공개 프로퍼티
         public CheckBox AccelCheckBox => _chkAccelCollect;
         public CheckBox TorqueCheckBox => _chkTorqueCollect;
@@ -144,6 +150,28 @@ namespace PHM_Project_DockPanel.Windows
             leftStatusPanel.Controls.Add(lblStatus);
             leftStatusPanel.Controls.Add(_lblRealtimeStatus);
             leftStatusPanel.Controls.Add(_lblDaqStatus);
+
+            // ── CLS 결함 진단 배지 ──────────────────────────────────────
+            _lblClsNormal    = CreateClsBadge("Normal");
+            _lblClsOverload  = CreateClsBadge("Overload");
+            _lblClsLooseBolt = CreateClsBadge("Loose Bolt");
+            _lblClsOverspeed = CreateClsBadge("Overspeed");
+
+            var clsBadgePanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0, 4, 0, 0),
+                Padding = new Padding(0)
+            };
+            clsBadgePanel.Controls.Add(_lblClsNormal);
+            clsBadgePanel.Controls.Add(_lblClsOverload);
+            clsBadgePanel.Controls.Add(_lblClsLooseBolt);
+            clsBadgePanel.Controls.Add(_lblClsOverspeed);
+
+            leftStatusPanel.Controls.Add(clsBadgePanel);
 
             // ===== (우측) 체크박스 + Connect/Disconnect 버튼: 가로 정렬 =====
             var rightControlPanel = new FlowLayoutPanel
@@ -440,13 +468,20 @@ namespace PHM_Project_DockPanel.Windows
                 // 추론 결과 이벤트 구독
                 AppEvents.InferenceResultReceived -= OnInferenceResult;
                 AppEvents.InferenceResultReceived += OnInferenceResult;
+
+                // CLS 결함 진단 이벤트 구독
+                AppEvents.ClsInferenceResultReceived -= OnClsInferenceResult;
+                AppEvents.ClsInferenceResultReceived += OnClsInferenceResult;
             }
             else
             {
                 AppEvents.InferenceResultReceived -= OnInferenceResult;
+                AppEvents.ClsInferenceResultReceived -= OnClsInferenceResult;
 
                 _lblDaqStatus.Text      = "DAQ 상태: 대기 중";
                 _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateGray;
+
+                ResetClsBadges();
             }
         }
 
@@ -483,6 +518,81 @@ namespace PHM_Project_DockPanel.Windows
             _lblDaqStatus.ForeColor = result.IsAnomaly
                 ? System.Drawing.Color.OrangeRed
                 : System.Drawing.Color.DarkGreen;
+        }
+
+        // ── CLS 결함 진단 배지 핸들러 ────────────────────────────────────
+        private void OnClsInferenceResult(
+            string sensorType,
+            PHM_Project_DockPanel.Services.Core.CombinedInferenceResult result)
+        {
+            if (result == null || result.IsError || !result.ClsAvailable) return;
+
+            if (InvokeRequired)
+            {
+                BeginInvoke(
+                    new Action<string, PHM_Project_DockPanel.Services.Core.CombinedInferenceResult>(OnClsInferenceResult),
+                    sensorType, result);
+                return;
+            }
+
+            // per-axis 결과: 선택 축과 다르면 무시 (null = 전역)
+            if (result.Axis.HasValue && _selectedAxis >= 0 && result.Axis.Value != _selectedAxis)
+                return;
+
+            ResetClsBadges();
+
+            string cls = (result.ClsClassName ?? "").ToLowerInvariant()
+                                                     .Replace(" ", "_")
+                                                     .Replace("-", "_");
+
+            if (cls == "normal" || cls == "")
+            {
+                _lblClsNormal.BackColor    = System.Drawing.Color.MediumSeaGreen;
+                _lblClsNormal.ForeColor    = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("overload"))
+            {
+                _lblClsOverload.BackColor  = System.Drawing.Color.OrangeRed;
+                _lblClsOverload.ForeColor  = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("loose"))
+            {
+                _lblClsLooseBolt.BackColor = System.Drawing.Color.DarkOrange;
+                _lblClsLooseBolt.ForeColor = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("overspeed"))
+            {
+                _lblClsOverspeed.BackColor = System.Drawing.Color.Firebrick;
+                _lblClsOverspeed.ForeColor = System.Drawing.Color.White;
+            }
+        }
+
+        private void ResetClsBadges()
+        {
+            Label[] badges = new Label[] { _lblClsNormal, _lblClsOverload, _lblClsLooseBolt, _lblClsOverspeed };
+            foreach (Label lbl in badges)
+            {
+                if (lbl == null) continue;
+                lbl.BackColor = System.Drawing.Color.LightGray;
+                lbl.ForeColor = System.Drawing.Color.DimGray;
+            }
+        }
+
+        private static Label CreateClsBadge(string text)
+        {
+            return new Label
+            {
+                Text        = text,
+                AutoSize    = false,
+                Width       = 78,
+                Height      = 22,
+                TextAlign   = ContentAlignment.MiddleCenter,
+                BackColor   = System.Drawing.Color.LightGray,
+                ForeColor   = System.Drawing.Color.DimGray,
+                Font        = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                BorderStyle = BorderStyle.FixedSingle,
+                Margin      = new Padding(2, 2, 2, 0)
+            };
         }
 
         // 레거시-신규 동기화
