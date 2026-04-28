@@ -221,7 +221,8 @@ namespace PHM_Project_DockPanel.Windows
             };
             _cmbLabel.Items.AddRange(new object[]
             {
-                "", "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness"
+                "", "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness",
+                "overload", "overspeed"
             });
             _cmbLabel.SelectedIndex = 0;
             _cmbLabel.TextChanged += (s, e) =>
