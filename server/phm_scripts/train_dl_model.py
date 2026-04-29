@@ -132,30 +132,85 @@ def _zscore_normalize(window: np.ndarray) -> np.ndarray:
     return ((window - mean) / std).astype(np.float32)
 
 
+def _add_fft_channels(window: np.ndarray) -> np.ndarray:
+    """(T, C) → (T, 2C): 채널별 FFT 크기 스펙트럼을 추가 채널로 붙입니다.
+
+    FFT 크기 스펙트럼(T//2+1, C)을 선형 보간으로 T 길이로 맞춘 뒤
+    원본 시간 도메인 채널 뒤에 이어 붙입니다.
+    AE가 주파수 도메인 이상(imbalance 고조파 등)을 포착할 수 있도록 합니다.
+
+    Args:
+        window: shape (T, C) float32 배열
+
+    Returns:
+        shape (T, 2C) float32 배열.
+        앞 C채널: 원본 시간 도메인, 뒤 C채널: FFT 크기 스펙트럼
+    """
+    T, C = window.shape
+    fft_mag = np.abs(np.fft.rfft(window, axis=0))   # (T//2+1, C)
+    fft_len = fft_mag.shape[0]
+    x_old   = np.linspace(0.0, 1.0, fft_len)
+    x_new   = np.linspace(0.0, 1.0, T)
+    fft_resized = np.stack(
+        [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C)],
+        axis=1,
+    ).astype(np.float32)
+    return np.concatenate([window, fft_resized], axis=1)   # (T, 2C)
+
+
 def _extract_windows(
     signal: np.ndarray,
     label_int: int,
     window_size: int,
     stride: int,
     normalize: bool = True,
+    add_fft: bool = False,
+    add_derivative: bool = False,
+    add_abs: bool = False,
 ) -> List[Tuple[np.ndarray, int]]:
     """슬라이딩 윈도우로 (window_array, label_int) 튜플 목록을 생성합니다.
 
+    모든 추가 채널(abs, derivative, FFT)은 원본 C채널에 대해서만 계산되어 뒤에 이어 붙습니다.
+    최종 채널 수: C × (1 + add_abs + add_derivative + add_fft)
+
     Args:
-        signal:     shape (N, C) float32 배열
-        label_int:  정수 레이블
-        window_size: 윈도우 샘플 수 T
-        stride:     슬라이딩 스트라이드
-        normalize:  True이면 윈도우별 z-score 정규화 (CLS 용).
-                    AE는 False — 절대 진폭/에너지 정보를 보존해야 이상 탐지가 가능.
+        signal:         shape (N, C) float32 배열
+        label_int:      정수 레이블
+        window_size:    윈도우 샘플 수 T
+        stride:         슬라이딩 스트라이드
+        normalize:      True이면 윈도우별 z-score 정규화.
+                        global_normalize 사용 시 False로 설정.
+        add_fft:        원본 채널의 FFT 크기 스펙트럼 추가.
+        add_derivative: 원본 채널의 1차 차분 추가 — looseness 링잉(jerk 시점 진동) 포착.
+        add_abs:        원본 채널의 절댓값 추가 — 방향 독립적 진폭 특성.
 
     Returns:
-        [(window_np, label_int), ...] — 각 window_np shape (T, C)
+        [(window_np, label_int), ...] — 각 window_np shape (T, C_out)
     """
     results: List[Tuple[np.ndarray, int]] = []
     n_samples = signal.shape[0]
     for start in range(0, n_samples - window_size + 1, stride):
-        window = signal[start : start + window_size].copy()
+        base = signal[start : start + window_size].copy()  # (T, C)
+        C_orig = base.shape[1]
+        extras = [base]
+        if add_abs:
+            extras.append(np.abs(base))
+        if add_derivative:
+            deriv = np.empty_like(base)
+            deriv[0] = 0.0
+            deriv[1:] = base[1:] - base[:-1]
+            extras.append(deriv)
+        if add_fft:
+            fft_mag = np.abs(np.fft.rfft(base, axis=0))   # (T//2+1, C)
+            fft_len = fft_mag.shape[0]
+            x_old   = np.linspace(0.0, 1.0, fft_len)
+            x_new   = np.linspace(0.0, 1.0, window_size)
+            fft_resized = np.stack(
+                [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C_orig)],
+                axis=1,
+            ).astype(np.float32)
+            extras.append(fft_resized)
+        window = np.concatenate(extras, axis=1).astype(np.float32)
         if normalize:
             window = _zscore_normalize(window)
         results.append((window, label_int))
@@ -341,6 +396,9 @@ def load_windows_from_dir(
     sensor_type: str = "",
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
+    add_fft: bool = False,
+    add_derivative: bool = False,
+    add_abs: bool = False,
 ) -> List[Tuple[np.ndarray, int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
@@ -414,7 +472,9 @@ def load_windows_from_dir(
             if seg.shape[0] < window_size:
                 short_segs += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+            file_windows.extend(_extract_windows(seg, label_int, window_size, stride,
+                                                  normalize=normalize, add_fft=add_fft,
+                                                  add_derivative=add_derivative, add_abs=add_abs))
 
         if not file_windows:
             print(
@@ -463,6 +523,9 @@ def load_windows_from_file_list(
     stride: int,
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
+    add_fft: bool = False,
+    add_derivative: bool = False,
+    add_abs: bool = False,
 ) -> List[Tuple[np.ndarray, int]]:
     """명시적 파일 목록에서 윈도우를 추출합니다.
 
@@ -507,7 +570,9 @@ def load_windows_from_file_list(
             if seg.shape[0] < window_size:
                 short_segs += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+            file_windows.extend(_extract_windows(seg, label_int, window_size, stride,
+                                                  normalize=normalize, add_fft=add_fft,
+                                                  add_derivative=add_derivative, add_abs=add_abs))
 
         if not file_windows:
             print(
@@ -552,57 +617,91 @@ class WindowDataset(Dataset):
 
 # ── 1D-CNN 모델 ──────────────────────────────────────────────────────────────
 
+class _SEBlock1D(nn.Module):
+    """Squeeze-and-Excitation 채널 어텐션 블록."""
+
+    def __init__(self, channels: int, ratio: int = 8) -> None:
+        super().__init__()
+        mid = max(1, channels // ratio)
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(channels, mid),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, T)
+        return x * self.se(x).unsqueeze(-1)
+
+
+class _ResBlock1D(nn.Module):
+    """Pre-activation Residual Block with SE attention."""
+
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int = 3, stride: int = 1) -> None:
+        super().__init__()
+        pad = kernel_size // 2
+        self.block = nn.Sequential(
+            nn.BatchNorm1d(in_ch), nn.ReLU(inplace=True),
+            nn.Conv1d(in_ch, out_ch, kernel_size, stride=stride, padding=pad, bias=False),
+            nn.BatchNorm1d(out_ch), nn.ReLU(inplace=True),
+            nn.Conv1d(out_ch, out_ch, kernel_size, padding=pad, bias=False),
+            _SEBlock1D(out_ch),
+        )
+        self.shortcut = (
+            nn.Conv1d(in_ch, out_ch, 1, stride=stride, bias=False)
+            if in_ch != out_ch or stride != 1 else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x) + self.shortcut(x)
+
+
 class CNN1DClassifier(nn.Module):
-    """PHM 진동/토크 신호 분류용 1D-CNN.
+    """PHM 진동/토크 신호 분류용 Residual 1D-CNN with SE Attention.
 
     입력 포맷: (B, T, C) — channels last (C# 대시보드와 동일).
-    내부적으로 (B, C, T)로 변환 후 Conv1d 블록을 통과합니다.
 
     아키텍처 (n_windows에 따라 자동 선택):
-        tiny  (<300)  : Conv(C→32) → Conv(32→64)  → GAP → FC
-        small (<1000) : Conv(C→32) → Conv(32→64)  → Conv(64→128) → GAP → FC
-        full  (≥1000) : Conv(C→32) → ... → Conv(128→256) → GAP → FC
+        tiny  (<300)  : stem → ResBlock×1 → GAP → Dropout → FC
+        small (<1000) : stem → ResBlock×2 (MaxPool 사이) → GAP → Dropout → FC
+        full  (≥1000) : stem → ResBlock×4 (MaxPool 사이) → GAP → Dropout → FC
     """
 
     def __init__(self, n_channels: int, n_classes: int, n_windows: int = 9999) -> None:
         super().__init__()
-
+        self.stem = nn.Sequential(
+            nn.Conv1d(n_channels, 32, kernel_size=7, padding=3, bias=False),
+            nn.BatchNorm1d(32), nn.ReLU(inplace=True),
+        )
         if n_windows < 300:
-            # tiny: 2블록 — 소규모 데이터셋용
-            layers = [
-                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(32, 64, kernel_size=5, padding=2),
-                nn.BatchNorm1d(64), nn.ReLU(inplace=True),
-            ]
+            self.blocks = nn.Sequential(
+                _ResBlock1D(32, 64, kernel_size=5),
+            )
             fc_in = 64
         elif n_windows < 1000:
-            # small: 3블록 — 중규모 데이터셋용
-            layers = [
-                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(32, 64, kernel_size=5, padding=2),
-                nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(64, 128, kernel_size=3, padding=1),
-                nn.BatchNorm1d(128), nn.ReLU(inplace=True),
-            ]
+            self.blocks = nn.Sequential(
+                _ResBlock1D(32, 64, kernel_size=5),
+                nn.MaxPool1d(2),
+                _ResBlock1D(64, 128, kernel_size=3),
+            )
             fc_in = 128
         else:
-            # full: 4블록 — 대규모 데이터셋용
-            layers = [
-                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(32, 64, kernel_size=5, padding=2),
-                nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(64, 128, kernel_size=3, padding=1),
-                nn.BatchNorm1d(128), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(128, 256, kernel_size=3, padding=1),
-                nn.BatchNorm1d(256), nn.ReLU(inplace=True),
-            ]
+            self.blocks = nn.Sequential(
+                _ResBlock1D(32, 64, kernel_size=5),
+                nn.MaxPool1d(2),
+                _ResBlock1D(64, 128, kernel_size=3),
+                nn.MaxPool1d(2),
+                _ResBlock1D(128, 256, kernel_size=3),
+                nn.MaxPool1d(2),
+                _ResBlock1D(256, 256, kernel_size=3),
+            )
             fc_in = 256
 
-        self.conv_blocks = nn.Sequential(*layers)
         self.pool = nn.AdaptiveAvgPool1d(1)
+        self.dropout = nn.Dropout(0.3)
         self.classifier = nn.Linear(fc_in, n_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -614,12 +713,12 @@ class CNN1DClassifier(nn.Module):
         Returns:
             logits: (B, n_classes)
         """
-        # (B, T, C) → (B, C, T)
-        x = x.permute(0, 2, 1)
-        x = self.conv_blocks(x)   # (B, 256, T')
-        x = self.pool(x)          # (B, 256, 1)
-        x = x.squeeze(-1)         # (B, 256)
-        return self.classifier(x) # (B, n_classes)
+        x = x.permute(0, 2, 1)        # (B, C, T)
+        x = self.stem(x)
+        x = self.blocks(x)
+        x = self.pool(x).squeeze(-1)  # (B, fc_in)
+        x = self.dropout(x)
+        return self.classifier(x)
 
 
 # ── AE 전용 Dataset ──────────────────────────────────────────────────────────
@@ -688,16 +787,14 @@ def train_ae(
     windows: List[Tuple[np.ndarray, int]],
     n_channels: int,
     mlflow_run=None,
-) -> Tuple["AE1DCNN", float, int, float, float, float]:
-    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr)를 반환합니다.
+    ae_threshold_percentile: int = 99,
+) -> Tuple["AE1DCNN", float, int, float, float, float, float, np.ndarray, np.ndarray]:
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std)를 반환합니다.
 
     정규화 전략:
-        - 윈도우별 per-sample z-score 로 학습 (형태·주파수 패턴 학습, 수렴 안정).
-        - 진폭(에너지) 이상은 별도 RMS 통계로 감지 → 복합 스코어 사용.
-
-    스코어 = mae_score + alpha * rms_score  (C# 에서 계산)
-        mae_score  = ae_mae  / mae_thr    (형태 이상)
-        rms_score  = max(0, (rms - rms_mean) / rms_std)  (진폭 이상)
+        - 전역(global) 정규화: 훈련 데이터 전체의 채널별 mean/std 로 정규화.
+          → 절대 진폭·에너지 정보가 보존되어 AE 재구성 오차로 이상 탐지 가능.
+        - norm_mean / norm_std 는 _meta.json 에 저장되어 평가 시 동일하게 적용.
     """
     seed = int(params.get("seed", 42))
     torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
@@ -724,8 +821,14 @@ def train_ae(
         file=sys.stderr,
     )
 
-    # ── per-sample z-score 적용 (형태 학습) ─────────────────────────────────
-    windows_norm = [(_zscore_normalize(w), lbl) for w, lbl in windows]
+    # ── 전역 정규화 (진폭 보존) ──────────────────────────────────────────────
+    norm_mean, norm_std = _compute_global_stats(windows)
+    print(
+        f"[train_ae] 전역 정규화 — mean={np.round(norm_mean, 4).tolist()}  "
+        f"std={np.round(norm_std, 4).tolist()}",
+        file=sys.stderr,
+    )
+    windows_norm = _apply_global_norm(windows, norm_mean, norm_std)
 
     # 랜덤 분할 (레이블 불필요)
     n = len(windows_norm)
@@ -796,7 +899,7 @@ def train_ae(
         model.load_state_dict(best_state)
     model.eval()
 
-    # ── MAE 임계값: val 세트 샘플별 MAE의 mean + 2σ ────────────────────────
+    # ── MAE 임계값: val 세트 샘플별 MAE의 percentile ────────────────────────
     per_sample_maes: List[float] = []
     with torch.no_grad():
         for x_batch in val_loader:
@@ -805,17 +908,23 @@ def train_ae(
             per_sample_maes.extend(mae_per.cpu().numpy().tolist())
 
     if per_sample_maes:
-        err_arr   = np.array(per_sample_maes, dtype=np.float64)
-        mae_thr   = float(err_arr.mean() + 2.0 * err_arr.std())
+        err_arr = np.array(per_sample_maes, dtype=np.float64)
+        # 퍼센타일 기반 임계값: mean+2σ보다 분포 형태에 덜 민감하고 해석이 명확함
+        mae_thr = float(np.percentile(err_arr, ae_threshold_percentile))
+        print(
+            f"[train_ae] MAE 임계값 ({ae_threshold_percentile}th pct) = {mae_thr:.6f}  "
+            f"(mean={err_arr.mean():.6f}  std={err_arr.std():.6f})",
+            file=sys.stderr,
+        )
     else:
-        mae_thr   = float(best_val_mae * 2.0)
+        mae_thr = float(best_val_mae * 2.0)
 
     print(
         f"[train_ae] 완료 — best_val_mae={best_val_mae:.6f}  "
         f"mae_thr={mae_thr:.6f}  rms_mean={rms_mean:.4f}  rms_std={rms_std:.4f}  rms_thr={rms_thr:.4f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std
+    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -864,6 +973,7 @@ def train(
     n_classes: int,
     n_channels: int,
     mlflow_run=None,
+    label_smoothing: float = 0.0,
 ) -> Tuple[CNN1DClassifier, float, int]:
     """CNN1D 모델을 학습하고 최적 모델을 반환합니다.
 
@@ -931,11 +1041,13 @@ def train(
     )
 
     model = CNN1DClassifier(n_channels=n_channels, n_classes=n_classes, n_windows=n_windows).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-6
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    # CosineAnnealingWarmRestarts: T_0=30 에폭마다 재시작 — ReduceLROnPlateau보다
+    # 안장점 탈출 능력이 뛰어나고 val 지표 노이즈에 덜 민감함
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=max(1, epochs // 5), T_mult=1, eta_min=1e-6
     )
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     best_val_acc = 0.0
     best_state: dict = {}
@@ -976,8 +1088,7 @@ def train(
         val_acc = correct / total if total > 0 else 0.0
         epochs_trained = epoch
 
-        # LR 스케줄러 업데이트 (val_acc 기준)
-        scheduler.step(val_acc)
+        scheduler.step(epoch + 1)
 
         # stdout JSON 로그 (C# 대시보드 파싱 용도)
         log_line = json.dumps({"epoch": epoch, "loss": round(avg_loss, 6), "val_acc": round(val_acc, 6)})
@@ -1087,12 +1198,17 @@ def save_meta(
     rms_mean: Optional[float] = None,
     rms_thr:  Optional[float] = None,
     rms_std:  Optional[float] = None,
+    norm_mean: Optional[np.ndarray] = None,  # 전역 정규화 채널별 mean (AE 전용)
+    norm_std:  Optional[np.ndarray] = None,  # 전역 정규화 채널별 std  (AE 전용)
+    add_fft_channels: bool = False,
+    add_derivative_channels: bool = False,
+    add_abs_channels: bool = False,
     n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
-    session="AD" (AE) 인 경우 kind=AE-CNN1D, output_name=recon, threshold 포함.
-    session="FD" (CLS) 인 경우 kind=CNN1D, output_name=logits, val_accuracy 포함.
+    session="AE" 인 경우 kind=AE-CNN1D, output_name=recon, threshold/norm_mean/norm_std 포함.
+    session="CLS" 인 경우 kind=CNN1D-CLS, output_name=logits, val_accuracy 포함.
 
     Returns:
         저장된 _meta.json 경로
@@ -1113,16 +1229,25 @@ def save_meta(
         "window_size": int(params.get("window_size", 1024)),
         "input_name":  "input",
         "output_name": "recon" if is_ae else "logits",
-        "standardize_per_sample": True,
+        # norm_mean이 있으면 전역 정규화 → per-sample 불필요
+        "standardize_per_sample": norm_mean is None,
+        "add_fft_channels": add_fft_channels,
+        "add_derivative_channels": add_derivative_channels,
+        "add_abs_channels": add_abs_channels,
         "epochs_trained": epochs_trained,
     }
 
+    # 전역 정규화 통계 — AE/CLS 공통으로 저장 (추론 시 동일 정규화 적용)
+    if norm_mean is not None:
+        meta["norm_mean"] = [round(float(v), 8) for v in norm_mean]
+    if norm_std is not None:
+        meta["norm_std"]  = [round(float(v), 8) for v in norm_std]
+
     if is_ae:
-        meta["val_mae"]   = round(val_mse or 0.0, 6)   # val_mse 인수가 실제로는 val_mae 값
-        meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (z-score 공간)
+        meta["val_mae"]   = round(val_mse or 0.0, 6)
+        meta["threshold"] = round(threshold or 0.0, 6)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
-        # RMS 진폭 이상 감지용 통계 (외력 등 진폭 변화 감지)
         if rms_mean is not None:
             meta["rms_mean"] = round(float(rms_mean), 6)
         if rms_thr is not None:
@@ -1275,12 +1400,19 @@ def main() -> None:
 
     class_names: List[str] = params.get(
         "class_names",
-        ["normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness"],
+        ["normal", "overload", "overspeed", "looseness"],
     )
     label_column: str = params.get("label_column", "Label")
     filter_op_column: Optional[str] = params.get("filter_op_column", None)
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
+
+    add_fft:        bool = bool(params.get("add_fft_channels", False))
+    add_derivative: bool = bool(params.get("add_derivative_channels", False))
+    add_abs:        bool = bool(params.get("add_abs_channels", False))
+    global_normalize: bool = bool(params.get("global_normalize", False))
+    label_smoothing: float = float(params.get("label_smoothing", 0.0))
+    ae_threshold_percentile: int = int(params.get("ae_threshold_percentile", 99))
 
     session_raw = params.get("session", "CLS").upper()
     # 구버전 호환: AD → AE, FD → CLS
@@ -1305,9 +1437,10 @@ def main() -> None:
     # ── 데이터 로드 ───────────────────────────────────────────────────────────
     windows: List[Tuple[np.ndarray, int]] = []
 
-    # AE 학습: windows는 RAW로 전달 (train_ae 내부에서 RMS 통계 계산 후 z-score 적용)
-    # CLS 학습: per-sample z-score 정규화 적용
-    normalize_windows = not is_ae
+    # AE: RAW로 전달 (train_ae 내부에서 RMS 통계 + 전역 z-score 적용)
+    # CLS + global_normalize: RAW로 전달 후 아래에서 전역 정규화 적용
+    # CLS + per-sample: _extract_windows 내부에서 윈도우별 z-score 적용
+    normalize_windows = not is_ae and not global_normalize
 
     if "csv_files" in params and params["csv_files"]:
         windows = load_windows_from_file_list(
@@ -1319,6 +1452,9 @@ def main() -> None:
             stride=stride,
             normalize=normalize_windows,
             filter_op_column=filter_op_column,
+            add_fft=add_fft,
+            add_derivative=add_derivative,
+            add_abs=add_abs,
         )
     elif "data_dir" in params and params["data_dir"]:
         windows = load_windows_from_dir(
@@ -1331,6 +1467,9 @@ def main() -> None:
             sensor_type=params.get("sensor_type", ""),
             normalize=normalize_windows,
             filter_op_column=filter_op_column,
+            add_fft=add_fft,
+            add_derivative=add_derivative,
+            add_abs=add_abs,
         )
     else:
         print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
@@ -1339,6 +1478,19 @@ def main() -> None:
     if len(windows) == 0:
         print(json.dumps({"error": "유효한 윈도우를 하나도 추출하지 못했습니다. 데이터 경로와 채널 설정을 확인하십시오."}))
         sys.exit(1)
+
+    # CLS 전역 정규화: overload처럼 절대 진폭이 핵심인 클래스는 per-sample z-score로
+    # 정규화하면 진폭 정보가 소멸됨 → 전역 통계로 정규화해 진폭 보존
+    norm_mean_cls: Optional[np.ndarray] = None
+    norm_std_cls:  Optional[np.ndarray] = None
+    if not is_ae and global_normalize:
+        norm_mean_cls, norm_std_cls = _compute_global_stats(windows)
+        windows = _apply_global_norm(windows, norm_mean_cls, norm_std_cls)
+        print(
+            f"[main] CLS 전역 정규화 적용 — "
+            f"mean={np.round(norm_mean_cls, 4).tolist()}  std={np.round(norm_std_cls, 4).tolist()}",
+            file=sys.stderr,
+        )
 
     # _resolve_channels 가 채널을 확장했을 수 있으므로 실제 데이터 shape 으로 재설정
     # 예: channels=["Trq(%)"] → Ax0_Trq(%)/Ax1_Trq(%)/Ax2_Trq(%) 3채널로 확장된 경우
@@ -1407,6 +1559,9 @@ def main() -> None:
                 stride=stride,
                 normalize=False,
                 filter_op_column=filter_op_column,
+                add_fft=add_fft,
+                add_derivative=add_derivative,
+                add_abs=add_abs,
             )
         else:
             windows = load_windows_from_dir(
@@ -1419,6 +1574,9 @@ def main() -> None:
                 sensor_type=params.get("sensor_type", ""),
                 normalize=False,
                 filter_op_column=filter_op_column,
+                add_fft=add_fft,
+                add_derivative=add_derivative,
+                add_abs=add_abs,
             )
 
         # 출력 파일명을 AE 용으로 변경
@@ -1444,11 +1602,12 @@ def main() -> None:
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
-        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std = train_ae(
+        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std, norm_mean, norm_std = train_ae(
             params=params,
             windows=windows,
             n_channels=n_channels,
             mlflow_run=mlflow_run,
+            ae_threshold_percentile=ae_threshold_percentile,
         )
 
         export_onnx_ae(
@@ -1471,7 +1630,12 @@ def main() -> None:
             rms_mean=rms_mean,
             rms_thr=rms_thr,
             rms_std=rms_std,
-            n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+            add_fft_channels=add_fft,
+            add_derivative_channels=add_derivative,
+            add_abs_channels=add_abs,
+            n_channels_override=n_channels,
         )
 
         _try_end_mlflow(
@@ -1507,6 +1671,7 @@ def main() -> None:
         n_classes=n_classes,
         n_channels=n_channels,
         mlflow_run=mlflow_run,
+        label_smoothing=label_smoothing,
     )
 
     # ── ONNX 내보내기 ─────────────────────────────────────────────────────────
@@ -1527,7 +1692,12 @@ def main() -> None:
         epochs_trained=epochs_trained,
         mlflow_run_id=mlflow_run.info.run_id if mlflow_run else None,
         mlflow_tracking_uri=mlflow_tracking_uri or None,
-        n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
+        add_fft_channels=add_fft,
+        add_derivative_channels=add_derivative,
+        add_abs_channels=add_abs,
+        n_channels_override=n_channels,
+        norm_mean=norm_mean_cls if global_normalize else None,
+        norm_std=norm_std_cls  if global_normalize else None,
     )
 
     # ── MLflow 종료 ───────────────────────────────────────────────────────────
