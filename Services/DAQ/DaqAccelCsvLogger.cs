@@ -42,6 +42,12 @@ namespace PHM_Project_DockPanel.Services.DAQ
         /// <summary>Op_Ax{n} 而щ읆???앹꽦??異??몃뜳??紐⑸줉. null?대㈃ Op 而щ읆 ?놁쓬.</summary>
         public int[] LoggedAxes { get; set; }
 
+        /// <summary>
+        /// true 이면 CSV 파일 기록을 생략합니다 (BlockReceived 콜백은 계속 동작).
+        /// CombinedCsvLogger 와 함께 사용 시 true 로 설정하면 중복 파일 생성을 방지합니다.
+        /// </summary>
+        public bool SuppressCsvWrite { get; set; } = false;
+
         // ===== 민감도/오프셋 (mV/g, g) =====
         private class AxisSens { public double X; public double Y; public double Z; }
         private class AxisOffset { public double X; public double Y; public double Z; }
@@ -387,7 +393,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         var off = GetAxisOffset(_modules[m]);
                         gx -= off.X; gy -= off.Y; gz -= off.Z;
 
-                        if (_swByMod[m] != null)
+                        if (_swByMod[m] != null && !SuppressCsvWrite)
                         {
                             var _rowSb = new System.Text.StringBuilder();
                             _rowSb.Append(t.ToString("F6")).Append(",").Append(gx.ToString("G6"))

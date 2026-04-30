@@ -43,6 +43,9 @@ namespace PHM_Project_DockPanel.Services.WMX
         public bool IsLogging => _task != null && !_task.IsCompleted;
         public string OutputPath => _filePath;
 
+        /// <summary>외부(CombinedCsvLogger 등)에서 토크값을 폴링할 수 있도록 공개합니다.</summary>
+        public double ReadTorque(int ax) => SafeGet(_getTorque, ax);
+
         /// <summary>장치 식별자 (InfluxDB device 태그). 미설정 시 _fileSuffix 사용.</summary>
         public string Device { get; set; }
 

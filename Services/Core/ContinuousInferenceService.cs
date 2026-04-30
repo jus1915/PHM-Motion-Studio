@@ -5,7 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using PHM_Project_DockPanel.Services.DAQ;
+using PHM_Project_DockPanel.Services.DAQ;   // DaqAccelCsvLogger, CombinedCsvLogger
 using PHM_Project_DockPanel.Services.WMX;
 
 namespace PHM_Project_DockPanel.Services.Core
@@ -13,6 +13,7 @@ namespace PHM_Project_DockPanel.Services.Core
     public sealed class ContinuousInferenceService : IDisposable
     {
         private readonly InferenceServerClient _client;
+        private readonly CombinedCsvLogger _combinedLogger; // 통합 CSV (accel+torque)
         private readonly DaqAccelCsvLogger _accelLogger;
         private readonly AjinCsvLogger _torqueLogger;
 
@@ -31,17 +32,29 @@ namespace PHM_Project_DockPanel.Services.Core
 
         public ContinuousInferenceService(
             string inferenceServerUrl,
+            object combinedLoggerOrNull,       // CombinedCsvLogger (object 로 받아 C#6 호환)
             DaqAccelCsvLogger accelLogger,
             AjinCsvLogger torqueLogger,
             Func<int, string> getAxisOperation = null,
             int[] axes = null)
         {
-            _client = new InferenceServerClient(inferenceServerUrl);
-            _accelLogger = accelLogger;
-            _torqueLogger = torqueLogger;
+            _client           = new InferenceServerClient(inferenceServerUrl);
+            _combinedLogger   = combinedLoggerOrNull as CombinedCsvLogger;
+            _accelLogger      = accelLogger;
+            _torqueLogger     = torqueLogger;
             _getAxisOperation = getAxisOperation;
-            _axes = axes;
+            _axes             = axes;
         }
+
+        // 기존 코드와의 하위 호환 오버로드
+        public ContinuousInferenceService(
+            string inferenceServerUrl,
+            DaqAccelCsvLogger accelLogger,
+            AjinCsvLogger torqueLogger,
+            Func<int, string> getAxisOperation = null,
+            int[] axes = null)
+            : this(inferenceServerUrl, null, accelLogger, torqueLogger, getAxisOperation, axes)
+        { }
 
         private string GetCurrentOp()
         {
@@ -102,29 +115,42 @@ namespace PHM_Project_DockPanel.Services.Core
 
                 int? axis = _lastMovingAxis;
 
-                // ── 가속도 ───────────────────────
-                if (_accelLogger != null && _accelLogger.IsRunning)
+                // ── 통합 CSV (accel + torque 동시 수집) ──────────────
+                if (_combinedLogger != null && _combinedLogger.IsLogging)
                 {
-                    string[] paths = _accelLogger.CsvPathByModule;
-                    if (paths != null)
+                    string cp = _combinedLogger.OutputPath;
+                    if (!string.IsNullOrEmpty(cp) && File.Exists(cp))
                     {
-                        foreach (string p in paths)
-                        {
-                            if (string.IsNullOrEmpty(p) || !File.Exists(p))
-                                continue;
-
-                            await RunInference(p, "accel", axis, ct);
-                            break;
-                        }
+                        // 가속도 채널 추론
+                        await RunInference(cp, "accel",  axis, ct);
+                        // 토크 채널 추론
+                        await RunInference(cp, "torque", axis, ct);
                     }
                 }
-
-                // ── 토크 ─────────────────────────
-                if (_torqueLogger != null && _torqueLogger.IsLogging)
+                else
                 {
-                    string p = _torqueLogger.OutputPath;
-                    if (!string.IsNullOrEmpty(p) && File.Exists(p))
-                        await RunInference(p, "torque", axis, ct);
+                    // ── 단독 가속도 ──────────────────────────────────────
+                    if (_accelLogger != null && _accelLogger.IsRunning)
+                    {
+                        string[] paths = _accelLogger.CsvPathByModule;
+                        if (paths != null)
+                        {
+                            foreach (string p in paths)
+                            {
+                                if (string.IsNullOrEmpty(p) || !File.Exists(p)) continue;
+                                await RunInference(p, "accel", axis, ct);
+                                break;
+                            }
+                        }
+                    }
+
+                    // ── 단독 토크 ────────────────────────────────────────
+                    if (_torqueLogger != null && _torqueLogger.IsLogging)
+                    {
+                        string p = _torqueLogger.OutputPath;
+                        if (!string.IsNullOrEmpty(p) && File.Exists(p))
+                            await RunInference(p, "torque", axis, ct);
+                    }
                 }
             }
         }
@@ -277,11 +303,28 @@ namespace PHM_Project_DockPanel.Services.Core
 
             if (sensorType == "accel")
             {
-                for (int i = 0; i < headers.Length; i++)
+                // 통합 CSV: Ax{n}_x, Ax{n}_y, Ax{n}_z (축별 명시)
+                if (axis.HasValue)
                 {
-                    string h = headers[i].ToLower();
-                    if (h == "x" || h == "y" || h == "z")
-                        result.Add(i);
+                    string px = ("ax" + axis.Value + "_x");
+                    string py = ("ax" + axis.Value + "_y");
+                    string pz = ("ax" + axis.Value + "_z");
+                    for (int i = 0; i < headers.Length; i++)
+                    {
+                        string h = headers[i].Trim().ToLower();
+                        if (h == px || h == py || h == pz)
+                            result.Add(i);
+                    }
+                }
+                // 단독 가속도 CSV 폴백: x, y, z
+                if (result.Count == 0)
+                {
+                    for (int i = 0; i < headers.Length; i++)
+                    {
+                        string h = headers[i].Trim().ToLower();
+                        if (h == "x" || h == "y" || h == "z")
+                            result.Add(i);
+                    }
                 }
             }
             else
