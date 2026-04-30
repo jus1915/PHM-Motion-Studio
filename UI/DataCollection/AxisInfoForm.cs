@@ -38,12 +38,19 @@ namespace PHM_Project_DockPanel.Windows
         private CheckBox _chkContCollect;      // 연속 수집
         private ComboBox _cmbLabel;
         private Label _lblLabelCaption;
+        private Button _btnAddLabel, _btnRemoveLabel;
 
         // ▷ 레거시 호환용(외부 코드가 LogCheckBox에 접근하던 경우 대응)
         private CheckBox _chkLogCombined = new CheckBox { Visible = false }; // 두 체크의 OR, UI에 미표시
         private bool _syncingLegacy = false;   // 이벤트 루프 방지
         private Label _lblRealtimeStatus;
         private Label _lblDaqStatus;
+
+        // ── CLS 결함 진단 상태 배지 라벨 ──
+        private Label _lblClsNormal;
+        private Label _lblClsOverload;
+        private Label _lblClsLooseBolt;
+        private Label _lblClsOverspeed;
 
         // (선택) 외부에서 접근할 수 있도록 공개 프로퍼티
         public CheckBox AccelCheckBox => _chkAccelCollect;
@@ -145,6 +152,28 @@ namespace PHM_Project_DockPanel.Windows
             leftStatusPanel.Controls.Add(_lblRealtimeStatus);
             leftStatusPanel.Controls.Add(_lblDaqStatus);
 
+            // ── CLS 결함 진단 배지 ──────────────────────────────────────
+            _lblClsNormal    = CreateClsBadge("Normal");
+            _lblClsOverload  = CreateClsBadge("Overload");
+            _lblClsLooseBolt = CreateClsBadge("Loose Bolt");
+            _lblClsOverspeed = CreateClsBadge("Overspeed");
+
+            var clsBadgePanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0, 4, 0, 0),
+                Padding = new Padding(0)
+            };
+            clsBadgePanel.Controls.Add(_lblClsNormal);
+            clsBadgePanel.Controls.Add(_lblClsOverload);
+            clsBadgePanel.Controls.Add(_lblClsLooseBolt);
+            clsBadgePanel.Controls.Add(_lblClsOverspeed);
+
+            leftStatusPanel.Controls.Add(clsBadgePanel);
+
             // ===== (우측) 체크박스 + Connect/Disconnect 버튼: 가로 정렬 =====
             var rightControlPanel = new FlowLayoutPanel
             {
@@ -165,10 +194,9 @@ namespace PHM_Project_DockPanel.Windows
 
             _chkRealtime.CheckedChanged += (s, e) =>
             {
-                bool enabled = _chkRealtime.Checked;
-                UpdateRealtimeStatusLabel(enabled);
-                _cmbLabel.Enabled = enabled || _chkContCollect.Checked;
-                AppEvents.RaiseAccelRealtimeToggled(enabled); // 로그 출력 안 함
+                UpdateRealtimeStatusLabel(_chkRealtime.Checked);
+                UpdateLabelEnabled();
+                AppEvents.RaiseAccelRealtimeToggled(_chkRealtime.Checked); // 로그 출력 안 함
             };
 
             _chkContCollect.CheckedChanged += OnContCollectCheckedChanged;
@@ -181,22 +209,62 @@ namespace PHM_Project_DockPanel.Windows
                 Margin = new Padding(10, 10, 2, 0)
             };
 
+            _chkAccelCollect.CheckedChanged += (s, e) => UpdateLabelEnabled();
+            _chkTorqueCollect.CheckedChanged += (s, e) => UpdateLabelEnabled();
+
             _cmbLabel = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDown,
                 Width = 120,
-                Margin = new Padding(0, 6, 5, 0),
+                Margin = new Padding(0, 6, 2, 0),
                 Enabled = false
             };
             _cmbLabel.Items.AddRange(new object[]
             {
-                "", "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness"
+                "", "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness",
+                "overload", "overspeed"
             });
             _cmbLabel.SelectedIndex = 0;
             _cmbLabel.TextChanged += (s, e) =>
                 AppEvents.RaiseInfluxLabelChanged(_cmbLabel.Text.Trim());
             _cmbLabel.SelectedIndexChanged += (s, e) =>
                 AppEvents.RaiseInfluxLabelChanged(_cmbLabel.Text.Trim());
+
+            _btnAddLabel = new Button
+            {
+                Text = "+",
+                Width = 26,
+                Height = 23,
+                Margin = new Padding(0, 8, 0, 0),
+                Enabled = false
+            };
+            _btnAddLabel.Click += (s, e) =>
+            {
+                string newLabel = ShowInputDialog("추가할 레이블 이름을 입력하세요:", "레이블 추가");
+                if (string.IsNullOrWhiteSpace(newLabel)) return;
+                newLabel = newLabel.Trim();
+                if (_cmbLabel.Items.Contains(newLabel)) { _cmbLabel.Text = newLabel; return; }
+                _cmbLabel.Items.Add(newLabel);
+                _cmbLabel.Text = newLabel;
+            };
+
+            _btnRemoveLabel = new Button
+            {
+                Text = "-",
+                Width = 26,
+                Height = 23,
+                Margin = new Padding(2, 8, 5, 0),
+                Enabled = false
+            };
+            _btnRemoveLabel.Click += (s, e) =>
+            {
+                string cur = _cmbLabel.Text.Trim();
+                if (string.IsNullOrEmpty(cur)) return;
+                if (!_cmbLabel.Items.Contains(cur)) return;
+                int idx = _cmbLabel.Items.IndexOf(cur);
+                _cmbLabel.Items.Remove(cur);
+                _cmbLabel.SelectedIndex = Math.Max(0, Math.Min(idx, _cmbLabel.Items.Count - 1));
+            };
 
             btnConnect = new Button { Text = "Connect", Width = 100, Margin = new Padding(8, 4, 0, 0) };
             btnConnect.Click += BtnConnect_Click;
@@ -209,6 +277,8 @@ namespace PHM_Project_DockPanel.Windows
             rightControlPanel.Controls.Add(_chkRealtime);
             rightControlPanel.Controls.Add(_lblLabelCaption);
             rightControlPanel.Controls.Add(_cmbLabel);
+            rightControlPanel.Controls.Add(_btnAddLabel);
+            rightControlPanel.Controls.Add(_btnRemoveLabel);
             rightControlPanel.Controls.Add(_chkContCollect);
             rightControlPanel.Controls.Add(btnConnect);
             rightControlPanel.Controls.Add(btnDisconnect);
@@ -384,6 +454,37 @@ namespace PHM_Project_DockPanel.Windows
             }
         }
 
+        private void UpdateLabelEnabled()
+        {
+            bool enabled = _chkAccelCollect.Checked || _chkTorqueCollect.Checked
+                        || _chkRealtime.Checked     || _chkContCollect.Checked;
+            _cmbLabel.Enabled       = enabled;
+            _btnAddLabel.Enabled    = enabled;
+            _btnRemoveLabel.Enabled = enabled;
+        }
+
+        private static string ShowInputDialog(string prompt, string title)
+        {
+            var dlg = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                Width = 320,
+                Height = 120,
+                MinimizeBox = false,
+                MaximizeBox = false
+            };
+            var lbl = new Label { Text = prompt, Left = 10, Top = 10, Width = 290, AutoSize = false };
+            var txt = new TextBox { Left = 10, Top = 32, Width = 284 };
+            var btnOk = new Button { Text = "확인", Left = 140, Top = 58, Width = 72, DialogResult = DialogResult.OK };
+            var btnCancel = new Button { Text = "취소", Left = 220, Top = 58, Width = 72, DialogResult = DialogResult.Cancel };
+            dlg.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+            dlg.AcceptButton = btnOk;
+            dlg.CancelButton = btnCancel;
+            return dlg.ShowDialog() == DialogResult.OK ? txt.Text : string.Empty;
+        }
+
 
         private async void OnContCollectCheckedChanged(object sender, EventArgs e)
         {
@@ -440,13 +541,20 @@ namespace PHM_Project_DockPanel.Windows
                 // 추론 결과 이벤트 구독
                 AppEvents.InferenceResultReceived -= OnInferenceResult;
                 AppEvents.InferenceResultReceived += OnInferenceResult;
+
+                // CLS 결함 진단 이벤트 구독
+                AppEvents.ClsInferenceResultReceived -= OnClsInferenceResult;
+                AppEvents.ClsInferenceResultReceived += OnClsInferenceResult;
             }
             else
             {
                 AppEvents.InferenceResultReceived -= OnInferenceResult;
+                AppEvents.ClsInferenceResultReceived -= OnClsInferenceResult;
 
                 _lblDaqStatus.Text      = "DAQ 상태: 대기 중";
                 _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateGray;
+
+                ResetClsBadges();
             }
         }
 
@@ -483,6 +591,81 @@ namespace PHM_Project_DockPanel.Windows
             _lblDaqStatus.ForeColor = result.IsAnomaly
                 ? System.Drawing.Color.OrangeRed
                 : System.Drawing.Color.DarkGreen;
+        }
+
+        // ── CLS 결함 진단 배지 핸들러 ────────────────────────────────────
+        private void OnClsInferenceResult(
+            string sensorType,
+            PHM_Project_DockPanel.Services.Core.CombinedInferenceResult result)
+        {
+            if (result == null || result.IsError || !result.ClsAvailable) return;
+
+            if (InvokeRequired)
+            {
+                BeginInvoke(
+                    new Action<string, PHM_Project_DockPanel.Services.Core.CombinedInferenceResult>(OnClsInferenceResult),
+                    sensorType, result);
+                return;
+            }
+
+            // per-axis 결과: 선택 축과 다르면 무시 (null = 전역)
+            if (result.Axis.HasValue && _selectedAxis >= 0 && result.Axis.Value != _selectedAxis)
+                return;
+
+            ResetClsBadges();
+
+            string cls = (result.ClsClassName ?? "").ToLowerInvariant()
+                                                     .Replace(" ", "_")
+                                                     .Replace("-", "_");
+
+            if (cls == "normal" || cls == "")
+            {
+                _lblClsNormal.BackColor    = System.Drawing.Color.MediumSeaGreen;
+                _lblClsNormal.ForeColor    = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("overload"))
+            {
+                _lblClsOverload.BackColor  = System.Drawing.Color.OrangeRed;
+                _lblClsOverload.ForeColor  = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("loose"))
+            {
+                _lblClsLooseBolt.BackColor = System.Drawing.Color.DarkOrange;
+                _lblClsLooseBolt.ForeColor = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("overspeed"))
+            {
+                _lblClsOverspeed.BackColor = System.Drawing.Color.Firebrick;
+                _lblClsOverspeed.ForeColor = System.Drawing.Color.White;
+            }
+        }
+
+        private void ResetClsBadges()
+        {
+            Label[] badges = new Label[] { _lblClsNormal, _lblClsOverload, _lblClsLooseBolt, _lblClsOverspeed };
+            foreach (Label lbl in badges)
+            {
+                if (lbl == null) continue;
+                lbl.BackColor = System.Drawing.Color.LightGray;
+                lbl.ForeColor = System.Drawing.Color.DimGray;
+            }
+        }
+
+        private static Label CreateClsBadge(string text)
+        {
+            return new Label
+            {
+                Text        = text,
+                AutoSize    = false,
+                Width       = 78,
+                Height      = 22,
+                TextAlign   = ContentAlignment.MiddleCenter,
+                BackColor   = System.Drawing.Color.LightGray,
+                ForeColor   = System.Drawing.Color.DimGray,
+                Font        = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                BorderStyle = BorderStyle.FixedSingle,
+                Margin      = new Padding(2, 2, 2, 0)
+            };
         }
 
         // 레거시-신규 동기화

@@ -122,8 +122,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private CheckBox         _dlChX, _dlChY, _dlChZ;         // Accel 채널
         private CheckBox[]       _dlChTrq;                        // Torque 채널 (Pos/Vel/Trq/CmdPos/CmdVel)
         private Panel            _dlChPanel;                      // 채널 선택 컨테이너
-        private ListBox          _dlClassList;
-        private TextBox          _dlNewClassName;
+        // 결함 클래스 체크박스 (채널 체크박스와 동일한 스타일)
+        private CheckBox         _dlChkNormal;
+        private CheckBox         _dlChkOverload;
+        private CheckBox         _dlChkLooseness;
+        private CheckBox         _dlChkOverspeed;
         private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
         private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv, _dlBtnBatch;
         private RichTextBox      _dlLog;
@@ -1301,10 +1304,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private GroupBox BuildDlLeftPanel()
         {
             var grp = new GroupBox { Text = "데이터 소스 / 클래스", Dock = DockStyle.Fill, Padding = new Padding(8) };
-            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7 };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6 };
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 6; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            for (int i = 0; i < 5; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 클래스 리스트
 
             int row = 0;
@@ -1389,30 +1392,23 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tl.Controls.Add(_dlLabelColumn, 1, row++);
 
 
-            // 클래스 관리 헤더
+            // ── 결함 클래스 체크박스 (채널과 동일한 스타일) ───────────────────
             _dlClassListLbl = Lbl("결함 클래스:");
             tl.Controls.Add(_dlClassListLbl, 0, row);
-            var addRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-            _dlNewClassName = new TextBox { Width = 120, Height = 22 };
-            var btnAddClass = new Button { Text = "+ 추가", Width = 60, Height = 22 };
-            var btnDelClass = new Button { Text = "삭제",   Width = 50, Height = 22 };
-            btnAddClass.Click += (s, e) => {
-                var nm = _dlNewClassName.Text.Trim();
-                if (!string.IsNullOrEmpty(nm) && !_dlClassList.Items.Contains(nm))
-                { _dlClassList.Items.Add(nm); _dlNewClassName.Clear(); }
-            };
-            btnDelClass.Click += (s, e) => {
-                if (_dlClassList.SelectedIndex >= 0) _dlClassList.Items.RemoveAt(_dlClassList.SelectedIndex);
-            };
-            addRow.Controls.AddRange(new Control[] { _dlNewClassName, btnAddClass, btnDelClass });
-            tl.Controls.Add(addRow, 1, row++);
 
-            // 클래스 리스트 (2열 span)
-            _dlClassList = new ListBox { Dock = DockStyle.Fill, SelectionMode = SelectionMode.One };
-            foreach (var c in new[] { "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness" })
-                _dlClassList.Items.Add(c);
-            tl.SetColumnSpan(_dlClassList, 2);
-            tl.Controls.Add(_dlClassList, 0, row);
+            var clsFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                AutoSize = true
+            };
+            _dlChkNormal    = new CheckBox { Text = "normal",    Checked = true,  AutoSize = true };
+            _dlChkOverload  = new CheckBox { Text = "overload",  Checked = false, AutoSize = true };
+            _dlChkLooseness = new CheckBox { Text = "looseness", Checked = true,  AutoSize = true };
+            _dlChkOverspeed = new CheckBox { Text = "overspeed", Checked = false, AutoSize = true };
+            clsFlow.Controls.AddRange(new Control[] { _dlChkNormal, _dlChkOverload, _dlChkLooseness, _dlChkOverspeed });
+            tl.Controls.Add(clsFlow, 1, row++);
 
             grp.Controls.Add(tl);
             return grp;
@@ -1484,8 +1480,21 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // ── 5. UI 적용 ────────────────────────────────────────────────────────────
             // 클래스 리스트
-            _dlClassList.Items.Clear();
-            foreach (var c in classDirs) _dlClassList.Items.Add(c);
+            // 미리 정의된 클래스는 체크박스로 반영
+            var knownMap = new System.Collections.Generic.Dictionary<string, CheckBox>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "normal",    _dlChkNormal    },
+                { "overload",  _dlChkOverload  },
+                { "looseness", _dlChkLooseness },
+                { "overspeed", _dlChkOverspeed },
+            };
+            foreach (var kv in knownMap) kv.Value.Checked = false;
+
+            foreach (var c in classDirs)
+            {
+                if (knownMap.TryGetValue(c, out CheckBox chk))
+                    chk.Checked = true;
+            }
 
             // 신호 타입 + 채널
             if (useAccel)
@@ -1615,7 +1624,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             bool isAe = _dlRdoAe?.Checked == true;
 
-            // 클래스 목록 레이블 전환
+            // 클래스 레이블 전환
             if (_dlClassListLbl != null)
                 _dlClassListLbl.Text = isAe ? "정상 클래스:" : "결함 클래스:";
 
@@ -1649,7 +1658,17 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (channels.Count == 0) return null;
 
             bool isAe = _dlRdoAe?.Checked == true;
-            var classNames = _dlClassList.Items.Cast<string>().ToList();
+            // 체크박스에서 선택된 클래스 수집 (표시 순서 유지)
+            var classNames = new System.Collections.Generic.List<string>();
+            var clsTogglePairs = new (CheckBox Chk, string Name)[]
+            {
+                (_dlChkNormal,    "normal"),
+                (_dlChkOverload,  "overload"),
+                (_dlChkLooseness, "looseness"),
+                (_dlChkOverspeed, "overspeed"),
+            };
+            foreach (var pair in clsTogglePairs)
+                if (pair.Chk != null && pair.Chk.Checked) classNames.Add(pair.Name);
             // CLS: 클래스 2개 이상, AE: 정상 클래스 1개 이상
             if (!isAe && classNames.Count < 2) return null;
             if (isAe  && classNames.Count < 1) return null;
