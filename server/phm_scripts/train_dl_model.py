@@ -262,9 +262,16 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
                 continue
             has_trq = any("trq" in h or "vel(mm" in h or "pos(mm" in h for h in headers)
             has_xyz = any(h in ("x", "y", "z") for h in headers)
+            # Ax{n}_x/y/z 패턴 → combined CSV 가속도 컬럼
+            has_ax_xyz = any(
+                h.startswith("ax") and (h.endswith("_x") or h.endswith("_y") or h.endswith("_z"))
+                for h in headers
+            )
+            if has_trq and has_ax_xyz:
+                return "combined"
             if has_trq and not has_xyz:
                 return "torque"
-            if has_xyz:
+            if has_xyz or has_ax_xyz:
                 return "accel"
             return ""  # 헤더 읽기는 성공했지만 판별 불가
         except Exception:
@@ -432,22 +439,33 @@ def load_windows_from_dir(
 
     print(f"[data] rglob 결과: {len(csv_files)}개 CSV  (예: {csv_files[0] if csv_files else 'N/A'})", file=sys.stderr)
 
-    # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 없으면 헤더 기반 fallback
+    # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 파일명, (3) 헤더 기반 fallback
     filter_kw = sensor_type.strip().lower()
-    if filter_kw in ("accel", "torque"):
-        # 1차: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
-        path_filtered = [f for f in csv_files
-                         if any(p.lower() == filter_kw for p in f.parts)]
-        print(f"[data] 경로필터({filter_kw}): {len(path_filtered)}/{len(csv_files)}  "
-              f"부분목록={[str(f.parts[-2:]) for f in path_filtered[:3]]}", file=sys.stderr)
-        if path_filtered:
-            csv_files = path_filtered
-            print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
+    if filter_kw in ("accel", "torque", "combined"):
+        # combined: 파일명에 "_Combined" 포함 or 헤더 감지
+        if filter_kw == "combined":
+            path_filtered = [f for f in csv_files
+                             if "_combined" in f.name.lower()]
+            if path_filtered:
+                csv_files = path_filtered
+            else:
+                csv_files = [f for f in csv_files
+                             if _detect_sensor_type_from_headers(str(f)) == "combined"]
+            print(f"[data] sensor_type=combined 필터 → {len(csv_files)}개 파일", file=sys.stderr)
         else:
-            # 2차 fallback: CSV 헤더를 읽어 센서 타입 추론 (평탄한 폴더 구조 대응)
-            csv_files = [f for f in csv_files
-                         if _detect_sensor_type_from_headers(str(f)) == filter_kw]
-            print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
+            # 1차: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
+            path_filtered = [f for f in csv_files
+                             if any(p.lower() == filter_kw for p in f.parts)]
+            print(f"[data] 경로필터({filter_kw}): {len(path_filtered)}/{len(csv_files)}  "
+                  f"부분목록={[str(f.parts[-2:]) for f in path_filtered[:3]]}", file=sys.stderr)
+            if path_filtered:
+                csv_files = path_filtered
+                print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
+            else:
+                # 2차 fallback: CSV 헤더를 읽어 센서 타입 추론 (평탄한 폴더 구조 대응)
+                csv_files = [f for f in csv_files
+                             if _detect_sensor_type_from_headers(str(f)) == filter_kw]
+                print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
         segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
@@ -688,14 +706,20 @@ def load_segments_from_dir(
         return []
 
     filter_kw = sensor_type.strip().lower()
-    if filter_kw in ("accel", "torque"):
-        path_filtered = [f for f in csv_files
-                         if any(p.lower() == filter_kw for p in f.parts)]
-        if path_filtered:
-            csv_files = path_filtered
+    if filter_kw in ("accel", "torque", "combined"):
+        if filter_kw == "combined":
+            path_filtered = [f for f in csv_files if "_combined" in f.name.lower()]
+            csv_files = path_filtered if path_filtered else [
+                f for f in csv_files
+                if _detect_sensor_type_from_headers(str(f)) == "combined"
+            ]
         else:
-            csv_files = [f for f in csv_files
-                         if _detect_sensor_type_from_headers(str(f)) == filter_kw]
+            path_filtered = [f for f in csv_files
+                             if any(p.lower() == filter_kw for p in f.parts)]
+            csv_files = path_filtered if path_filtered else [
+                f for f in csv_files
+                if _detect_sensor_type_from_headers(str(f)) == filter_kw
+            ]
         print(f"[data] sensor_type={filter_kw} 필터 → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
