@@ -132,30 +132,85 @@ def _zscore_normalize(window: np.ndarray) -> np.ndarray:
     return ((window - mean) / std).astype(np.float32)
 
 
+def _add_fft_channels(window: np.ndarray) -> np.ndarray:
+    """(T, C) → (T, 2C): 채널별 FFT 크기 스펙트럼을 추가 채널로 붙입니다.
+
+    FFT 크기 스펙트럼(T//2+1, C)을 선형 보간으로 T 길이로 맞춘 뒤
+    원본 시간 도메인 채널 뒤에 이어 붙입니다.
+    AE가 주파수 도메인 이상(imbalance 고조파 등)을 포착할 수 있도록 합니다.
+
+    Args:
+        window: shape (T, C) float32 배열
+
+    Returns:
+        shape (T, 2C) float32 배열.
+        앞 C채널: 원본 시간 도메인, 뒤 C채널: FFT 크기 스펙트럼
+    """
+    T, C = window.shape
+    fft_mag = np.abs(np.fft.rfft(window, axis=0))   # (T//2+1, C)
+    fft_len = fft_mag.shape[0]
+    x_old   = np.linspace(0.0, 1.0, fft_len)
+    x_new   = np.linspace(0.0, 1.0, T)
+    fft_resized = np.stack(
+        [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C)],
+        axis=1,
+    ).astype(np.float32)
+    return np.concatenate([window, fft_resized], axis=1)   # (T, 2C)
+
+
 def _extract_windows(
     signal: np.ndarray,
     label_int: int,
     window_size: int,
     stride: int,
     normalize: bool = True,
+    add_fft: bool = False,
+    add_derivative: bool = False,
+    add_abs: bool = False,
 ) -> List[Tuple[np.ndarray, int]]:
     """슬라이딩 윈도우로 (window_array, label_int) 튜플 목록을 생성합니다.
 
+    모든 추가 채널(abs, derivative, FFT)은 원본 C채널에 대해서만 계산되어 뒤에 이어 붙습니다.
+    최종 채널 수: C × (1 + add_abs + add_derivative + add_fft)
+
     Args:
-        signal:     shape (N, C) float32 배열
-        label_int:  정수 레이블
-        window_size: 윈도우 샘플 수 T
-        stride:     슬라이딩 스트라이드
-        normalize:  True이면 윈도우별 z-score 정규화 (CLS 용).
-                    AE는 False — 절대 진폭/에너지 정보를 보존해야 이상 탐지가 가능.
+        signal:         shape (N, C) float32 배열
+        label_int:      정수 레이블
+        window_size:    윈도우 샘플 수 T
+        stride:         슬라이딩 스트라이드
+        normalize:      True이면 윈도우별 z-score 정규화.
+                        global_normalize 사용 시 False로 설정.
+        add_fft:        원본 채널의 FFT 크기 스펙트럼 추가.
+        add_derivative: 원본 채널의 1차 차분 추가 — looseness 링잉(jerk 시점 진동) 포착.
+        add_abs:        원본 채널의 절댓값 추가 — 방향 독립적 진폭 특성.
 
     Returns:
-        [(window_np, label_int), ...] — 각 window_np shape (T, C)
+        [(window_np, label_int), ...] — 각 window_np shape (T, C_out)
     """
     results: List[Tuple[np.ndarray, int]] = []
     n_samples = signal.shape[0]
     for start in range(0, n_samples - window_size + 1, stride):
-        window = signal[start : start + window_size].copy()
+        base = signal[start : start + window_size].copy()  # (T, C)
+        C_orig = base.shape[1]
+        extras = [base]
+        if add_abs:
+            extras.append(np.abs(base))
+        if add_derivative:
+            deriv = np.empty_like(base)
+            deriv[0] = 0.0
+            deriv[1:] = base[1:] - base[:-1]
+            extras.append(deriv)
+        if add_fft:
+            fft_mag = np.abs(np.fft.rfft(base, axis=0))   # (T//2+1, C)
+            fft_len = fft_mag.shape[0]
+            x_old   = np.linspace(0.0, 1.0, fft_len)
+            x_new   = np.linspace(0.0, 1.0, window_size)
+            fft_resized = np.stack(
+                [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C_orig)],
+                axis=1,
+            ).astype(np.float32)
+            extras.append(fft_resized)
+        window = np.concatenate(extras, axis=1).astype(np.float32)
         if normalize:
             window = _zscore_normalize(window)
         results.append((window, label_int))
@@ -341,7 +396,10 @@ def load_windows_from_dir(
     sensor_type: str = "",
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
-) -> List[Tuple[np.ndarray, int]]:
+    add_fft: bool = False,
+    add_derivative: bool = False,
+    add_abs: bool = False,
+) -> Tuple[List[Tuple[np.ndarray, int]], List[int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
     레이블 우선순위:
@@ -359,10 +417,12 @@ def load_windows_from_dir(
         sensor_type : "accel" 이면 경로에 /Accel/ 포함 파일만, "torque" 이면 /Torque/ 만 처리
 
     Returns:
-        [(window_np, label_int), ...]
+        (windows, seg_ids) — 각 윈도우가 속한 구간의 전역 고유 ID 목록 (windows와 1:1 대응)
     """
     name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
     all_windows: List[Tuple[np.ndarray, int]] = []
+    all_seg_ids: List[int] = []
+    global_seg_id = 0
     skipped = 0
 
     csv_files = list(Path(data_dir).rglob("*.csv"))
@@ -409,12 +469,18 @@ def load_windows_from_dir(
 
         # 구간별 윈도우 추출 (경계 오염 방지)
         file_windows: List[Tuple[np.ndarray, int]] = []
+        file_seg_ids: List[int] = []
         short_segs = 0
         for seg in segments:
             if seg.shape[0] < window_size:
                 short_segs += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+            new_wins = _extract_windows(seg, label_int, window_size, stride,
+                                        normalize=normalize, add_fft=add_fft,
+                                        add_derivative=add_derivative, add_abs=add_abs)
+            file_windows.extend(new_wins)
+            file_seg_ids.extend([global_seg_id] * len(new_wins))
+            global_seg_id += 1
 
         if not file_windows:
             print(
@@ -432,6 +498,7 @@ def load_windows_from_dir(
                 file=sys.stderr,
             )
         all_windows.extend(file_windows)
+        all_seg_ids.extend(file_seg_ids)
 
     # 클래스별 윈도우 수 진단 출력
     cls_dist: Dict[str, int] = {}
@@ -451,7 +518,7 @@ def load_windows_from_dir(
             f"class_names={class_names}, label_column 확인 필요.",
             file=sys.stderr,
         )
-    return all_windows
+    return all_windows, all_seg_ids
 
 
 def load_windows_from_file_list(
@@ -463,7 +530,10 @@ def load_windows_from_file_list(
     stride: int,
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
-) -> List[Tuple[np.ndarray, int]]:
+    add_fft: bool = False,
+    add_derivative: bool = False,
+    add_abs: bool = False,
+) -> Tuple[List[Tuple[np.ndarray, int]], List[int]]:
     """명시적 파일 목록에서 윈도우를 추출합니다.
 
     Args:
@@ -475,10 +545,12 @@ def load_windows_from_file_list(
         stride: 슬라이딩 스트라이드
 
     Returns:
-        [(window_np, label_int), ...]
+        (windows, seg_ids) — 각 윈도우가 속한 구간의 전역 고유 ID 목록 (windows와 1:1 대응)
     """
     name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
     all_windows: List[Tuple[np.ndarray, int]] = []
+    all_seg_ids: List[int] = []
+    global_seg_id = 0
     skipped = 0
 
     for entry in csv_files:
@@ -502,12 +574,18 @@ def load_windows_from_file_list(
 
         # 구간별 윈도우 추출 (경계 오염 방지)
         file_windows: List[Tuple[np.ndarray, int]] = []
+        file_seg_ids: List[int] = []
         short_segs = 0
         for seg in segments:
             if seg.shape[0] < window_size:
                 short_segs += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+            new_wins = _extract_windows(seg, label_int, window_size, stride,
+                                        normalize=normalize, add_fft=add_fft,
+                                        add_derivative=add_derivative, add_abs=add_abs)
+            file_windows.extend(new_wins)
+            file_seg_ids.extend([global_seg_id] * len(new_wins))
+            global_seg_id += 1
 
         if not file_windows:
             print(
@@ -519,13 +597,203 @@ def load_windows_from_file_list(
             continue
 
         all_windows.extend(file_windows)
+        all_seg_ids.extend(file_seg_ids)
 
     print(
         f"[data] 파일 목록 로드 완료: {len(csv_files) - skipped}개 파일, "
         f"{len(all_windows)}개 윈도우 (건너뜀={skipped})",
         file=sys.stderr,
     )
-    return all_windows
+    return all_windows, all_seg_ids
+
+
+# ── 구간 단위 로드 / 분할 / 윈도우 추출 ──────────────────────────────────────
+
+def load_segments_from_file_list(
+    csv_files: List[Dict[str, str]],
+    channels: List[str],
+    label_column: str,
+    class_names: List[str],
+    window_size: int,
+    filter_op_column: Optional[str] = None,
+) -> List[Tuple[np.ndarray, int]]:
+    """명시적 파일 목록에서 구간(segment) 목록을 반환합니다.
+
+    윈도우 추출은 하지 않습니다. 구간 단위 학습/검증 분할 후
+    windows_from_segments()로 윈도우를 추출하십시오.
+
+    Returns:
+        [(segment_array, label_int), ...] — window_size 이상인 구간만 포함
+    """
+    name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
+    all_segments: List[Tuple[np.ndarray, int]] = []
+    skipped = 0
+
+    for entry in csv_files:
+        path = entry.get("path", "")
+        forced_label = entry.get("label", "").strip()
+
+        if not os.path.isfile(path):
+            print(f"[data] 경고: 파일 없음 — {path}", file=sys.stderr)
+            skipped += 1
+            continue
+
+        segments, csv_label = _read_signal_csv(path, channels, label_column,
+                                               filter_op_column=filter_op_column)
+        label_str = forced_label if forced_label else (csv_label or "")
+        label_int = name_to_id.get(label_str.lower())
+        if label_int is None:
+            skipped += 1
+            continue
+
+        valid = [(seg, label_int) for seg in segments if seg.shape[0] >= window_size]
+        short = len(segments) - len(valid)
+        if short:
+            print(f"[data] {Path(path).name}: {short}개 구간 스킵 "
+                  f"(window_size={window_size} 미만)", file=sys.stderr)
+        all_segments.extend(valid)
+
+    cls_dist: Dict[str, int] = {}
+    for _, lbl in all_segments:
+        name = class_names[lbl] if lbl < len(class_names) else str(lbl)
+        cls_dist[name] = cls_dist.get(name, 0) + 1
+    dist_log = ", ".join(f"{k}={v}" for k, v in sorted(cls_dist.items()))
+    print(
+        f"[data] 파일 목록 구간 로드 완료: {len(all_segments)}구간 (건너뜀={skipped}) | {dist_log}",
+        file=sys.stderr,
+    )
+    return all_segments
+
+
+def load_segments_from_dir(
+    data_dir: str,
+    channels: List[str],
+    label_column: str,
+    class_names: List[str],
+    window_size: int,
+    sensor_type: str = "",
+    filter_op_column: Optional[str] = None,
+) -> List[Tuple[np.ndarray, int]]:
+    """디렉터리를 재귀 탐색해 구간(segment) 목록을 반환합니다.
+
+    윈도우 추출은 하지 않습니다.
+    """
+    name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
+    all_segments: List[Tuple[np.ndarray, int]] = []
+    skipped = 0
+
+    csv_files = list(Path(data_dir).rglob("*.csv"))
+    if not csv_files:
+        print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
+        return []
+
+    filter_kw = sensor_type.strip().lower()
+    if filter_kw in ("accel", "torque"):
+        path_filtered = [f for f in csv_files
+                         if any(p.lower() == filter_kw for p in f.parts)]
+        if path_filtered:
+            csv_files = path_filtered
+        else:
+            csv_files = [f for f in csv_files
+                         if _detect_sensor_type_from_headers(str(f)) == filter_kw]
+        print(f"[data] sensor_type={filter_kw} 필터 → {len(csv_files)}개 파일", file=sys.stderr)
+
+    for csv_path in csv_files:
+        segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
+                                               filter_op_column=filter_op_column)
+        if label_str is None:
+            for part in csv_path.parts:
+                if part.lower() in name_to_id:
+                    label_str = part
+                    break
+        if label_str is None:
+            label_str = csv_path.parent.name
+
+        label_int = name_to_id.get(label_str.lower() if label_str else "")
+        if label_int is None:
+            skipped += 1
+            continue
+
+        valid = [(seg, label_int) for seg in segments if seg.shape[0] >= window_size]
+        skipped_short = len(segments) - len(valid)
+        if not valid:
+            skipped += 1
+            continue
+        if skipped_short:
+            print(f"[data] {csv_path.name}: {skipped_short}개 구간 스킵 "
+                  f"(window_size={window_size} 미만)", file=sys.stderr)
+        all_segments.extend(valid)
+
+    cls_dist: Dict[str, int] = {}
+    for _, lbl in all_segments:
+        name = class_names[lbl] if lbl < len(class_names) else str(lbl)
+        cls_dist[name] = cls_dist.get(name, 0) + 1
+    dist_log = ", ".join(f"{k}={v}" for k, v in sorted(cls_dist.items()))
+    print(
+        f"[data] 디렉터리 구간 로드 완료: {len(all_segments)}구간 (건너뜀={skipped}) | {dist_log}",
+        file=sys.stderr,
+    )
+    return all_segments
+
+
+def split_segments_stratified(
+    segments: List[Tuple[np.ndarray, int]],
+    val_split: float,
+    seed: int,
+) -> Tuple[List[Tuple[np.ndarray, int]], List[Tuple[np.ndarray, int]]]:
+    """구간 단위 계층적 학습/검증 분할.
+
+    윈도우 추출 전에 구간을 분리해야 인접 윈도우 간 데이터 누수가 없습니다.
+
+    Returns:
+        (train_segments, val_segments)
+    """
+    labels = np.array([lbl for _, lbl in segments])
+    splitter = StratifiedShuffleSplit(n_splits=1, test_size=val_split, random_state=seed)
+    train_idx, val_idx = next(splitter.split(np.zeros(len(labels)), labels))
+    train_segs = [segments[i] for i in train_idx]
+    val_segs   = [segments[i] for i in val_idx]
+
+    def _cls_dist(segs):
+        d: Dict[int, int] = {}
+        for _, lbl in segs:
+            d[lbl] = d.get(lbl, 0) + 1
+        return d
+
+    train_dist = _cls_dist(train_segs)
+    val_dist   = _cls_dist(val_segs)
+    print(
+        f"[data] 구간 분할 (seed={seed}) — "
+        f"학습: {len(train_segs)}구간 {dict(sorted(train_dist.items()))}  |  "
+        f"검증: {len(val_segs)}구간 {dict(sorted(val_dist.items()))}",
+        file=sys.stderr,
+    )
+    return train_segs, val_segs
+
+
+def windows_from_segments(
+    segments: List[Tuple[np.ndarray, int]],
+    window_size: int,
+    stride: int,
+    normalize: bool = True,
+    add_fft: bool = False,
+    add_derivative: bool = False,
+    add_abs: bool = False,
+) -> Tuple[List[Tuple[np.ndarray, int]], List[int]]:
+    """구간 목록에서 슬라이딩 윈도우를 추출합니다.
+
+    Returns:
+        (windows, seg_ids) — seg_ids[i]는 windows[i]가 속한 구간의 인덱스 (0-based)
+    """
+    all_windows: List[Tuple[np.ndarray, int]] = []
+    all_seg_ids: List[int] = []
+    for seg_id, (seg, label_int) in enumerate(segments):
+        new_wins = _extract_windows(seg, label_int, window_size, stride,
+                                    normalize=normalize, add_fft=add_fft,
+                                    add_derivative=add_derivative, add_abs=add_abs)
+        all_windows.extend(new_wins)
+        all_seg_ids.extend([seg_id] * len(new_wins))
+    return all_windows, all_seg_ids
 
 
 # ── PyTorch Dataset ──────────────────────────────────────────────────────────
@@ -552,57 +820,91 @@ class WindowDataset(Dataset):
 
 # ── 1D-CNN 모델 ──────────────────────────────────────────────────────────────
 
+class _SEBlock1D(nn.Module):
+    """Squeeze-and-Excitation 채널 어텐션 블록."""
+
+    def __init__(self, channels: int, ratio: int = 8) -> None:
+        super().__init__()
+        mid = max(1, channels // ratio)
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(channels, mid),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, T)
+        return x * self.se(x).unsqueeze(-1)
+
+
+class _ResBlock1D(nn.Module):
+    """Pre-activation Residual Block with SE attention."""
+
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int = 3, stride: int = 1) -> None:
+        super().__init__()
+        pad = kernel_size // 2
+        self.block = nn.Sequential(
+            nn.BatchNorm1d(in_ch), nn.ReLU(inplace=True),
+            nn.Conv1d(in_ch, out_ch, kernel_size, stride=stride, padding=pad, bias=False),
+            nn.BatchNorm1d(out_ch), nn.ReLU(inplace=True),
+            nn.Conv1d(out_ch, out_ch, kernel_size, padding=pad, bias=False),
+            _SEBlock1D(out_ch),
+        )
+        self.shortcut = (
+            nn.Conv1d(in_ch, out_ch, 1, stride=stride, bias=False)
+            if in_ch != out_ch or stride != 1 else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x) + self.shortcut(x)
+
+
 class CNN1DClassifier(nn.Module):
-    """PHM 진동/토크 신호 분류용 1D-CNN.
+    """PHM 진동/토크 신호 분류용 Residual 1D-CNN with SE Attention.
 
     입력 포맷: (B, T, C) — channels last (C# 대시보드와 동일).
-    내부적으로 (B, C, T)로 변환 후 Conv1d 블록을 통과합니다.
 
     아키텍처 (n_windows에 따라 자동 선택):
-        tiny  (<300)  : Conv(C→32) → Conv(32→64)  → GAP → FC
-        small (<1000) : Conv(C→32) → Conv(32→64)  → Conv(64→128) → GAP → FC
-        full  (≥1000) : Conv(C→32) → ... → Conv(128→256) → GAP → FC
+        tiny  (<300)  : stem → ResBlock×1 → GAP → Dropout → FC
+        small (<1000) : stem → ResBlock×2 (MaxPool 사이) → GAP → Dropout → FC
+        full  (≥1000) : stem → ResBlock×4 (MaxPool 사이) → GAP → Dropout → FC
     """
 
     def __init__(self, n_channels: int, n_classes: int, n_windows: int = 9999) -> None:
         super().__init__()
-
+        self.stem = nn.Sequential(
+            nn.Conv1d(n_channels, 32, kernel_size=7, padding=3, bias=False),
+            nn.BatchNorm1d(32), nn.ReLU(inplace=True),
+        )
         if n_windows < 300:
-            # tiny: 2블록 — 소규모 데이터셋용
-            layers = [
-                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(32, 64, kernel_size=5, padding=2),
-                nn.BatchNorm1d(64), nn.ReLU(inplace=True),
-            ]
+            self.blocks = nn.Sequential(
+                _ResBlock1D(32, 64, kernel_size=5),
+            )
             fc_in = 64
         elif n_windows < 1000:
-            # small: 3블록 — 중규모 데이터셋용
-            layers = [
-                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(32, 64, kernel_size=5, padding=2),
-                nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(64, 128, kernel_size=3, padding=1),
-                nn.BatchNorm1d(128), nn.ReLU(inplace=True),
-            ]
+            self.blocks = nn.Sequential(
+                _ResBlock1D(32, 64, kernel_size=5),
+                nn.MaxPool1d(2),
+                _ResBlock1D(64, 128, kernel_size=3),
+            )
             fc_in = 128
         else:
-            # full: 4블록 — 대규모 데이터셋용
-            layers = [
-                nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-                nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(32, 64, kernel_size=5, padding=2),
-                nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(64, 128, kernel_size=3, padding=1),
-                nn.BatchNorm1d(128), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-                nn.Conv1d(128, 256, kernel_size=3, padding=1),
-                nn.BatchNorm1d(256), nn.ReLU(inplace=True),
-            ]
+            self.blocks = nn.Sequential(
+                _ResBlock1D(32, 64, kernel_size=5),
+                nn.MaxPool1d(2),
+                _ResBlock1D(64, 128, kernel_size=3),
+                nn.MaxPool1d(2),
+                _ResBlock1D(128, 256, kernel_size=3),
+                nn.MaxPool1d(2),
+                _ResBlock1D(256, 256, kernel_size=3),
+            )
             fc_in = 256
 
-        self.conv_blocks = nn.Sequential(*layers)
         self.pool = nn.AdaptiveAvgPool1d(1)
+        self.dropout = nn.Dropout(0.3)
         self.classifier = nn.Linear(fc_in, n_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -614,12 +916,12 @@ class CNN1DClassifier(nn.Module):
         Returns:
             logits: (B, n_classes)
         """
-        # (B, T, C) → (B, C, T)
-        x = x.permute(0, 2, 1)
-        x = self.conv_blocks(x)   # (B, 256, T')
-        x = self.pool(x)          # (B, 256, 1)
-        x = x.squeeze(-1)         # (B, 256)
-        return self.classifier(x) # (B, n_classes)
+        x = x.permute(0, 2, 1)        # (B, C, T)
+        x = self.stem(x)
+        x = self.blocks(x)
+        x = self.pool(x).squeeze(-1)  # (B, fc_in)
+        x = self.dropout(x)
+        return self.classifier(x)
 
 
 # ── AE 전용 Dataset ──────────────────────────────────────────────────────────
@@ -688,16 +990,14 @@ def train_ae(
     windows: List[Tuple[np.ndarray, int]],
     n_channels: int,
     mlflow_run=None,
-) -> Tuple["AE1DCNN", float, int, float, float, float]:
-    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr)를 반환합니다.
+    ae_threshold_percentile: int = 99,
+) -> Tuple["AE1DCNN", float, int, float, float, float, float, np.ndarray, np.ndarray]:
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std)를 반환합니다.
 
     정규화 전략:
-        - 윈도우별 per-sample z-score 로 학습 (형태·주파수 패턴 학습, 수렴 안정).
-        - 진폭(에너지) 이상은 별도 RMS 통계로 감지 → 복합 스코어 사용.
-
-    스코어 = mae_score + alpha * rms_score  (C# 에서 계산)
-        mae_score  = ae_mae  / mae_thr    (형태 이상)
-        rms_score  = max(0, (rms - rms_mean) / rms_std)  (진폭 이상)
+        - 전역(global) 정규화: 훈련 데이터 전체의 채널별 mean/std 로 정규화.
+          → 절대 진폭·에너지 정보가 보존되어 AE 재구성 오차로 이상 탐지 가능.
+        - norm_mean / norm_std 는 _meta.json 에 저장되어 평가 시 동일하게 적용.
     """
     seed = int(params.get("seed", 42))
     torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
@@ -724,8 +1024,14 @@ def train_ae(
         file=sys.stderr,
     )
 
-    # ── per-sample z-score 적용 (형태 학습) ─────────────────────────────────
-    windows_norm = [(_zscore_normalize(w), lbl) for w, lbl in windows]
+    # ── 전역 정규화 (진폭 보존) ──────────────────────────────────────────────
+    norm_mean, norm_std = _compute_global_stats(windows)
+    print(
+        f"[train_ae] 전역 정규화 — mean={np.round(norm_mean, 4).tolist()}  "
+        f"std={np.round(norm_std, 4).tolist()}",
+        file=sys.stderr,
+    )
+    windows_norm = _apply_global_norm(windows, norm_mean, norm_std)
 
     # 랜덤 분할 (레이블 불필요)
     n = len(windows_norm)
@@ -805,17 +1111,23 @@ def train_ae(
             per_sample_maes.extend(mae_per.cpu().numpy().tolist())
 
     if per_sample_maes:
-        err_arr   = np.array(per_sample_maes, dtype=np.float64)
-        mae_thr   = float(err_arr.mean() + 2.0 * err_arr.std())
+        err_arr = np.array(per_sample_maes, dtype=np.float64)
+        # 퍼센타일 기반 임계값: mean+2σ보다 분포 형태에 덜 민감하고 해석이 명확함
+        mae_thr = float(np.percentile(err_arr, ae_threshold_percentile))
+        print(
+            f"[train_ae] MAE 임계값 ({ae_threshold_percentile}th pct) = {mae_thr:.6f}  "
+            f"(mean={err_arr.mean():.6f}  std={err_arr.std():.6f})",
+            file=sys.stderr,
+        )
     else:
-        mae_thr   = float(best_val_mae * 2.0)
+        mae_thr = float(best_val_mae * 2.0)
 
     print(
         f"[train_ae] 완료 — best_val_mae={best_val_mae:.6f}  "
         f"mae_thr={mae_thr:.6f}  rms_mean={rms_mean:.4f}  rms_std={rms_std:.4f}  rms_thr={rms_thr:.4f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std
+    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -860,16 +1172,22 @@ def export_onnx_ae(
 
 def train(
     params: dict,
-    windows: List[Tuple[np.ndarray, int]],
+    train_windows: List[Tuple[np.ndarray, int]],
+    val_windows: List[Tuple[np.ndarray, int]],
     n_classes: int,
     n_channels: int,
     mlflow_run=None,
+    label_smoothing: float = 0.0,
 ) -> Tuple[CNN1DClassifier, float, int]:
     """CNN1D 모델을 학습하고 최적 모델을 반환합니다.
 
+    학습/검증 분할은 호출 전에 구간 단위로 완료되어야 합니다.
+    (split_segments_stratified → windows_from_segments)
+
     Args:
         params: 학습 파라미터 딕셔너리
-        windows: [(window_np, label_int), ...] 전체 데이터
+        train_windows: 학습용 [(window_np, label_int), ...]
+        val_windows:   검증용 [(window_np, label_int), ...]
         n_classes: 분류 클래스 수
         n_channels: 입력 채널 수
         mlflow_run: 활성 mlflow run 객체 (None이면 MLflow 미사용)
@@ -882,37 +1200,33 @@ def train(
     random.seed(seed)
     np.random.seed(seed)
 
-    epochs = int(params.get("epochs", 50))
+    epochs     = int(params.get("epochs", 50))
     batch_size = int(params.get("batch_size", 32))
-    lr = float(params.get("lr", 0.001))
-    val_split = float(params.get("val_split", 0.2))
+    lr         = float(params.get("lr", 0.001))
     # 데이터 크기에 따라 patience 동적 조정 (최소 5, 최대 10)
-    patience = max(5, min(10, epochs // 8))
+    patience   = max(5, min(10, epochs // 8))
 
-    dataset = WindowDataset(windows)
-    labels_arr = np.array([w[1] for w in windows])
-
-    # 계층별 분할
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=val_split, random_state=seed)
-    train_idx, val_idx = next(splitter.split(np.zeros(len(labels_arr)), labels_arr))
+    device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pin = device.type == "cuda"
+    if pin:
+        torch.backends.cudnn.benchmark = True
 
     train_loader = DataLoader(
-        Subset(dataset, train_idx),
+        WindowDataset(train_windows),
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
-        pin_memory=False,
+        pin_memory=pin,
     )
     val_loader = DataLoader(
-        Subset(dataset, val_idx),
+        WindowDataset(val_windows),
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
-        pin_memory=False,
+        pin_memory=pin,
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    n_windows = len(windows)
+    n_windows = len(train_windows)
 
     # 모델 크기 결정 로그
     if n_windows < 300:
@@ -926,16 +1240,22 @@ def train(
         file=sys.stderr,
     )
     print(
-        f"[train] 학습={len(train_idx)} 샘플, 검증={len(val_idx)} 샘플",
+        f"[train] 학습={len(train_windows)} 샘플, 검증={len(val_windows)} 샘플",
         file=sys.stderr,
     )
 
     model = CNN1DClassifier(n_channels=n_channels, n_classes=n_classes, n_windows=n_windows).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-6
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    # CosineAnnealingWarmRestarts: T_0=30 에폭마다 재시작 — ReduceLROnPlateau보다
+    # 안장점 탈출 능력이 뛰어나고 val 지표 노이즈에 덜 민감함
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=max(1, epochs // 5), T_mult=1, eta_min=1e-6
     )
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    # AMP (Automatic Mixed Precision) — CUDA 전용, CPU에서는 비활성화
+    use_amp = device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     best_val_acc = 0.0
     best_state: dict = {}
@@ -948,13 +1268,15 @@ def train(
         total_loss = 0.0
         n_batches = 0
         for x_batch, y_batch in train_loader:
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
+            x_batch = x_batch.to(device, non_blocking=pin)
+            y_batch = y_batch.to(device, non_blocking=pin)
             optimizer.zero_grad()
-            logits = model(x_batch)
-            loss = criterion(logits, y_batch)
-            loss.backward()
-            optimizer.step()
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                logits = model(x_batch)
+                loss = criterion(logits, y_batch)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             total_loss += loss.item()
             n_batches += 1
 
@@ -966,9 +1288,10 @@ def train(
         total = 0
         with torch.no_grad():
             for x_batch, y_batch in val_loader:
-                x_batch = x_batch.to(device)
-                y_batch = y_batch.to(device)
-                logits = model(x_batch)
+                x_batch = x_batch.to(device, non_blocking=pin)
+                y_batch = y_batch.to(device, non_blocking=pin)
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    logits = model(x_batch)
                 preds = logits.argmax(dim=1)
                 correct += (preds == y_batch).sum().item()
                 total += y_batch.size(0)
@@ -976,8 +1299,7 @@ def train(
         val_acc = correct / total if total > 0 else 0.0
         epochs_trained = epoch
 
-        # LR 스케줄러 업데이트 (val_acc 기준)
-        scheduler.step(val_acc)
+        scheduler.step(epoch + 1)
 
         # stdout JSON 로그 (C# 대시보드 파싱 용도)
         log_line = json.dumps({"epoch": epoch, "loss": round(avg_loss, 6), "val_acc": round(val_acc, 6)})
@@ -1087,12 +1409,17 @@ def save_meta(
     rms_mean: Optional[float] = None,
     rms_thr:  Optional[float] = None,
     rms_std:  Optional[float] = None,
+    norm_mean: Optional[np.ndarray] = None,  # 전역 정규화 채널별 mean (AE 전용)
+    norm_std:  Optional[np.ndarray] = None,  # 전역 정규화 채널별 std  (AE 전용)
+    add_fft_channels: bool = False,
+    add_derivative_channels: bool = False,
+    add_abs_channels: bool = False,
     n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
-    session="AD" (AE) 인 경우 kind=AE-CNN1D, output_name=recon, threshold 포함.
-    session="FD" (CLS) 인 경우 kind=CNN1D, output_name=logits, val_accuracy 포함.
+    session="AE" 인 경우 kind=AE-CNN1D, output_name=recon, threshold/norm_mean/norm_std 포함.
+    session="CLS" 인 경우 kind=CNN1D-CLS, output_name=logits, val_accuracy 포함.
 
     Returns:
         저장된 _meta.json 경로
@@ -1113,16 +1440,25 @@ def save_meta(
         "window_size": int(params.get("window_size", 1024)),
         "input_name":  "input",
         "output_name": "recon" if is_ae else "logits",
-        "standardize_per_sample": True,
+        # norm_mean이 있으면 전역 정규화 → per-sample 불필요
+        "standardize_per_sample": norm_mean is None,
+        "add_fft_channels": add_fft_channels,
+        "add_derivative_channels": add_derivative_channels,
+        "add_abs_channels": add_abs_channels,
         "epochs_trained": epochs_trained,
     }
 
+    # 전역 정규화 통계 — AE/CLS 공통으로 저장 (추론 시 동일 정규화 적용)
+    if norm_mean is not None:
+        meta["norm_mean"] = [round(float(v), 8) for v in norm_mean]
+    if norm_std is not None:
+        meta["norm_std"]  = [round(float(v), 8) for v in norm_std]
+
     if is_ae:
-        meta["val_mae"]   = round(val_mse or 0.0, 6)   # val_mse 인수가 실제로는 val_mae 값
-        meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (z-score 공간)
+        meta["val_mae"]   = round(val_mse or 0.0, 6)
+        meta["threshold"] = round(threshold or 0.0, 6)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
-        # RMS 진폭 이상 감지용 통계 (외력 등 진폭 변화 감지)
         if rms_mean is not None:
             meta["rms_mean"] = round(float(rms_mean), 6)
         if rms_thr is not None:
@@ -1145,6 +1481,136 @@ def save_meta(
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"[meta] _meta.json 저장: {meta_path}", file=sys.stderr)
     return meta_path
+
+
+# ── 검증 결과 리포트 ─────────────────────────────────────────────────────────
+
+def _print_cls_val_report(
+    model: "CNN1DClassifier",
+    val_windows: List[Tuple[np.ndarray, int]],
+    class_names: List[str],
+    val_seg_ids: Optional[List[int]] = None,
+) -> None:
+    """검증 세트에 대한 클래스별 구간·윈도우 분류 결과 테이블을 stderr에 출력합니다.
+
+    val_seg_ids가 제공되면 구간 단위 다수결(majority vote) 정확도도 함께 출력합니다.
+    신뢰도 = 예측 클래스의 softmax 확률 (모델이 해당 예측에 얼마나 확신하는지).
+    """
+    from collections import Counter as _Counter, defaultdict as _defaultdict
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    n_cls = len(class_names)
+
+    # ── 윈도우 단위 추론 ──────────────────────────────────────────────────────
+    win_correct  = [0] * n_cls
+    win_total    = [0] * n_cls
+    win_conf_sum = [0.0] * n_cls   # 예측 클래스의 신뢰도 합
+
+    # 구간 단위 집계용: seg_id → {pred_class: count}, true_lbl
+    seg_preds: dict = _defaultdict(_Counter)
+    seg_true:  dict = {}
+
+    with torch.no_grad():
+        for idx, (arr, true_lbl) in enumerate(val_windows):
+            x      = torch.from_numpy(arr).unsqueeze(0).to(device)  # (1, T, C)
+            logits = model(x)                                         # (1, n_classes)
+            probs  = torch.softmax(logits, dim=1)[0].cpu().numpy()
+            pred   = int(np.argmax(probs))
+            conf   = float(probs[pred])
+
+            if 0 <= true_lbl < n_cls:
+                win_total[true_lbl]    += 1
+                win_conf_sum[true_lbl] += conf
+                if pred == true_lbl:
+                    win_correct[true_lbl] += 1
+
+            if val_seg_ids is not None:
+                sid = val_seg_ids[idx]
+                seg_preds[sid][pred] += 1
+                seg_true[sid] = true_lbl
+
+    # ── 구간 단위 집계 (majority vote) ───────────────────────────────────────
+    seg_cls_correct = [0] * n_cls
+    seg_cls_total   = [0] * n_cls
+    if val_seg_ids is not None:
+        for sid, counter in seg_preds.items():
+            true_lbl = seg_true.get(sid, -1)
+            if 0 <= true_lbl < n_cls:
+                majority = counter.most_common(1)[0][0]
+                seg_cls_total[true_lbl] += 1
+                if majority == true_lbl:
+                    seg_cls_correct[true_lbl] += 1
+
+    # ── 출력 레이아웃 ─────────────────────────────────────────────────────────
+    has_seg = val_seg_ids is not None
+    lbl_w   = max(len(n) for n in class_names) + 2
+    total_wins = sum(win_total)
+    total_segs = sum(seg_cls_total)
+    cnt_w_win  = max(len(str(total_wins))  * 2 + 1, 11)
+    cnt_w_seg  = max(len(str(total_segs)) * 2 + 1, 11) if has_seg else 0
+
+    if has_seg:
+        sep = "─" * (lbl_w + 2 + 13 + 2 + cnt_w_seg + 2 + 13 + 2 + cnt_w_win + 2 + 10)
+        header = (
+            f"{'레이블':<{lbl_w}}  {'구간 정확도':>11}  {'정답/전체':>{cnt_w_seg}}"
+            f"  {'윈도우 정확도':>11}  {'정답/전체':>{cnt_w_win}}  {'평균 신뢰도':>9}"
+        )
+    else:
+        sep = "─" * (lbl_w + 2 + 13 + 2 + cnt_w_win + 2 + 10)
+        header = (
+            f"{'레이블':<{lbl_w}}  {'윈도우 정확도':>11}  {'정답/전체':>{cnt_w_win}}  {'평균 신뢰도':>9}"
+        )
+
+    print(f"\n[검증] 클래스별 분류 결과", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print(header, file=sys.stderr)
+    print(sep, file=sys.stderr)
+
+    tot_win_ok = tot_seg_ok = 0
+    for i, name in enumerate(class_names):
+        wn    = win_total[i]
+        wok   = win_correct[i]
+        wacc  = wok / wn if wn > 0 else 0.0
+        wconf = win_conf_sum[i] / wn if wn > 0 else 0.0
+        tot_win_ok += wok
+
+        if has_seg:
+            sn   = seg_cls_total[i]
+            sok  = seg_cls_correct[i]
+            sacc = sok / sn if sn > 0 else 0.0
+            tot_seg_ok += sok
+            print(
+                f"{name:<{lbl_w}}"
+                f"  {sacc * 100:>11.2f}%  {f'{sok}/{sn}':>{cnt_w_seg}}"
+                f"  {wacc * 100:>11.2f}%  {f'{wok}/{wn}':>{cnt_w_win}}"
+                f"  {wconf * 100:>9.2f}%",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"{name:<{lbl_w}}  {wacc * 100:>11.2f}%  {f'{wok}/{wn}':>{cnt_w_win}}"
+                f"  {wconf * 100:>9.2f}%",
+                file=sys.stderr,
+            )
+
+    print(sep, file=sys.stderr)
+    ov_win = tot_win_ok / total_wins if total_wins else 0.0
+    if has_seg:
+        ov_seg = tot_seg_ok / total_segs if total_segs else 0.0
+        print(
+            f"{'전체':<{lbl_w}}"
+            f"  {ov_seg * 100:>11.2f}%  {f'{tot_seg_ok}/{total_segs}':>{cnt_w_seg}}"
+            f"  {ov_win * 100:>11.2f}%  {f'{tot_win_ok}/{total_wins}':>{cnt_w_win}}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"{'전체':<{lbl_w}}  {ov_win * 100:>11.2f}%  {f'{tot_win_ok}/{total_wins}':>{cnt_w_win}}",
+            file=sys.stderr,
+        )
+    print(sep, file=sys.stderr)
 
 
 # ── MLflow 헬퍼 ──────────────────────────────────────────────────────────────
@@ -1275,12 +1741,19 @@ def main() -> None:
 
     class_names: List[str] = params.get(
         "class_names",
-        ["normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness"],
+        ["normal", "overload", "overspeed", "looseness"],
     )
     label_column: str = params.get("label_column", "Label")
     filter_op_column: Optional[str] = params.get("filter_op_column", None)
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
+
+    add_fft:        bool = bool(params.get("add_fft_channels", False))
+    add_derivative: bool = bool(params.get("add_derivative_channels", False))
+    add_abs:        bool = bool(params.get("add_abs_channels", False))
+    global_normalize: bool = bool(params.get("global_normalize", False))
+    label_smoothing: float = float(params.get("label_smoothing", 0.0))
+    ae_threshold_percentile: int = int(params.get("ae_threshold_percentile", 99))
 
     session_raw = params.get("session", "CLS").upper()
     # 구버전 호환: AD → AE, FD → CLS
@@ -1303,58 +1776,89 @@ def main() -> None:
     )
 
     # ── 데이터 로드 ───────────────────────────────────────────────────────────
-    windows: List[Tuple[np.ndarray, int]] = []
+    # AE  : RAW 윈도우를 바로 로드 (train_ae 내부에서 RMS·전역 정규화 처리)
+    # CLS : 구간(segment) 단위로 로드 → 분할 → 윈도우 추출
+    #       (윈도우 추출 전에 분할해야 인접 윈도우 간 데이터 누수가 없음)
 
-    # AE 학습: windows는 RAW로 전달 (train_ae 내부에서 RMS 통계 계산 후 z-score 적용)
-    # CLS 학습: per-sample z-score 정규화 적용
-    normalize_windows = not is_ae
+    norm_mean_cls: Optional[np.ndarray] = None
+    norm_std_cls:  Optional[np.ndarray] = None
+    windows:      List[Tuple[np.ndarray, int]] = []
+    seg_ids:      List[int] = []
+    all_segments: List[Tuple[np.ndarray, int]] = []
+    label_counts: Dict[int, int] = {}
+    actual_n_channels = n_channels
 
-    if "csv_files" in params and params["csv_files"]:
-        windows = load_windows_from_file_list(
-            csv_files=params["csv_files"],
-            channels=channels,
-            label_column=label_column,
-            class_names=load_class_names,
-            window_size=window_size,
-            stride=stride,
-            normalize=normalize_windows,
-            filter_op_column=filter_op_column,
-        )
-    elif "data_dir" in params and params["data_dir"]:
-        windows = load_windows_from_dir(
-            data_dir=params["data_dir"],
-            channels=channels,
-            label_column=label_column,
-            class_names=load_class_names,
-            window_size=window_size,
-            stride=stride,
-            sensor_type=params.get("sensor_type", ""),
-            normalize=normalize_windows,
-            filter_op_column=filter_op_column,
-        )
+    def _load_windows_raw() -> None:
+        """AE용 RAW 윈도우 로드 (nonlocal windows, seg_ids 갱신)."""
+        nonlocal windows, seg_ids
+        if "csv_files" in params and params["csv_files"]:
+            windows, seg_ids = load_windows_from_file_list(
+                csv_files=params["csv_files"], channels=channels,
+                label_column=label_column, class_names=load_class_names,
+                window_size=window_size, stride=stride, normalize=False,
+                filter_op_column=filter_op_column,
+                add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+            )
+        elif "data_dir" in params and params["data_dir"]:
+            windows, seg_ids = load_windows_from_dir(
+                data_dir=params["data_dir"], channels=channels,
+                label_column=label_column, class_names=load_class_names,
+                window_size=window_size, stride=stride,
+                sensor_type=params.get("sensor_type", ""), normalize=False,
+                filter_op_column=filter_op_column,
+                add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+            )
+        else:
+            print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
+            sys.exit(1)
+
+    if is_ae:
+        # ── AE: 윈도우 직접 로드 ─────────────────────────────────────────────
+        _load_windows_raw()
+        if not windows:
+            print(json.dumps({"error": "유효한 윈도우를 하나도 추출하지 못했습니다."}))
+            sys.exit(1)
+        actual_n_channels = windows[0][0].shape[1]
+        for _, lbl in windows:
+            label_counts[lbl] = label_counts.get(lbl, 0) + 1
     else:
-        print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
-        sys.exit(1)
+        # ── CLS: 구간 단위 로드 ───────────────────────────────────────────────
+        if "csv_files" in params and params["csv_files"]:
+            all_segments = load_segments_from_file_list(
+                csv_files=params["csv_files"], channels=channels,
+                label_column=label_column, class_names=load_class_names,
+                window_size=window_size, filter_op_column=filter_op_column,
+            )
+        elif "data_dir" in params and params["data_dir"]:
+            all_segments = load_segments_from_dir(
+                data_dir=params["data_dir"], channels=channels,
+                label_column=label_column, class_names=load_class_names,
+                window_size=window_size, sensor_type=params.get("sensor_type", ""),
+                filter_op_column=filter_op_column,
+            )
+        else:
+            print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
+            sys.exit(1)
 
-    if len(windows) == 0:
-        print(json.dumps({"error": "유효한 윈도우를 하나도 추출하지 못했습니다. 데이터 경로와 채널 설정을 확인하십시오."}))
-        sys.exit(1)
+        if not all_segments:
+            print(json.dumps({"error": "유효한 구간을 하나도 추출하지 못했습니다. 데이터 경로와 채널 설정을 확인하십시오."}))
+            sys.exit(1)
 
-    # _resolve_channels 가 채널을 확장했을 수 있으므로 실제 데이터 shape 으로 재설정
-    # 예: channels=["Trq(%)"] → Ax0_Trq(%)/Ax1_Trq(%)/Ax2_Trq(%) 3채널로 확장된 경우
-    actual_n_channels = windows[0][0].shape[1]
+        for _, lbl in all_segments:
+            label_counts[lbl] = label_counts.get(lbl, 0) + 1
+
+        # actual_n_channels: 첫 구간에서 샘플 1윈도우 추출해 채널 수 확인
+        _s0 = all_segments[0][0]
+        _sw = _extract_windows(_s0[:window_size], 0, window_size, window_size,
+                               normalize=False, add_fft=add_fft,
+                               add_derivative=add_derivative, add_abs=add_abs)
+        actual_n_channels = _sw[0][0].shape[1] if _sw else n_channels
+
     if actual_n_channels != n_channels:
-        print(
-            f"[main] 채널 수 재설정: {n_channels} → {actual_n_channels} "
-            f"(_resolve_channels 확장 결과)",
-            file=sys.stderr,
-        )
+        print(f"[main] 채널 수 재설정: {n_channels} → {actual_n_channels} "
+              f"(_resolve_channels 확장 결과)", file=sys.stderr)
         n_channels = actual_n_channels
 
-    # 클래스 분포 출력
-    label_counts: Dict[int, int] = {}
-    for _, lbl in windows:
-        label_counts[lbl] = label_counts.get(lbl, 0) + 1
     dist_str = ", ".join(
         f"{load_class_names[i] if i < len(load_class_names) else i}={c}"
         for i, c in sorted(label_counts.items())
@@ -1363,8 +1867,6 @@ def main() -> None:
 
     # ── 단일 클래스 검사 ─────────────────────────────────────────────────────
     if not is_ae and len(label_counts) < 2:
-        # 요청된 클래스가 2개 이상인데 데이터가 부족한 경우 → 진단 오류 (자동 전환 금지)
-        # 요청된 클래스가 1개인 경우 → AE 이상탐지 모드로 자동 전환 (기존 동작 유지)
         if len(class_names) >= 2:
             found_names   = [class_names[i] for i in sorted(label_counts.keys())
                              if i < len(class_names)]
@@ -1385,7 +1887,6 @@ def main() -> None:
             print(json.dumps({"error": diag}), flush=True)
             sys.exit(1)
 
-        # class_names가 1개인 경우: AE 이상탐지 모드로 자동 전환
         print(
             f"[main] ⚠ 클래스 수 {len(label_counts)}개 (분류 학습 불가) "
             f"→ AE 이상탐지 모드로 자동 전환합니다.",
@@ -1395,34 +1896,9 @@ def main() -> None:
         session = "AE"
         params["session"] = "AE"
 
-        # AE는 RAW 데이터 필요 (RMS 통계 계산) — normalize=False 로 재로드
         print("[main] AE 모드 데이터 재로드 (normalize=False)...", file=sys.stderr)
-        if "csv_files" in params and params["csv_files"]:
-            windows = load_windows_from_file_list(
-                csv_files=params["csv_files"],
-                channels=channels,
-                label_column=label_column,
-                class_names=load_class_names,
-                window_size=window_size,
-                stride=stride,
-                normalize=False,
-                filter_op_column=filter_op_column,
-            )
-        else:
-            windows = load_windows_from_dir(
-                data_dir=params["data_dir"],
-                channels=channels,
-                label_column=label_column,
-                class_names=load_class_names,
-                window_size=window_size,
-                stride=stride,
-                sensor_type=params.get("sensor_type", ""),
-                normalize=False,
-                filter_op_column=filter_op_column,
-            )
+        _load_windows_raw()
 
-        # 출력 파일명을 AE 용으로 변경
-        # CLS 요청 파일명(cls_fd / cls_torque) 또는 레거시(cnn1d_fd / cnn1d_torque) 모두 처리
         for old, new in [
             ("cls_fd",       "ae_fd"),
             ("cls_torque",   "ae_torque"),
@@ -1444,11 +1920,12 @@ def main() -> None:
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
-        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std = train_ae(
+        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std, norm_mean, norm_std = train_ae(
             params=params,
             windows=windows,
             n_channels=n_channels,
             mlflow_run=mlflow_run,
+            ae_threshold_percentile=ae_threshold_percentile,
         )
 
         export_onnx_ae(
@@ -1471,7 +1948,12 @@ def main() -> None:
             rms_mean=rms_mean,
             rms_thr=rms_thr,
             rms_std=rms_std,
-            n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+            add_fft_channels=add_fft,
+            add_derivative_channels=add_derivative,
+            add_abs_channels=add_abs,
+            n_channels_override=n_channels,
         )
 
         _try_end_mlflow(
@@ -1494,8 +1976,48 @@ def main() -> None:
         sys.exit(0)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # CLS (분류) 경로 — 기존 로직
+    # CLS (분류) 경로
     # ══════════════════════════════════════════════════════════════════════════
+
+    # ── 구간 단위 학습/검증 분할 → 윈도우 추출 ────────────────────────────────
+    _seed    = int(params.get("seed", 42))
+    _val_spl = float(params.get("val_split", 0.2))
+    train_segs, val_segs = split_segments_stratified(all_segments, _val_spl, _seed)
+
+    if global_normalize:
+        # 학습 구간에서만 raw 윈도우 추출 후 통계 계산 → 검증 데이터 누수 없음
+        _train_raw, _ = windows_from_segments(
+            train_segs, window_size, stride, normalize=False,
+            add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+        )
+        norm_mean_cls, norm_std_cls = _compute_global_stats(_train_raw)
+        train_windows = _apply_global_norm(_train_raw, norm_mean_cls, norm_std_cls)
+        _val_raw, val_seg_ids = windows_from_segments(
+            val_segs, window_size, stride, normalize=False,
+            add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+        )
+        val_windows = _apply_global_norm(_val_raw, norm_mean_cls, norm_std_cls)
+        print(
+            f"[main] CLS 전역 정규화 (학습 구간만) — "
+            f"mean={np.round(norm_mean_cls, 4).tolist()}  "
+            f"std={np.round(norm_std_cls, 4).tolist()}",
+            file=sys.stderr,
+        )
+    else:
+        train_windows, _ = windows_from_segments(
+            train_segs, window_size, stride, normalize=True,
+            add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+        )
+        val_windows, val_seg_ids = windows_from_segments(
+            val_segs, window_size, stride, normalize=True,
+            add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+        )
+
+    print(
+        f"[main] 윈도우 — 학습: {len(train_windows)}개  검증: {len(val_windows)}개  "
+        f"(구간 학습: {len(train_segs)}, 검증: {len(val_segs)})",
+        file=sys.stderr,
+    )
 
     # ── MLflow 초기화 ─────────────────────────────────────────────────────────
     mlflow_run, mlflow_mod = _try_setup_mlflow(params)
@@ -1503,11 +2025,16 @@ def main() -> None:
     # ── 학습 ─────────────────────────────────────────────────────────────────
     model, best_val_acc, epochs_trained = train(
         params=params,
-        windows=windows,
+        train_windows=train_windows,
+        val_windows=val_windows,
         n_classes=n_classes,
         n_channels=n_channels,
         mlflow_run=mlflow_run,
+        label_smoothing=label_smoothing,
     )
+
+    # ── 검증 세트 클래스별 분류 결과 테이블 ──────────────────────────────────
+    _print_cls_val_report(model, val_windows, class_names, val_seg_ids)
 
     # ── ONNX 내보내기 ─────────────────────────────────────────────────────────
     export_onnx(
@@ -1527,7 +2054,12 @@ def main() -> None:
         epochs_trained=epochs_trained,
         mlflow_run_id=mlflow_run.info.run_id if mlflow_run else None,
         mlflow_tracking_uri=mlflow_tracking_uri or None,
-        n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
+        add_fft_channels=add_fft,
+        add_derivative_channels=add_derivative,
+        add_abs_channels=add_abs,
+        n_channels_override=n_channels,
+        norm_mean=norm_mean_cls if global_normalize else None,
+        norm_std=norm_std_cls  if global_normalize else None,
     )
 
     # ── MLflow 종료 ───────────────────────────────────────────────────────────
@@ -1543,7 +2075,7 @@ def main() -> None:
 
     # ── 최종 결과 출력 ────────────────────────────────────────────────────────
     info_str = (
-        f"CNN1D 학습 완료 | 윈도우={len(windows)} | "
+        f"CNN1D 학습 완료 | 윈도우={len(train_windows)+len(val_windows)} | "
         f"클래스={n_classes} | val_acc={best_val_acc:.4f} | epochs={epochs_trained}"
     )
     result = {
