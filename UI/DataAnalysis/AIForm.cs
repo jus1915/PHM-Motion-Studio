@@ -122,8 +122,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private CheckBox         _dlChX, _dlChY, _dlChZ;         // Accel 채널
         private CheckBox[]       _dlChTrq;                        // Torque 채널 (Pos/Vel/Trq/CmdPos/CmdVel)
         private Panel            _dlChPanel;                      // 채널 선택 컨테이너
-        private ListBox          _dlClassList;
-        private TextBox          _dlNewClassName;
+        // 결함 클래스 체크박스 (Appearance.Button 토글 스타일)
+        private CheckBox         _dlChkNormal;
+        private CheckBox         _dlChkOverload;
+        private CheckBox         _dlChkLooseness;
+        private CheckBox         _dlChkOverspeed;
+        private CheckedListBox   _dlExtraClassList;  // 폴더 스캔으로 발견된 추가 클래스
         private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
         private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv, _dlBtnBatch;
         private RichTextBox      _dlLog;
@@ -1389,30 +1393,50 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tl.Controls.Add(_dlLabelColumn, 1, row++);
 
 
-            // 클래스 관리 헤더
+            // ── 결함 클래스 체크박스 ───────────────────────────────────────────
             _dlClassListLbl = Lbl("결함 클래스:");
             tl.Controls.Add(_dlClassListLbl, 0, row);
-            var addRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-            _dlNewClassName = new TextBox { Width = 120, Height = 22 };
-            var btnAddClass = new Button { Text = "+ 추가", Width = 60, Height = 22 };
-            var btnDelClass = new Button { Text = "삭제",   Width = 50, Height = 22 };
-            btnAddClass.Click += (s, e) => {
-                var nm = _dlNewClassName.Text.Trim();
-                if (!string.IsNullOrEmpty(nm) && !_dlClassList.Items.Contains(nm))
-                { _dlClassList.Items.Add(nm); _dlNewClassName.Clear(); }
-            };
-            btnDelClass.Click += (s, e) => {
-                if (_dlClassList.SelectedIndex >= 0) _dlClassList.Items.RemoveAt(_dlClassList.SelectedIndex);
-            };
-            addRow.Controls.AddRange(new Control[] { _dlNewClassName, btnAddClass, btnDelClass });
-            tl.Controls.Add(addRow, 1, row++);
 
-            // 클래스 리스트 (2열 span)
-            _dlClassList = new ListBox { Dock = DockStyle.Fill, SelectionMode = SelectionMode.One };
-            foreach (var c in new[] { "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness" })
-                _dlClassList.Items.Add(c);
-            tl.SetColumnSpan(_dlClassList, 2);
-            tl.Controls.Add(_dlClassList, 0, row);
+            // 2×2 그리드 토글 버튼
+            var clsGrid = new TableLayoutPanel
+            {
+                ColumnCount = 2, RowCount = 2,
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Dock = DockStyle.Fill
+            };
+            clsGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            clsGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            clsGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            clsGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            _dlChkNormal    = MakeClassToggle("Normal",    Color.MediumSeaGreen);
+            _dlChkOverload  = MakeClassToggle("Overload",  Color.OrangeRed);
+            _dlChkLooseness = MakeClassToggle("Looseness", Color.DarkOrange);
+            _dlChkOverspeed = MakeClassToggle("Overspeed", Color.Firebrick);
+
+            _dlChkNormal.Checked    = true;
+            _dlChkLooseness.Checked = true;
+
+            clsGrid.Controls.Add(_dlChkNormal,    0, 0);
+            clsGrid.Controls.Add(_dlChkOverload,  1, 0);
+            clsGrid.Controls.Add(_dlChkLooseness, 0, 1);
+            clsGrid.Controls.Add(_dlChkOverspeed, 1, 1);
+
+            tl.SetColumnSpan(clsGrid, 1);
+            tl.Controls.Add(clsGrid, 1, row++);
+
+            // 추가 클래스 (폴더 스캔으로 발견된 기타 클래스)
+            tl.Controls.Add(Lbl("추가 클래스:"), 0, row);
+            _dlExtraClassList = new CheckedListBox
+            {
+                Dock              = DockStyle.Fill,
+                CheckOnClick      = true,
+                BorderStyle       = BorderStyle.FixedSingle,
+                Font              = new Font("Segoe UI", 8.5f),
+                Height            = 56,
+            };
+            tl.SetColumnSpan(_dlExtraClassList, 1);
+            tl.Controls.Add(_dlExtraClassList, 1, row);
 
             grp.Controls.Add(tl);
             return grp;
@@ -1484,8 +1508,24 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // ── 5. UI 적용 ────────────────────────────────────────────────────────────
             // 클래스 리스트
-            _dlClassList.Items.Clear();
-            foreach (var c in classDirs) _dlClassList.Items.Add(c);
+            // 미리 정의된 클래스는 체크박스로 반영
+            var knownMap = new System.Collections.Generic.Dictionary<string, CheckBox>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "normal",    _dlChkNormal    },
+                { "overload",  _dlChkOverload  },
+                { "looseness", _dlChkLooseness },
+                { "overspeed", _dlChkOverspeed },
+            };
+            foreach (var kv in knownMap) kv.Value.Checked = false;
+
+            _dlExtraClassList.Items.Clear();
+            foreach (var c in classDirs)
+            {
+                if (knownMap.TryGetValue(c, out CheckBox chk))
+                    chk.Checked = true;
+                else
+                    _dlExtraClassList.Items.Add(c, true);
+            }
 
             // 신호 타입 + 채널
             if (useAccel)
@@ -1615,9 +1655,28 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             bool isAe = _dlRdoAe?.Checked == true;
 
-            // 클래스 목록 레이블 전환
+            // 클래스 레이블 전환 + AE 시 Normal만 강조
             if (_dlClassListLbl != null)
                 _dlClassListLbl.Text = isAe ? "정상 클래스:" : "결함 클래스:";
+            if (_dlChkNormal != null)
+            {
+                // AE 모드: Normal 고정 체크, 나머지 비활성화
+                if (isAe)
+                {
+                    _dlChkNormal.Checked = true;
+                    _dlChkNormal.Enabled    = false;
+                    _dlChkOverload.Enabled  = false;
+                    _dlChkLooseness.Enabled = false;
+                    _dlChkOverspeed.Enabled = false;
+                }
+                else
+                {
+                    _dlChkNormal.Enabled    = true;
+                    _dlChkOverload.Enabled  = true;
+                    _dlChkLooseness.Enabled = true;
+                    _dlChkOverspeed.Enabled = true;
+                }
+            }
 
             // 출력 경로 파일명 접두사 ae_ 추가/제거
             if (_dlOutputPath != null)
@@ -1637,6 +1696,37 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private static NumericUpDown Nud(int min, int max, int val) =>
             new NumericUpDown { Minimum = min, Maximum = max, Value = val, Dock = DockStyle.Fill };
 
+        /// <summary>
+        /// Appearance.Button 스타일 토글 체크박스를 생성합니다.
+        /// 체크 시 지정된 색상으로 배경이 바뀌고 글자가 흰색으로 표시됩니다.
+        /// </summary>
+        private static CheckBox MakeClassToggle(string label, Color checkedColor)
+        {
+            var chk = new CheckBox
+            {
+                Text        = label,
+                Appearance  = Appearance.Button,
+                FlatStyle   = FlatStyle.Flat,
+                TextAlign   = ContentAlignment.MiddleCenter,
+                Dock        = DockStyle.Fill,
+                Height      = 30,
+                Margin      = new Padding(2),
+                Font        = new Font("Segoe UI", 9f, FontStyle.Bold),
+                BackColor   = Color.WhiteSmoke,
+                ForeColor   = Color.DimGray,
+                Cursor      = Cursors.Hand,
+            };
+            chk.FlatAppearance.BorderColor        = Color.Silver;
+            chk.FlatAppearance.BorderSize         = 1;
+            chk.FlatAppearance.CheckedBackColor   = checkedColor;
+            chk.CheckedChanged += (s, e) =>
+            {
+                chk.ForeColor = chk.Checked ? Color.White : Color.DimGray;
+                chk.BackColor = chk.Checked ? checkedColor : Color.WhiteSmoke;
+            };
+            return chk;
+        }
+
         // ── DL 학습 실행 ─────────────────────────────────────────────────────
 
         /// <summary>현재 UI 설정을 기반으로 학습 params를 빌드합니다. 실패 시 null 반환.</summary>
@@ -1649,7 +1739,20 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (channels.Count == 0) return null;
 
             bool isAe = _dlRdoAe?.Checked == true;
-            var classNames = _dlClassList.Items.Cast<string>().ToList();
+            // 체크박스에서 선택된 클래스 수집 (표시 순서 유지)
+            var classNames = new System.Collections.Generic.List<string>();
+            var clsTogglePairs = new (CheckBox Chk, string Name)[]
+            {
+                (_dlChkNormal,    "normal"),
+                (_dlChkOverload,  "overload"),
+                (_dlChkLooseness, "looseness"),
+                (_dlChkOverspeed, "overspeed"),
+            };
+            foreach (var p in clsTogglePairs)
+                if (p.Chk != null && p.Chk.Checked) classNames.Add(p.Name);
+            if (_dlExtraClassList != null)
+                foreach (string extra in _dlExtraClassList.CheckedItems)
+                    if (!classNames.Contains(extra)) classNames.Add(extra);
             // CLS: 클래스 2개 이상, AE: 정상 클래스 1개 이상
             if (!isAe && classNames.Count < 2) return null;
             if (isAe  && classNames.Count < 1) return null;
