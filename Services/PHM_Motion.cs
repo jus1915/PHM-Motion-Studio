@@ -478,11 +478,6 @@ namespace PHM_Project_DockPanel.Services
                             axes:      allAxes,
                             log:       msg => AppEvents.RaiseLog(msg));
 
-                        combined.TorqueSampled = (dev, ax, val, t)
-                            => _accelInfluxPublisher != null
-                               ? (Action)(() => { }) // InfluxDB 연동 필요 시 여기서 주입
-                               : null;
-
                         // DAQ 하드웨어 시작 (CSV 쓰기는 억제)
                         _accelLogger.SuppressCsvWrite = true;
                         string[] modules = _accelLogger.Modules;
