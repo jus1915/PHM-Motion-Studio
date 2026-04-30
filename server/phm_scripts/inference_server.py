@@ -41,7 +41,7 @@ if _missing:
 
 # ── 임포트 ────────────────────────────────────────────────────────────────────
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import onnxruntime as ort
@@ -262,6 +262,64 @@ def _zscore(arr: np.ndarray) -> np.ndarray:
     return (arr - mean) / std
 
 
+# ── 헬퍼 — 채널 증강 + 정규화 (학습과 동일한 전처리) ─────────────────────────
+def _preprocess_window(
+    window_flat,          # list[float] | flat np.ndarray
+    window_size: int,
+    n_channels:  int,     # C# 가 전송한 RAW 채널 수
+    meta:        dict,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    학습 시와 동일한 채널 증강 + 정규화를 적용합니다.
+
+    Returns:
+        raw_arr:  (1, T, n_raw)   — 원본 데이터 (RMS 계산용)
+        proc_arr: (1, T, n_model) — 증강+정규화 완료 (모델 입력용)
+    """
+    raw = np.array(window_flat, dtype=np.float32).reshape(window_size, n_channels)
+
+    add_abs   = bool(meta.get("add_abs_channels",        False))
+    add_deriv = bool(meta.get("add_derivative_channels", False))
+    add_fft   = bool(meta.get("add_fft_channels",        False))
+
+    extras: List[np.ndarray] = [raw]
+    if add_abs:
+        extras.append(np.abs(raw))
+    if add_deriv:
+        deriv      = np.empty_like(raw)
+        deriv[0]   = 0.0
+        deriv[1:]  = raw[1:] - raw[:-1]
+        extras.append(deriv)
+    if add_fft:
+        T, C         = raw.shape
+        fft_mag      = np.abs(np.fft.rfft(raw, axis=0))   # (T//2+1, C)
+        fft_len      = fft_mag.shape[0]
+        x_old        = np.linspace(0.0, 1.0, fft_len)
+        x_new        = np.linspace(0.0, 1.0, T)
+        fft_resized  = np.stack(
+            [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C)],
+            axis=1,
+        ).astype(np.float32)
+        extras.append(fft_resized)
+
+    aug      = np.concatenate(extras, axis=1) if len(extras) > 1 else extras[0]
+    raw_arr  = raw[np.newaxis, :, :].astype(np.float32)   # (1, T, n_raw)
+    proc_arr = aug[np.newaxis, :, :].astype(np.float32)   # (1, T, n_model)
+
+    # 정규화: global norm (메타에 저장된 통계) 우선, 없으면 per-sample z-score
+    norm_mean = meta.get("norm_mean")
+    norm_std  = meta.get("norm_std")
+    if norm_mean is not None and norm_std is not None:
+        m        = np.array(norm_mean, dtype=np.float32).reshape(1, 1, -1)
+        s        = np.array(norm_std,  dtype=np.float32).reshape(1, 1, -1)
+        s        = np.where(s < 1e-8, 1.0, s)
+        proc_arr = (proc_arr - m) / s
+    elif meta.get("standardize_per_sample", True):
+        proc_arr = _zscore(proc_arr)
+
+    return raw_arr, proc_arr
+
+
 def _loaded_model_file(sensor_type: str, axis: Optional[int]) -> Optional[str]:
     """현재 캐시에 로드된 모델의 파일명을 반환합니다."""
     key = _cache_key(sensor_type, axis)
@@ -397,10 +455,9 @@ def predict(req: PredictRequest):
     model_file = meta.get("source_file")
 
     try:
-        # (1, T, C) float32
-        raw_arr  = np.array(effective_window, dtype=np.float32).reshape(
-                       1, effective_window_size, req.n_channels)
-        norm_arr = _zscore(raw_arr)
+        # 채널 증강 + 정규화 (학습과 동일한 전처리)
+        raw_arr, proc_arr = _preprocess_window(
+            effective_window, effective_window_size, req.n_channels, meta)
 
         model_kind = meta.get("kind", "CNN1D")
         input_name = sess.get_inputs()[0].name
@@ -408,7 +465,7 @@ def predict(req: PredictRequest):
         # ── AE-CNN1D: 재구성 오차로 이상 탐지 ────────────────────────────────
         if model_kind == "AE-CNN1D":
             is_anomaly, score_normed, mae, thr = _ae_score(
-                norm_arr, raw_arr, sess, meta, req.sensor_type
+                proc_arr, raw_arr, sess, meta, req.sensor_type
             )
             return PredictResponse(
                 model_type="AE-CNN1D",
@@ -424,7 +481,7 @@ def predict(req: PredictRequest):
             )
 
         # ── CNN1D: 분류 ──────────────────────────────────────────────────────
-        logits      = sess.run(None, {input_name: norm_arr})[0]
+        logits      = sess.run(None, {input_name: proc_arr})[0]
         exp_l       = np.exp(logits - logits.max(axis=1, keepdims=True))
         probs       = exp_l / exp_l.sum(axis=1, keepdims=True)
         pred_idx    = int(np.argmax(probs[0]))
@@ -454,7 +511,7 @@ def predict(req: PredictRequest):
 
 # ── AE 스코어링 헬퍼 (predict / predict_combined 공용) ───────────────────────
 def _ae_score(
-    norm_arr: "np.ndarray",
+    proc_arr: "np.ndarray",
     raw_arr:  "np.ndarray",
     sess,
     meta: dict,
@@ -462,12 +519,16 @@ def _ae_score(
 ) -> tuple:
     """AE 재구성 오차 기반 이상 점수를 계산합니다.
 
+    Args:
+        proc_arr: 증강+정규화 완료 배열 (1, T, C_model) — 모델 입력
+        raw_arr:  원본 배열        (1, T, C_raw)   — RMS 계산용
+
     Returns:
         (is_anomaly, score_normed, mae, thr)
     """
     input_name = sess.get_inputs()[0].name
-    recon  = sess.run(None, {input_name: norm_arr})[0]
-    mae    = float(np.abs(norm_arr - recon).mean())
+    recon  = sess.run(None, {input_name: proc_arr})[0]
+    mae    = float(np.abs(proc_arr - recon).mean())
     thr    = float(meta.get("threshold", 0.1))
 
     rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
@@ -540,16 +601,14 @@ def predict_combined(req: CombinedPredictRequest):
         eff_ws  = req.window_size
 
     try:
-        raw_arr  = np.array(eff_win, dtype=np.float32).reshape(1, eff_ws, req.n_channels)
-        norm_arr = _zscore(raw_arr)
+        # ── AE 전처리 (채널 증강 + 정규화) ───────────────────────
+        ae_raw_arr, ae_proc_arr = _preprocess_window(eff_win, eff_ws, req.n_channels, ae_meta)
 
-        # ── AE 추론 ──────────────────────────────────────────────
         ae_model_kind = ae_meta.get("kind", "AE-CNN1D")
         if "AE" not in ae_model_kind.upper():
-            # AE 슬롯에 CLS 모델이 로드된 경우 경고 후 진행
             print(f"[inference] 경고: AE 슬롯에 CLS 모델({ae_model_kind}) 로드됨", flush=True)
 
-        is_anomaly, ae_score, mae, thr = _ae_score(norm_arr, raw_arr, ae_sess, ae_meta, req.sensor_type)
+        is_anomaly, ae_score, mae, thr = _ae_score(ae_proc_arr, ae_raw_arr, ae_sess, ae_meta, req.sensor_type)
         ae_model_file = ae_meta.get("source_file")
 
         # ── CLS 모델 로드 & 추론 (선택) ─────────────────────────
@@ -565,15 +624,15 @@ def predict_combined(req: CombinedPredictRequest):
             if cls_ws != eff_ws:
                 need2 = cls_ws * req.n_channels
                 if len(req.window) >= need2:
-                    cls_raw  = np.array(req.window[-need2:], dtype=np.float32).reshape(1, cls_ws, req.n_channels)
-                    cls_norm = _zscore(cls_raw)
+                    _, cls_proc = _preprocess_window(
+                        list(req.window[-need2:]), cls_ws, req.n_channels, cls_meta)
                 else:
-                    cls_norm = norm_arr  # 길이 부족 시 AE 윈도우 재사용
+                    cls_proc = ae_proc_arr  # 길이 부족 시 AE 전처리 결과 재사용
             else:
-                cls_norm = norm_arr
+                _, cls_proc = _preprocess_window(eff_win, eff_ws, req.n_channels, cls_meta)
 
             cls_input_name = cls_sess.get_inputs()[0].name
-            logits     = cls_sess.run(None, {cls_input_name: cls_norm})[0]
+            logits     = cls_sess.run(None, {cls_input_name: cls_proc})[0]
             exp_l      = np.exp(logits - logits.max(axis=1, keepdims=True))
             probs      = exp_l / exp_l.sum(axis=1, keepdims=True)
             pred_idx   = int(np.argmax(probs[0]))

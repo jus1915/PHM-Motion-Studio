@@ -57,24 +57,29 @@ _INFERENCE_URL   = os.getenv("PHM_INFERENCE_URL",   "http://phm-inference:8000")
 
 # C# 앱이 conf 를 전달하지 않을 때 사용하는 기본값
 _DEFAULT_CONF: dict = {
-    "data_dir":       _DATA_ROOT,
-    "channels":       ["x", "y", "z"],
-    "sensor_type":    "accel",
-    "label_column":   "",
-    # AE 기본: 정상 데이터 폴더명. CLS 사용 시 conf 로 class_names 를 재정의하세요.
-    # 예: {"session": "FD", "class_names": ["normal", "looseness"]}
-    "class_names":    ["normal", "looseness"],
-    "normal_classes": ["normal"],       # AE 모드: 정상으로 취급할 클래스 (학습 대상)
-    "window_size":    256,              # 1024 → 256 (학습·추론 동일 윈도우)
-    "stride":         128,              # 512  → 128 (오버랩 50%)
-    "epochs":         30,
-    "batch_size":     32,
-    "lr":             0.001,
-    "val_split":      0.2,
-    "seed":           42,
-    # "AE" = AE 이상탐지(normal_classes 만 학습), "CLS" = 분류(class_names 전체)
-    # 구버전 호환: "AD"→"AE", "FD"→"CLS" (train_dl_model.py 내부에서 자동 변환)
-    "session":        "AE",
+    "data_dir":                _DATA_ROOT,
+    "channels":                ["x", "y", "z"],
+    "sensor_type":             "accel",
+    "label_column":            "",
+    "class_names":             ["normal", "overload", "looseness", "overspeed"],
+    "normal_classes":          ["normal"],   # AE 모드: 정상으로 취급할 클래스
+    "window_size":             256,
+    "stride":                  64,
+    "epochs":                  150,
+    "batch_size":              64,
+    "lr":                      0.001,
+    "val_split":               0.2,
+    "seed":                    42,
+    "label_smoothing":         0.1,
+    # 채널 증강
+    "add_fft_channels":        True,
+    "add_derivative_channels": True,
+    "add_abs_channels":        True,
+    # 전역 정규화 (학습 구간 통계 기반, 데이터 누수 없음)
+    "global_normalize":        True,
+    # "AE" = AE 이상탐지, "CLS" = 결함진단 분류
+    # 구버전 호환: "AD"→"AE", "FD"→"CLS" (train_dl_model.py 내부 자동 변환)
+    "session":                 "CLS",
 }
 
 # Windows 드라이브 패턴 (예: C:\, D:\)
