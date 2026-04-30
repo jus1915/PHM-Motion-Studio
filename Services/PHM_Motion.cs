@@ -478,18 +478,19 @@ namespace PHM_Project_DockPanel.Services
                             axes:      allAxes,
                             log:       msg => AppEvents.RaiseLog(msg));
 
-                        // DAQ 하드웨어 시작 (CSV 쓰기는 억제)
+                        // DAQ 하드웨어 시작 (CSV 쓰기는 억제, 블록만 combined로 전달)
                         _accelLogger.SuppressCsvWrite = true;
                         string[] modules = _accelLogger.Modules;
+                        double accelRate = _accelLogger.SampleRate > 0
+                            ? _accelLogger.SampleRate : 1000.0;
                         _accelLogger.BlockReceived = (module, block, ts) =>
                         {
                             int modIdx = System.Array.IndexOf(modules, module);
                             if (modIdx < 0) return;
                             int n = block.GetLength(1);
                             if (n <= 0) return;
-                            // 블록 내 마지막 샘플을 최신값으로 업데이트
-                            combined.UpdateAccel(modIdx,
-                                block[0, n - 1], block[1, n - 1], block[2, n - 1]);
+                            // 블록 전체(N 샘플)를 combined 로거에 전달 → 원해상도 보존
+                            combined.ProcessAccelBlock(modIdx, block, n, accelRate);
                         };
                         bool accelOk = _accelLogger.Start(new int[0], rootDir, baseName, 0);
 
