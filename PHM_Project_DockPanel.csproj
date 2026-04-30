@@ -181,6 +181,7 @@
     <Compile Include="Services\DAQ\AccelInfluxPublisher.cs" />
     <Compile Include="Services\DAQ\InfluxDbDataSource.cs" />
     <Compile Include="Services\DAQ\DaqAccelCsvLogger.cs" />
+    <Compile Include="Services\DAQ\CombinedCsvLogger.cs" />
     <Compile Include="Services\DAQ\DaqAccelHttpSender.cs" />
     <Compile Include="Services\DAQ\DaqSensorConfig.cs" />
     <Compile Include="Services\DAQ\EventTrigger.cs" />
