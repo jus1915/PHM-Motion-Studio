@@ -1667,8 +1667,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 (_dlChkLooseness, "looseness"),
                 (_dlChkOverspeed, "overspeed"),
             };
-            foreach (var p in clsTogglePairs)
-                if (p.Chk != null && p.Chk.Checked) classNames.Add(p.Name);
+            foreach (var pair in clsTogglePairs)
+                if (pair.Chk != null && pair.Chk.Checked) classNames.Add(pair.Name);
             // CLS: 클래스 2개 이상, AE: 정상 클래스 1개 이상
             if (!isAe && classNames.Count < 2) return null;
             if (isAe  && classNames.Count < 1) return null;
