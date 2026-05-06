@@ -233,6 +233,16 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 for (int m = 0; m < modCount; m++)
                 {
+                    // SuppressCsvWrite=true 이면 파일 자체를 생성하지 않음
+                    if (SuppressCsvWrite)
+                    {
+                        _csvPathByMod[m]     = null;
+                        _lastCsvPathByMod[m] = null;
+                        _fsByMod[m]          = null;
+                        _swByMod[m]          = null;
+                        continue;
+                    }
+
                     var moduleDir = Path.Combine(dir, _modules[m]);
                     Directory.CreateDirectory(moduleDir);
                     var fileName = baseName + "_Accel.csv";
@@ -247,7 +257,6 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         bufferSize: 64 * 1024,
                         options: FileOptions.SequentialScan);
                     var bs = new BufferedStream(_fsByMod[m], 64 * 1024);
-                    // UTF-8, 4KB 내부 버퍼
                     _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = true };
                     // 헤더
                     var _hdr = new System.Text.StringBuilder("time_s,x,y,z");
