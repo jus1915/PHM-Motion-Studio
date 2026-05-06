@@ -13,16 +13,17 @@ namespace PHM_Project_DockPanel.Services.DAQ
     /// 토크(1ms 폴링)와 가속도(DAQ 블록, 단일 센서)를 원래 해상도로 단일 CSV에 기록합니다.
     ///
     /// ▶ 두 신호 해상도 동시 보존 방법:
-    ///   1. 토크 폴링 루프(1ms)가 링 버퍼에 (Stopwatch 틱, torque[]) 를 연속 저장
+    ///   1. 폴링 루프(1ms)가 링 버퍼에 (Stopwatch 틱, torque[], op[]) 를 연속 저장
     ///   2. 가속도 블록 도착 시 각 샘플의 Stopwatch 추정 타임스탬프를 계산
-    ///   3. 투 포인터로 링 버퍼를 순회 → 각 Accel 샘플에 시간적으로 가장 가까운 토크 매핑
-    ///   → Accel 원해상도 + Torque ≈1ms 해상도 모두 보존
+    ///   3. 투 포인터로 링 버퍼를 순회 → 각 Accel 샘플에 가장 가까운 토크/Op 매핑
+    ///   → Accel 원해상도 + Torque/Op ≈1ms 해상도 정합
     ///
     /// CSV 컬럼:
     ///   time_s, Ax0_Trq(%), Ax1_Trq(%), ..., x, y, z, Op_Ax0, Op_Ax1, ...
     ///
-    /// ▶ 가속도는 물리적으로 단일 센서이므로 축별 구분 없이 x, y, z 3열만 기록합니다.
-    ///   토크와 Op는 모터별로 별도 열을 유지합니다.
+    /// ▶ 가속도는 물리적으로 단일 센서 → x, y, z 3열만 기록 (축별 구분 없음)
+    /// ▶ 토크와 Op는 모터별로 별도 열 유지
+    /// ▶ Op 상태도 링 버퍼에 저장하여 블록 지연(≈ N/sampleRate 초) 보정
     /// </summary>
     public sealed class CombinedCsvLogger : IDisposable
     {
@@ -35,10 +36,11 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private readonly int[]             _axes;
         private readonly Action<string>    _log;
 
-        // ── 토크 링 버퍼 ───────────────────────────────────────────
+        // ── 링 버퍼 (토크 + Op 동시 저장) ────────────────────────
         // 크기 = 8192: 1kHz 기준 ≈8초, 빠른 샘플레이트에도 여유
         private const int RING = 8192;
-        private readonly double[] _tBuf;   // [ringIdx * nAxes + axIdx]
+        private readonly double[] _tBuf;   // [ringIdx * nAxes + axIdx] 토크
+        private readonly string[] _opBuf;  // [ringIdx * nAxes + axIdx] Op 상태 (intern)
         private readonly long[]   _tTick;  // 각 폴링의 Stopwatch 틱
         private long _tTotal = 0;
         private readonly object _tLock = new object();
@@ -83,7 +85,12 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
             int n  = _axes.Length;
             _tBuf  = new double[RING * n];
+            _opBuf = new string[RING * n];
             _tTick = new long[RING];
+
+            // 초기값: "Pos" (intern으로 GC 부담 최소화)
+            for (int i = 0; i < _opBuf.Length; i++)
+                _opBuf[i] = string.Intern("Pos");
         }
 
         // ── 시작 ──────────────────────────────────────────────────
@@ -108,7 +115,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 _sw = Stopwatch.StartNew();
 
                 _cts      = new CancellationTokenSource();
-                _pollTask = Task.Run(() => TorquePollLoop(_cts.Token), _cts.Token);
+                _pollTask = Task.Run(() => TorqueOpPollLoop(_cts.Token), _cts.Token);
 
                 _running = true;
                 return true;
@@ -143,8 +150,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
         // ── 가속도 블록 처리 (DAQ BlockReceived에서 호출) ──────────
         /// <summary>
         /// 단일 가속도 센서의 블록 N개 샘플 각각에 대해
-        /// 시간적으로 가장 가까운 토크를 링 버퍼에서 찾아 한 행씩 기록합니다.
-        /// modIdx는 DAQ 모듈 검증에만 사용하며 CSV 컬럼 선택에는 영향 없습니다.
+        /// 시간적으로 가장 가까운 토크/Op를 링 버퍼에서 찾아 한 행씩 기록합니다.
         /// </summary>
         public void ProcessAccelBlock(int modIdx, double[,] block, int n, double sampleRate)
         {
@@ -155,25 +161,23 @@ namespace PHM_Project_DockPanel.Services.DAQ
             long blockArrivalTick = _sw.ElapsedTicks;
             double ticksPerSample = (double)Stopwatch.Frequency / sampleRate;
 
-            // 토크 링 버퍼 현재 크기 스냅샷
+            // 링 버퍼 현재 크기 스냅샷
             long tTotal;
             lock (_tLock) { tTotal = _tTotal; }
             int tAvail = (int)Math.Min(tTotal, RING);
             if (tAvail == 0)
             {
-                WriteBlockNoTorque(block, n, sampleRate);
+                // 링 버퍼 미준비: 현재 상태로 채움
+                WriteBlockNoRingData(block, n, sampleRate);
                 return;
             }
 
-            // Op 스냅샷
             int nAxes = _axes.Length;
-            string[] opSnap = new string[nAxes];
-            for (int i = 0; i < nAxes; i++)
-                opSnap[i] = _getAxisOp?.Invoke(_axes[i]) ?? "Pos";
-
             long baseCount = _accelTotal;
 
-            // ── 투 포인터 매핑: Accel 샘플(오름차순) ↔ 토크 링(오름차순) ──
+            // ── 투 포인터 매핑: Accel 샘플(오름차순) ↔ 링 버퍼(오름차순) ──
+            // 블록 첫 샘플 타임스탬프 = 도착 시각 - (n-1) * ticksPerSample
+            // 링에서 해당 시각에 가장 가까운 폴링 위치부터 시작
             long riStart = Math.Max(0, tTotal - tAvail);
             long ri = riStart;
 
@@ -184,7 +188,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 for (int i = 0; i < n; i++)
                 {
-                    // 이 샘플의 추정 타임스탬프
+                    // 이 샘플의 추정 타임스탬프 (Stopwatch 틱)
                     long sampleTick = blockArrivalTick - (long)((n - 1 - i) * ticksPerSample);
 
                     // ri 전진: 다음 항목이 sampleTick에 더 가까우면 전진
@@ -198,26 +202,26 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         else break;
                     }
 
-                    int rIdx = (int)(ri % RING);
+                    int rIdx  = (int)(ri % RING);
+                    int rBase = rIdx * nAxes;
 
                     // time_s
                     double t_s = (baseCount + i) / sampleRate;
                     sb.Clear();
                     sb.Append(t_s.ToString("F6", CultureInfo.InvariantCulture));
 
-                    // 토크: 축별 (링 버퍼)
-                    int tBase = rIdx * nAxes;
+                    // 토크: 축별 (링 버퍼 → 해당 시점의 값)
                     for (int ai = 0; ai < nAxes; ai++)
-                        sb.Append(",").Append(_tBuf[tBase + ai].ToString("F4", CultureInfo.InvariantCulture));
+                        sb.Append(",").Append(_tBuf[rBase + ai].ToString("F4", CultureInfo.InvariantCulture));
 
                     // 가속도: 단일 센서 x, y, z
                     sb.Append(",").Append(block[0, i].ToString("G6", CultureInfo.InvariantCulture));
                     sb.Append(",").Append(block[1, i].ToString("G6", CultureInfo.InvariantCulture));
                     sb.Append(",").Append(block[2, i].ToString("G6", CultureInfo.InvariantCulture));
 
-                    // Op: 축별
+                    // Op: 축별 (링 버퍼 → 해당 시점의 상태)
                     for (int ai = 0; ai < nAxes; ai++)
-                        sb.Append(",").Append(opSnap[ai]);
+                        sb.Append(",").Append(_opBuf[rBase + ai] ?? "Pos");
 
                     _writer.WriteLine(sb.ToString());
                 }
@@ -226,19 +230,21 @@ namespace PHM_Project_DockPanel.Services.DAQ
             _accelTotal += n;
         }
 
-        // 토크 링 버퍼 미준비 시 0으로 채운 행 기록
-        private void WriteBlockNoTorque(double[,] block, int n, double sampleRate)
+        // 링 버퍼 미준비(수집 시작 직후 첫 블록) 시 현재 상태로 채운 행 기록
+        private void WriteBlockNoRingData(double[,] block, int n, double sampleRate)
         {
             int nAxes = _axes.Length;
             long baseCount = _accelTotal;
+
+            // 현재 Op 상태 스냅샷 (링 버퍼 없으므로 할 수 없음, 현재값 사용)
+            string[] opNow = new string[nAxes];
+            for (int ai = 0; ai < nAxes; ai++)
+                opNow[ai] = SafeGetOp(_getAxisOp, _axes[ai]);
 
             lock (_writerLock)
             {
                 if (_writer == null) return;
                 var sb = new StringBuilder(128);
-                string[] opSnap = new string[nAxes];
-                for (int ai = 0; ai < nAxes; ai++)
-                    opSnap[ai] = _getAxisOp?.Invoke(_axes[ai]) ?? "Pos";
 
                 for (int i = 0; i < n; i++)
                 {
@@ -246,7 +252,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     sb.Clear();
                     sb.Append(t_s.ToString("F6", CultureInfo.InvariantCulture));
 
-                    // 토크: 0 채움
+                    // 토크: 0 채움 (링 버퍼 미준비)
                     for (int ai = 0; ai < nAxes; ai++) sb.Append(",0");
 
                     // 가속도: 단일 센서 x, y, z
@@ -254,8 +260,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     sb.Append(",").Append(block[1, i].ToString("G6", CultureInfo.InvariantCulture));
                     sb.Append(",").Append(block[2, i].ToString("G6", CultureInfo.InvariantCulture));
 
-                    // Op
-                    for (int ai = 0; ai < nAxes; ai++) sb.Append(",").Append(opSnap[ai]);
+                    // Op: 현재 상태
+                    for (int ai = 0; ai < nAxes; ai++) sb.Append(",").Append(opNow[ai]);
 
                     _writer.WriteLine(sb.ToString());
                 }
@@ -263,8 +269,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
             _accelTotal += n;
         }
 
-        // ── 토크 전용 1ms 폴링 루프 ───────────────────────────────
-        private void TorquePollLoop(CancellationToken token)
+        // ── 토크 + Op 1ms 폴링 루프 ──────────────────────────────
+        private void TorqueOpPollLoop(CancellationToken token)
         {
             int nAxes = _axes.Length;
             long ticksPerMs = Stopwatch.Frequency / 1000;
@@ -285,11 +291,15 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         tNow = _sw.ElapsedTicks;
                         _tTick[wi] = tNow;
                         if (TorqueSampled != null) torqueSnap = new double[nAxes];
+                        int wBase = wi * nAxes;
                         for (int ai = 0; ai < nAxes; ai++)
                         {
                             double v = SafeGet(_getTorque, _axes[ai]);
-                            _tBuf[wi * nAxes + ai] = v;
+                            _tBuf[wBase + ai] = v;
                             if (torqueSnap != null) torqueSnap[ai] = v;
+
+                            // Op 상태도 동일 링 슬롯에 저장 (intern으로 중복 할당 방지)
+                            _opBuf[wBase + ai] = string.Intern(SafeGetOp(_getAxisOp, _axes[ai]));
                         }
                         _tTotal++;
                     }
@@ -313,7 +323,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 }
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { _log($"[CombinedLog] 토크 폴링 오류: {ex.Message}"); }
+            catch (Exception ex) { _log($"[CombinedLog] 폴링 오류: {ex.Message}"); }
             finally { timeEndPeriod(1); }
         }
 
@@ -323,6 +333,12 @@ namespace PHM_Project_DockPanel.Services.DAQ
         {
             try { return fn(ax); }
             catch { return double.NaN; }
+        }
+
+        private static string SafeGetOp(Func<int, string> fn, int ax)
+        {
+            try { return fn?.Invoke(ax) ?? "Pos"; }
+            catch { return "Pos"; }
         }
 
         public void Dispose()
