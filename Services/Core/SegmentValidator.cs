@@ -52,10 +52,12 @@ namespace PHM_Project_DockPanel.Services.Core
         public static double AccelHardLimitG = 50.0;
 
         /// <summary>
-        /// Hard absolute limit for torque channels (%).
-        /// Physically possible range is typically 0–100 %; values beyond ±200 % are invalid.
+        /// Hard absolute limit for torque channels.
+        /// Ajin AxmStatusReadTorque 반환값은 실측 최대 ±1100 수준이므로
+        /// 실제 데이터가 필터에 걸리지 않도록 충분한 여유값으로 설정.
+        /// NaN/Infinity 등 ADC 오버플로는 별도 IsNaN/IsInfinity 검사로 걸러짐.
         /// </summary>
-        public static double TorqueHardLimitPct = 200.0;
+        public static double TorqueHardLimitPct = 2000.0;
 
         // ── Signal-quality thresholds ─────────────────────────────────────────
 
