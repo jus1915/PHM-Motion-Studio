@@ -303,26 +303,23 @@ namespace PHM_Project_DockPanel.Services.Core
 
             if (sensorType == "accel")
             {
-                // 통합 CSV: Ax{n}_x, Ax{n}_y, Ax{n}_z (축별 명시)
-                if (axis.HasValue)
+                // 우선: 단일 센서 x, y, z (combined CSV 신규 포맷 / 단독 accel CSV)
+                for (int i = 0; i < headers.Length; i++)
                 {
-                    string px = ("ax" + axis.Value + "_x");
-                    string py = ("ax" + axis.Value + "_y");
-                    string pz = ("ax" + axis.Value + "_z");
+                    string h = headers[i].Trim().ToLower();
+                    if (h == "x" || h == "y" || h == "z")
+                        result.Add(i);
+                }
+                // 폴백: 구 combined CSV 포맷 Ax{n}_x, Ax{n}_y, Ax{n}_z
+                if (result.Count == 0 && axis.HasValue)
+                {
+                    string px = "ax" + axis.Value + "_x";
+                    string py = "ax" + axis.Value + "_y";
+                    string pz = "ax" + axis.Value + "_z";
                     for (int i = 0; i < headers.Length; i++)
                     {
                         string h = headers[i].Trim().ToLower();
                         if (h == px || h == py || h == pz)
-                            result.Add(i);
-                    }
-                }
-                // 단독 가속도 CSV 폴백: x, y, z
-                if (result.Count == 0)
-                {
-                    for (int i = 0; i < headers.Length; i++)
-                    {
-                        string h = headers[i].Trim().ToLower();
-                        if (h == "x" || h == "y" || h == "z")
                             result.Add(i);
                     }
                 }

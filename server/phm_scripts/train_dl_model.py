@@ -248,9 +248,10 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
     """CSV 헤더를 읽어 센서 타입을 추론합니다.
 
     Returns:
-        "torque" — Trq 관련 컬럼이 있고 x/y/z 가속도 컬럼이 없는 경우
-        "accel"  — x, y, z 컬럼이 있는 경우
-        ""       — 판별 불가
+        "combined" — Ax{n}_Trq(%) + x/y/z 가속도 컬럼이 함께 있는 경우 (단일 가속도 센서)
+        "torque"   — Trq 관련 컬럼이 있고 x/y/z 가속도 컬럼이 없는 경우
+        "accel"    — x, y, z 컬럼이 있고 Trq 컬럼이 없는 경우
+        ""         — 판별 불가
     """
     import csv as _csv
     for enc in ("utf-8-sig", "cp949", "utf-8", "latin-1"):
@@ -262,16 +263,12 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
                 continue
             has_trq = any("trq" in h or "vel(mm" in h or "pos(mm" in h for h in headers)
             has_xyz = any(h in ("x", "y", "z") for h in headers)
-            # Ax{n}_x/y/z 패턴 → combined CSV 가속도 컬럼
-            has_ax_xyz = any(
-                h.startswith("ax") and (h.endswith("_x") or h.endswith("_y") or h.endswith("_z"))
-                for h in headers
-            )
-            if has_trq and has_ax_xyz:
+            # combined: 토크(축별) + 가속도(단일 x/y/z) 동시 존재
+            if has_trq and has_xyz:
                 return "combined"
             if has_trq and not has_xyz:
                 return "torque"
-            if has_xyz or has_ax_xyz:
+            if has_xyz:
                 return "accel"
             return ""  # 헤더 읽기는 성공했지만 판별 불가
         except Exception:
