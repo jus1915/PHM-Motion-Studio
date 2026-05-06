@@ -64,6 +64,13 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public bool   IsLogging  => _running;
         public string OutputPath => _filePath;
 
+        /// <summary>
+        /// 토크 폴링 루프가 각 샘플을 기록할 때 추가로 호출할 콜백.
+        /// 파라미터: (axisIndex, torqueValue, sampleTimeUtc)
+        /// InfluxDB 피드 등 외부 처리에 사용.
+        /// </summary>
+        public Action<int, double, DateTime> TorqueSampled { get; set; }
+
         public CombinedCsvLogger(
             Func<int, double> getTorque,
             Func<int, string> getAxisOp,
@@ -297,14 +304,30 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 {
                     long tNow;
                     int  wi;
+                    double[] torqueSnap = null;
                     lock (_tLock)
                     {
                         wi   = (int)(_tTotal % RING);
                         tNow = _sw.ElapsedTicks;
                         _tTick[wi] = tNow;
+                        if (TorqueSampled != null) torqueSnap = new double[nAxes];
                         for (int ai = 0; ai < nAxes; ai++)
-                            _tBuf[wi * nAxes + ai] = SafeGet(_getTorque, _axes[ai]);
+                        {
+                            double v = SafeGet(_getTorque, _axes[ai]);
+                            _tBuf[wi * nAxes + ai] = v;
+                            if (torqueSnap != null) torqueSnap[ai] = v;
+                        }
                         _tTotal++;
+                    }
+
+                    // InfluxDB 등 외부 콜백 (lock 밖에서 호출)
+                    if (torqueSnap != null)
+                    {
+                        var cb   = TorqueSampled;
+                        var utcNow = DateTime.UtcNow;
+                        if (cb != null)
+                            for (int ai = 0; ai < nAxes; ai++)
+                                try { cb(_axes[ai], torqueSnap[ai], utcNow); } catch { }
                     }
 
                     long rem;

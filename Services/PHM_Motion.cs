@@ -27,6 +27,8 @@ namespace PHM_Project_DockPanel.Services
         private AccelInfluxPublisher _accelInfluxPublisher;
         private AjinCsvLogger _ajinLogger;         // Ajin 전용 폴링 로거
         private CombinedCsvLogger _combinedLogger; // 통합 CSV 로거 (accel+torque 동시)
+        // 통합 모드에서 교체하기 전 BlockReceived 백업 (Stop 시 복원용)
+        private Action<string, double[,], DateTime> _savedBlockReceived;
 
         // ▶ 분리된 로깅 토글 (주입식)
         private readonly Func<bool> _isAccelEnabled;   // 가속도 수집 여부
@@ -483,15 +485,31 @@ namespace PHM_Project_DockPanel.Services
                         string[] modules = _accelLogger.Modules;
                         double accelRate = _accelLogger.SampleRate > 0
                             ? _accelLogger.SampleRate : 1000.0;
+                        // ★ 기존 MainForm의 InfluxDB 구독(BlockReceived)을 보존하면서 combined 처리 추가
+                        _savedBlockReceived = _accelLogger.BlockReceived;
+                        var prevBlockReceived = _savedBlockReceived;
                         _accelLogger.BlockReceived = (module, block, ts) =>
                         {
+                            // 1) InfluxDB 피드 (MainForm 구독 체이닝)
+                            prevBlockReceived?.Invoke(module, block, ts);
+
+                            // 2) Combined CSV 기록 (원해상도)
                             int modIdx = System.Array.IndexOf(modules, module);
                             if (modIdx < 0) return;
                             int n = block.GetLength(1);
                             if (n <= 0) return;
-                            // 블록 전체(N 샘플)를 combined 로거에 전달 → 원해상도 보존
                             combined.ProcessAccelBlock(modIdx, block, n, accelRate);
                         };
+                        // ★ InfluxDB 토크 피드 연결: combined 내부 1ms 폴링 → InfluxDB
+                        if (_accelInfluxPublisher != null)
+                        {
+                            string influxModule = _accelLogger.Modules.Length > 0
+                                ? _accelLogger.Modules[0] : "combined";
+                            combined.TorqueSampled = (axisIdx, torqueVal, utcTs) =>
+                                _accelInfluxPublisher.FeedTorqueSample(
+                                    influxModule, axisIdx, torqueVal, utcTs);
+                        }
+
                         bool accelOk = _accelLogger.Start(new int[0], rootDir, baseName, 0);
 
                         // 통합 CSV 시작
@@ -635,7 +653,9 @@ namespace PHM_Project_DockPanel.Services
             if (_combinedLogger != null)
             {
                 _accelLogger.SuppressCsvWrite = false;
-                _accelLogger.BlockReceived    = null;
+                // 통합 모드에서 교체한 BlockReceived를 원래 구독(InfluxDB Feed 등)으로 복원
+                _accelLogger.BlockReceived    = _savedBlockReceived;
+                _savedBlockReceived           = null;
                 _combinedLogger               = null;
             }
 
