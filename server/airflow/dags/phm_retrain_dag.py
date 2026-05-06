@@ -59,7 +59,7 @@ _INFERENCE_URL   = os.getenv("PHM_INFERENCE_URL",   "http://phm-inference:8000")
 _DEFAULT_CONF: dict = {
     "data_dir":                _DATA_ROOT,
     "channels":                ["x", "y", "z"],
-    "sensor_type":             "accel",
+    "sensor_type":             "combined",
     "label_column":            "",
     "class_names":             ["normal", "overload", "looseness", "overspeed"],
     "normal_classes":          ["normal"],   # AE 모드: 정상으로 취급할 클래스
@@ -276,7 +276,7 @@ def run_training_accel(**context) -> None:
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 가속도 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["sensor_type"]      = "accel"
+        params["sensor_type"]      = "combined"
         params["channels"]         = ["x", "y", "z"]
         params["filter_op_column"] = f"Op_Ax{ax}"
         params.setdefault("session", "AE")
@@ -320,7 +320,7 @@ def run_training_torque(**context) -> None:
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["sensor_type"]      = "torque"
+        params["sensor_type"]      = "combined"
         params["channels"]         = [f"Ax{ax}_Trq(%)"]
         params["filter_op_column"] = f"Op_Ax{ax}"
         params.setdefault("session", "AE")
