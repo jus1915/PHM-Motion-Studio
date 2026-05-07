@@ -718,7 +718,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             float _dpiScaleEarly;
             using (var _dg = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
                 _dpiScaleEarly = _dg.DpiX / 96.0f;
-            int statusBarH = Math.Max(56, (int)(56 * _dpiScaleEarly));  // 상태 바 (칩) 높이
+            int statusBarH = Math.Max(76, (int)(76 * _dpiScaleEarly));  // 상태 바 (칩) 높이
 
             contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));          // 툴바
@@ -4266,10 +4266,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         private void FlushLineChart()
         {
-            if (chartLine == null || chartLine.IsDisposed) return;
-
-            // ─ 로컬 진단 스코어 (KNN / DL ONNX) ─────────────────────────────
-            if (!scoreSeries.IsEmpty)
+            // ─ 로컬 진단 스코어 (chartLine이 있을 때만) ──────────────────────
+            if (chartLine != null && !chartLine.IsDisposed && !scoreSeries.IsEmpty)
             {
                 if (_lineFirstFlush)
                 {
@@ -4646,39 +4644,34 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 }
 
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
+                // 가속도(전역 단일 모델)는 차트로만 표시 → 이벤트 로그/그리드 제외
+                bool accelGlobal = isAccel && !result.Axis.HasValue;
                 if (anomaly)
                 {
-                    // normScore 기준으로 위험/경고 등급 분류
-                    // spike-only 이상(normScore < DangerMultiplier)은 경고로 처리
                     bool isDanger = normScore >= DangerMultiplier;
-
                     string spikeInfo = spikeAnomaly && !threshAnomaly
                         ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
                     string levelTag = isDanger ? "🔴 위험" : "🟡 경고";
 
-                    if (isDanger)
-                    {
-                        cntDanger++;
-                        cardDanger.ValueText = cntDanger + " 건";
-                    }
-                    else
-                    {
-                        cntWarning++;
-                        cardWarning.ValueText = cntWarning + " 건";
-                    }
+                    if (isDanger) { cntDanger++;  cardDanger.ValueText  = cntDanger  + " 건"; }
+                    else          { cntWarning++; cardWarning.ValueText = cntWarning + " 건"; }
 
-                    AppendEventLog(
-                        $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
-                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}{spikeInfo}");
-                    rows.Add(new EventRow
+                    // 가속도 전역 이상은 KPI 카운트만 올리고 로그·그리드에는 남기지 않음
+                    if (!accelGlobal)
                     {
-                        TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
-                        Axis         = result.Axis ?? (isAccel ? -1 : -2),
-                        AnomalyScore = Math.Round(result.AnomalyScore, 4),
-                        Threshold    = Math.Round(result.Threshold, 4),
-                        Alarm        = levelTag + " " + displayName + " 이상" + spikeTag + cls
-                    });
-                    if (rows.Count > 500) rows.RemoveAt(0);
+                        AppendEventLog(
+                            $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
+                            $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}{spikeInfo}");
+                        rows.Add(new EventRow
+                        {
+                            TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
+                            Axis         = result.Axis ?? -2,
+                            AnomalyScore = Math.Round(result.AnomalyScore, 4),
+                            Threshold    = Math.Round(result.Threshold, 4),
+                            Alarm        = levelTag + " " + displayName + " 이상" + spikeTag + cls
+                        });
+                        if (rows.Count > 500) rows.RemoveAt(0);
+                    }
                 }
             }));
         }
