@@ -250,6 +250,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             cmbSession.Items.Add("이상 탐지 (Anomaly Detection)");
             cmbSession.Items.Add("결함 진단 (Fault Diagnosis)");
             cmbSession.SelectedIndex = 0;
+            cmbSession.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
             cmbSession.SelectedIndexChanged += (s, e) =>
             {
                 _session = (cmbSession.SelectedIndex == 0) ? SessionType.AnomalyDetection : SessionType.FaultDiagnosis;
@@ -2059,6 +2060,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 "결합 (combined)",
             });
             _aflTrainMode.SelectedIndex = 0; // 기본값: 전체
+            _aflTrainMode.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
 
             _aflBtnTrigger = new Button
             {
@@ -2098,6 +2100,46 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         /// <summary>
         /// 현재 DL 탭 설정을 params로 패키징해 Airflow DAG를 즉시 트리거합니다.
         /// </summary>
+        /// <summary>세션/센서 선택 조합을 버튼 툴팁으로 표시합니다.</summary>
+        private void UpdateTriggerButtonText()
+        {
+            if (_aflBtnTrigger == null) return;
+            bool isAe    = (_session == SessionType.AnomalyDetection);
+            int  modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
+
+            var tasks = new System.Collections.Generic.List<string>();
+            bool wantAccel    = (modeIdx == 0 || modeIdx == 1);
+            bool wantTorque   = (modeIdx == 0 || modeIdx == 2);
+            bool wantCombined = (modeIdx == 0 || modeIdx == 3);
+
+            if (isAe)
+            {
+                if (wantAccel)  tasks.Add("AE-Accel");
+                if (wantTorque) tasks.Add("AE-Torque");
+            }
+            else
+            {
+                if (wantAccel)    tasks.Add("CLS-Accel");
+                if (wantTorque)   tasks.Add("CLS-Torque");
+                if (wantCombined) tasks.Add("CLS-Combined");
+            }
+
+            string preview = tasks.Count > 0
+                ? string.Join(", ", tasks)
+                : "없음";
+            // 버튼 툴팁 업데이트 (ToolTip 컴포넌트는 Form 수준에서 공유)
+            string tipText = $"실행될 태스크: {preview}";
+            _aflBtnTrigger.Text = $"▶ 트리거 [{(isAe ? "AE" : "CLS")}]";
+            if (_aflBtnTrigger.Tag is System.Windows.Forms.ToolTip tt)
+                tt.SetToolTip(_aflBtnTrigger, tipText);
+            else
+            {
+                var newTip = new System.Windows.Forms.ToolTip();
+                newTip.SetToolTip(_aflBtnTrigger, tipText);
+                _aflBtnTrigger.Tag = newTip;
+            }
+        }
+
         private async System.Threading.Tasks.Task TriggerAirflowAsync()
         {
             string dataDir    = _dlDataDir?.Text?.Trim() ?? "";
@@ -2121,17 +2163,42 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 return;
             }
 
-            // 학습 모드 ComboBox → train_modes 목록 결정
-            // 각 태스크는 DAG 내부에서 session을 고정(CLS/AE)하므로 여기서 session은 무관
-            string[] trainModes;
-            int modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
-            switch (modeIdx)
+            // ── train_modes 결정: 세션(AE/CLS) × 센서 타입 선택기 ─────────────────
+            // AE  태스크: train_ae_accel (단일 전역) / train_ae_torque (축별)
+            // CLS 태스크: train_accel    (축별)       / train_torque    (축별) / train_combined (축별)
+            // 결합(combined)은 CLS 전용 — AE combined 모델 없음
+            bool isAeSession  = (_session == SessionType.AnomalyDetection);
+            bool isCls        = !isAeSession;
+            int  modeIdx      = _aflTrainMode?.SelectedIndex ?? 0;
+            // modeIdx: 0=전체, 1=가속도, 2=토크, 3=결합
+
+            var modeList = new System.Collections.Generic.List<string>();
+            if (isAeSession || modeIdx == 0)        // AE 세션이거나 전체
             {
-                case 1:  trainModes = new[] { "accel",  "ae_accel"  }; break; // 가속도 CLS+AE
-                case 2:  trainModes = new[] { "torque", "ae_torque" }; break; // 토크 CLS+AE
-                case 3:  trainModes = new[] { "combined" };             break; // 결합 CLS만
-                default: trainModes = new[] { "accel", "torque", "combined", "ae_accel", "ae_torque" }; break; // 전체
+                bool wantAccel  = (modeIdx == 0 || modeIdx == 1);
+                bool wantTorque = (modeIdx == 0 || modeIdx == 2);
+                if (wantAccel)  modeList.Add("ae_accel");
+                if (wantTorque) modeList.Add("ae_torque");
             }
+            if (isCls || modeIdx == 0)              // CLS 세션이거나 전체
+            {
+                bool wantAccel    = (modeIdx == 0 || modeIdx == 1);
+                bool wantTorque   = (modeIdx == 0 || modeIdx == 2);
+                bool wantCombined = (modeIdx == 0 || modeIdx == 3);
+                if (wantAccel)    modeList.Add("accel");
+                if (wantTorque)   modeList.Add("torque");
+                if (wantCombined) modeList.Add("combined");
+            }
+            string[] trainModes = modeList.ToArray();
+
+            if (trainModes.Length == 0)
+            {
+                MessageBox.Show("선택된 세션과 센서 조합에 해당하는 학습 모드가 없습니다.\n"
+                              + "(결합 센서는 CLS 전용입니다)",
+                                "학습 모드 없음", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             paramsObj["train_modes"] = trainModes;
             // Airflow DAG 태스크는 session을 내부 고정값 사용 → conf의 session 제거
             paramsObj.Remove("session");
