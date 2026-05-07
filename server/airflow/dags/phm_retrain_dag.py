@@ -256,7 +256,9 @@ def _is_mode_enabled(conf: dict, mode: str) -> bool:
 
 def run_training_accel(**context) -> None:
     """
-    가속도 전용 CLS 학습 태스크 — 축별 per-axis 모델 학습.
+    가속도 전용 CLS(결함진단) 학습 태스크 — 축별 per-axis 모델 학습.
+    conf의 session 값과 무관하게 항상 CLS 로 학습합니다.
+    AE 이상탐지 학습은 train_ae_accel 태스크를 사용하세요.
 
     channels     = ["x", "y", "z"]
     augment_mode = "standard"  (FFT + derivative + z-score 정규화)
@@ -268,33 +270,33 @@ def run_training_accel(**context) -> None:
 
     # train_modes 필터
     if not _is_mode_enabled(conf, "accel"):
-        print("[PHM] train_modes 에 'accel' 없음 → 가속도 학습 건너뜀", flush=True)
+        print("[PHM] train_modes 에 'accel' 없음 → 가속도 CLS 학습 건너뜀", flush=True)
         return
 
     axis_count = _get_axis_count(conf)
     run_id     = str(context.get("run_id", "manual"))
 
     for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ 가속도 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        print(f"\n[PHM] ━━━ 가속도 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "accel"
         params["channels"]         = ["x", "y", "z"]
         params["filter_op_column"] = f"Op_Ax{ax}"
         params["augment_mode"]     = "standard"
         params["normalize"]        = True
-        params.setdefault("session", "CLS")
-        session = _resolve_session(params)
-        prefix  = _output_prefix(session, "accel")
-        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
-        print(f"[PHM] 출력 파일: {params['output']}  (session={session})", flush=True)
+        params["session"]          = "CLS"   # conf 값 무시, 항상 CLS 고정
+        params["output"] = str(Path(_MODELS_ROOT) / f"cls_accel_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_accel_ax{ax}")
 
-    print(f"\n[PHM] 가속도 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] 가속도 CLS 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
 def run_training_torque(**context) -> None:
     """
-    토크 전용 CLS 학습 태스크 — 축별 per-axis 모델 학습.
+    토크 전용 CLS(결함진단) 학습 태스크 — 축별 per-axis 모델 학습.
+    conf의 session 값과 무관하게 항상 CLS 로 학습합니다.
+    AE 이상탐지 학습은 train_ae_torque 태스크를 사용하세요.
 
     channels     = ["Ax{n}_Trq(%)"]
     augment_mode = "mixed"  (derivative + stats, 정규화 없음)
@@ -306,33 +308,32 @@ def run_training_torque(**context) -> None:
 
     # train_modes 필터
     if not _is_mode_enabled(conf, "torque"):
-        print("[PHM] train_modes 에 'torque' 없음 → 토크 학습 건너뜀", flush=True)
+        print("[PHM] train_modes 에 'torque' 없음 → 토크 CLS 학습 건너뜀", flush=True)
         return
 
     axis_count = _get_axis_count(conf)
     run_id     = str(context.get("run_id", "manual"))
 
     for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        print(f"\n[PHM] ━━━ 토크 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "torque"
         params["channels"]         = [f"Ax{ax}_Trq(%)"]
         params["filter_op_column"] = f"Op_Ax{ax}"
         params["augment_mode"]     = "mixed"
         params["normalize"]        = False
-        params.setdefault("session", "CLS")
-        session = _resolve_session(params)
-        prefix  = _output_prefix(session, "torque")
-        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
-        print(f"[PHM] 출력 파일: {params['output']}  (session={session})", flush=True)
+        params["session"]          = "CLS"   # conf 값 무시, 항상 CLS 고정
+        params["output"] = str(Path(_MODELS_ROOT) / f"cls_torque_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_torque_ax{ax}")
 
-    print(f"\n[PHM] 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] 토크 CLS 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
 def run_training_combined(**context) -> None:
     """
-    결합(가속도 + 토크) CLS 학습 태스크 — 축별 per-axis 모델 학습.
+    결합(가속도 + 토크) CLS(결함진단) 학습 태스크 — 축별 per-axis 모델 학습.
+    conf의 session 값과 무관하게 항상 CLS 로 학습합니다.
 
     channels     = ["x", "y", "z", "Ax{n}_Trq(%)"]
     augment_mode = "mixed"  (accel→FFT+deriv / torque→deriv+stats, 정규화 없음)
@@ -344,28 +345,26 @@ def run_training_combined(**context) -> None:
 
     # train_modes 필터
     if not _is_mode_enabled(conf, "combined"):
-        print("[PHM] train_modes 에 'combined' 없음 → 결합 학습 건너뜀", flush=True)
+        print("[PHM] train_modes 에 'combined' 없음 → 결합 CLS 학습 건너뜀", flush=True)
         return
 
     axis_count = _get_axis_count(conf)
     run_id     = str(context.get("run_id", "manual"))
 
     for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ 결합 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        print(f"\n[PHM] ━━━ 결합 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "combined"
         params["channels"]         = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
         params["filter_op_column"] = f"Op_Ax{ax}"
         params["augment_mode"]     = "mixed"
         params["normalize"]        = False
-        params.setdefault("session", "CLS")
-        session = _resolve_session(params)
-        prefix  = _output_prefix(session, "combined")
-        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
-        print(f"[PHM] 출력 파일: {params['output']}  (session={session})", flush=True)
+        params["session"]          = "CLS"   # conf 값 무시, 항상 CLS 고정
+        params["output"] = str(Path(_MODELS_ROOT) / f"cls_combined_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_combined_ax{ax}")
 
-    print(f"\n[PHM] 결합 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] 결합 CLS 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
 def run_training_ae_accel(**context) -> None:

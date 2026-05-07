@@ -2122,16 +2122,19 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
 
             // 학습 모드 ComboBox → train_modes 목록 결정
+            // 각 태스크는 DAG 내부에서 session을 고정(CLS/AE)하므로 여기서 session은 무관
             string[] trainModes;
             int modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
             switch (modeIdx)
             {
-                case 1:  trainModes = new[] { "accel" };    break;
-                case 2:  trainModes = new[] { "torque" };   break;
-                case 3:  trainModes = new[] { "combined" }; break;
-                default: trainModes = new[] { "accel", "torque", "combined" }; break; // 전체
+                case 1:  trainModes = new[] { "accel",  "ae_accel"  }; break; // 가속도 CLS+AE
+                case 2:  trainModes = new[] { "torque", "ae_torque" }; break; // 토크 CLS+AE
+                case 3:  trainModes = new[] { "combined" };             break; // 결합 CLS만
+                default: trainModes = new[] { "accel", "torque", "combined", "ae_accel", "ae_torque" }; break; // 전체
             }
             paramsObj["train_modes"] = trainModes;
+            // Airflow DAG 태스크는 session을 내부 고정값 사용 → conf의 session 제거
+            paramsObj.Remove("session");
 
             _aflBtnTrigger.Enabled = false;
             _aflStatusLbl.ForeColor = Color.DodgerBlue;
