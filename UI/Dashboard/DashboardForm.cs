@@ -944,18 +944,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             using (var _dpiGfx = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
                 _dpiScale = _dpiGfx.DpiX / 96.0f;
             int kpiRowH   = Math.Max(140, (int)(140 * _dpiScale));  // KPI 카드 행
-            int accelBarH = Math.Max(42,  (int)(42  * _dpiScale));  // 가속도 AE 바
+            int accelBarH = Math.Max(38,  (int)(38  * _dpiScale));  // 가속도 AE 바 (분류 현황 내부)
 
             var leftColPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4,
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
                 Margin = new Padding(0, 0, 4, 0), Padding = Padding.Empty
             };
             leftColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));         // 섹션 제목
             leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, kpiRowH));    // KPI 카드 (DPI 대응)
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, accelBarH));  // 가속도 AE 전역 패널
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));         // 실시간 분류 현황
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));         // 실시간 분류 현황 (가속도AE 바 포함)
 
             var lblKpiTitle = new Label
             {
@@ -980,13 +979,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles,  2, 0);
 
-            // ── 가속도 AE 전역 스코어 패널 ──────────────────────────────────────
+            // ── 가속도 AE 전역 스코어 패널 (실시간 분류 현황 섹션 내부 상단에 배치) ─────
             _pnlAccelAeBar = new Panel
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,
+                Height = accelBarH,
                 BackColor = Color.FromArgb(245, 245, 248),
-                Padding = new Padding(10, 0, 10, 0),
-                Margin = new Padding(0, 2, 0, 2)
+                Padding = new Padding(10, 0, 10, 0)
             };
             _pnlAccelAeBar.Paint += (s, e) =>
             {
@@ -1028,8 +1027,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             leftColPanel.SuspendLayout();
             leftColPanel.Controls.Add(lblKpiTitle,      0, 0);
             leftColPanel.Controls.Add(kpiPanel,         0, 1);
-            leftColPanel.Controls.Add(_pnlAccelAeBar,   0, 2);
-            leftColPanel.Controls.Add(classMatrixPanel, 0, 3);
+            leftColPanel.Controls.Add(classMatrixPanel, 0, 2);
             leftColPanel.ResumeLayout(false);
 
             // Bottom-Right: 이벤트 로그 + 이벤트 그리드
@@ -4910,8 +4908,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
 
+            // DockStyle.Top 역순 배치: 나중에 추가한 것이 위로 올라오므로
+            // DGV(Fill) → _pnlAccelAeBar(Top) → lbl(Top) 순으로 추가
             wrap.Controls.Add(_classMatrixDgv);
-            wrap.Controls.Add(lbl);   // Top 먼저 배치
+            if (_pnlAccelAeBar != null)
+                wrap.Controls.Add(_pnlAccelAeBar);  // lbl 바로 아래
+            wrap.Controls.Add(lbl);                 // 최상단
             return wrap;
         }
 
