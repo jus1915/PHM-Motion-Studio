@@ -46,7 +46,7 @@ from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 
 # ── 기본 설정 ────────────────────────────────────────────────────────────────
-_SCHEDULE    = os.getenv("PHM_RETRAIN_SCHEDULE", "0 2 * * *")   # 매일 새벽 2시
+_SCHEDULE    = os.getenv("PHM_RETRAIN_SCHEDULE", None)          # 스케줄 비활성화 (수동 트리거만 사용)
 _SCRIPTS_DIR = Path(os.getenv(
     "PHM_SCRIPTS_DIR",
     Path(__file__).resolve().parents[1],  # dags/ 의 부모 = scripts/
