@@ -2107,17 +2107,17 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             bool isAe    = (_dlRdoAe?.Checked == true);   // DL 탭 라디오 버튼 기준
             int  modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
 
-            var tasks = new System.Collections.Generic.List<string>();
             bool wantAccel    = (modeIdx == 0 || modeIdx == 1);
             bool wantTorque   = (modeIdx == 0 || modeIdx == 2);
             bool wantCombined = (modeIdx == 0 || modeIdx == 3);
 
-            if (isAe)
+            var tasks = new System.Collections.Generic.List<string>();
+            if (isAe)                               // AE 세션: ae_* 태스크만
             {
                 if (wantAccel)  tasks.Add("AE-Accel");
                 if (wantTorque) tasks.Add("AE-Torque");
             }
-            else
+            else                                    // CLS 세션: accel/torque/combined만
             {
                 if (wantAccel)    tasks.Add("CLS-Accel");
                 if (wantTorque)   tasks.Add("CLS-Torque");
@@ -2172,22 +2172,23 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             int  modeIdx      = _aflTrainMode?.SelectedIndex ?? 0;
             // modeIdx: 0=전체, 1=가속도, 2=토크, 3=결합
 
+            // modeIdx: 센서 타입 선택 (0=전체, 1=가속도, 2=토크, 3=결합)
+            // 세션 분기는 라디오버튼(isAeSession)만 결정 — modeIdx는 센서 타입 필터만
+            bool wantAccelSensor    = (modeIdx == 0 || modeIdx == 1);
+            bool wantTorqueSensor   = (modeIdx == 0 || modeIdx == 2);
+            bool wantCombinedSensor = (modeIdx == 0 || modeIdx == 3);
+
             var modeList = new System.Collections.Generic.List<string>();
-            if (isAeSession || modeIdx == 0)        // AE 세션이거나 전체
+            if (isAeSession)                        // AE 세션: ae_* 태스크만
             {
-                bool wantAccel  = (modeIdx == 0 || modeIdx == 1);
-                bool wantTorque = (modeIdx == 0 || modeIdx == 2);
-                if (wantAccel)  modeList.Add("ae_accel");
-                if (wantTorque) modeList.Add("ae_torque");
+                if (wantAccelSensor)  modeList.Add("ae_accel");
+                if (wantTorqueSensor) modeList.Add("ae_torque");
             }
-            if (isCls || modeIdx == 0)              // CLS 세션이거나 전체
+            else                                    // CLS 세션: accel/torque/combined 태스크만
             {
-                bool wantAccel    = (modeIdx == 0 || modeIdx == 1);
-                bool wantTorque   = (modeIdx == 0 || modeIdx == 2);
-                bool wantCombined = (modeIdx == 0 || modeIdx == 3);
-                if (wantAccel)    modeList.Add("accel");
-                if (wantTorque)   modeList.Add("torque");
-                if (wantCombined) modeList.Add("combined");
+                if (wantAccelSensor)    modeList.Add("accel");
+                if (wantTorqueSensor)   modeList.Add("torque");
+                if (wantCombinedSensor) modeList.Add("combined");
             }
             string[] trainModes = modeList.ToArray();
 
