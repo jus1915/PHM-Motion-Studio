@@ -400,22 +400,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private CheckBox _chkShowCombined;          // 결합 결과 표시 여부
 
         // ── 실시간 분류 현황 매트릭스 ─────────────────────────────────────────
-        // 행=축, 열=AE 점수/상태 + CLS 결함/신뢰도 → 3단계 색 코딩
+        // 행=토크 축, 열=AE 토크 점수/상태 + CLS 결함/신뢰도 (가속도 AE는 전역 단일 패널로 별도 표시)
         private DataGridView _classMatrixDgv;
         private readonly Dictionary<int, int> _classMatrixAxisRow = new Dictionary<int, int>(); // axis → rowIdx
-        // ── AE 이상탐지 열 ──────────────────────────────
-        private const int CMG_COL_AXIS    = 0;
-        private const int CMG_COL_AS      = 1;   // [AE] 가속도 점수
-        private const int CMG_COL_ASTATE  = 2;   // [AE] 가속도 판정
-        private const int CMG_COL_TS      = 3;   // [AE] 토크 점수
-        private const int CMG_COL_TSTATE  = 4;   // [AE] 토크 판정
+        // ── AE 이상탐지 열 (토크 per-axis 전용) ─────────
+        private const int CMG_COL_AXIS     = 0;
+        private const int CMG_COL_TS       = 1;  // [AE] 토크 점수
+        private const int CMG_COL_TSTATE   = 2;  // [AE] 토크 판정
         // ── CLS 결함진단 열 ─────────────────────────────
-        private const int CMG_COL_ACLS     = 5;  // [CLS] 가속도 결함명
-        private const int CMG_COL_ACLSCONF = 6;  // [CLS] 가속도 신뢰도
-        private const int CMG_COL_TCLS     = 7;  // [CLS] 토크 결함명
-        private const int CMG_COL_TCLSCONF = 8;  // [CLS] 토크 신뢰도
-        private const int CMG_COL_CCLS     = 9;  // [CLS] 결합 결함명
-        private const int CMG_COL_CCLSCONF = 10; // [CLS] 결합 신뢰도
+        private const int CMG_COL_TCLS     = 3;  // [CLS] 토크 결함명
+        private const int CMG_COL_TCLSCONF = 4;  // [CLS] 토크 신뢰도
+        private const int CMG_COL_CCLS     = 5;  // [CLS] 결합 결함명
+        private const int CMG_COL_CCLSCONF = 6;  // [CLS] 결합 신뢰도
+
+        // ── 가속도 AE 전역 표시 패널 (단일 모델 — per-axis 없음) ─────────
+        private Panel  _pnlAccelAeBar;
+        private Label  _lblAccelAeScore;
+        private Label  _lblAccelAeState;
+        private double _accelAeNormScore;
         // 마지막 스코어 보관 (색 재계산용)
         private readonly Dictionary<string, double> _classMatrixLastScore = new Dictionary<string, double>();
         private readonly Dictionary<string, Panel>  _statusChips      = new Dictionary<string, Panel>();
@@ -698,203 +700,146 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private void BuildUI()
         {
             SuspendLayout();
-            const int SidebarW = 220;
             const int BtnH = 28;
             BackColor = Color.FromArgb(245, 247, 250);
 
             // ══════════════════════════════════════════════════
-            //  Left Sidebar
+            //  콘텐츠 패널 (전체 — 사이드바 없음)
             // ══════════════════════════════════════════════════
-            var leftWrap = new Panel { Dock = DockStyle.Left, Width = SidebarW, BackColor = Color.White };
-            leftWrap.Paint += (s, e) =>
+            // ══════════════════════════════════════════════════
+            //  Content Area (툴바 + 상태바 + 추론차트 + 하단)
+            // ══════════════════════════════════════════════════
+            var contentPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4,
+                Padding = Padding.Empty, Margin = Padding.Empty
+            };
+            contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));   // 툴바
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));   // 상태 바 (칩)
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 40));    // 추론 스코어 차트
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 60));    // 하단
+
+            // ── Row 0: 상단 툴바 ──────────────────────────────────────────────
+            var toolbar = new Panel
+            {
+                Dock = DockStyle.Fill, BackColor = Color.White,
+                Padding = new Padding(8, 0, 8, 0)
+            };
+            toolbar.Paint += (s, e) =>
             {
                 using (var pen = new Pen(Color.FromArgb(215, 215, 222)))
-                    e.Graphics.DrawLine(pen, leftWrap.Width - 1, 0, leftWrap.Width - 1, leftWrap.Height);
+                    e.Graphics.DrawLine(pen, 0, toolbar.Height - 1, toolbar.Width, toolbar.Height - 1);
             };
-            var left = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
-                WrapContents = false, AutoScroll = false,
-                Padding = new Padding(6, 6, 6, 30), Margin = Padding.Empty
-            };
-            left.SuspendLayout();
-            int ctrlWidth = SidebarW - 14;
-            int btnH = BtnH;
 
-            // ── [A] 모델 로드 GroupBox ──────────────────────────────────────────
-            var gbModels = new GroupBox
-            {
-                Text = "모델 로드", Width = ctrlWidth,
-                Padding = new Padding(6, 4, 6, 6),
-                Margin = new Padding(2, 2, 2, 4),
-                AutoSize = true
-            };
-            var tlModels = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3,
-                AutoSize = true, Margin = Padding.Empty
-            };
-            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            for (int i = 0; i < 2; i++) tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
-            tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
-
-            btnLoadSklModel        = new Button { Text = "SKL ONNX",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 235, 255) };
-            btnLoadOnnxModelSingle = new Button { Text = "DL ONNX",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
-            btnLoadModelFolder     = new Button { Text = "폴더 일괄",  Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
-            var btnGlobalKnn       = new Button { Text = "전역 KNN",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
-            var btnGlobalAe        = new Button { Text = "전역 AE",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
-
-            btnLoadSklModel.Click        += (s, e) => LoadSklOnnxModel();
-            btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
-            btnLoadModelFolder.Click     += (s, e) => LoadAxisModelsFromFolder();
-            btnGlobalKnn.Click           += (s, e) => LoadGlobalKnnModel();
-            btnGlobalAe.Click            += (s, e) => LoadGlobalOnnxAeModel();
-
-            tlModels.Controls.Add(btnLoadSklModel,        0, 0);
-            tlModels.Controls.Add(btnLoadOnnxModelSingle, 1, 0);
-            tlModels.Controls.Add(btnLoadModelFolder,     0, 1);
-            tlModels.Controls.Add(btnGlobalKnn,           1, 1);
-            tlModels.SetColumnSpan(btnGlobalAe, 2);
-            tlModels.Controls.Add(btnGlobalAe,            0, 2);
-            gbModels.Controls.Add(tlModels);
-
-            // ── [B] 데이터 소스 GroupBox ────────────────────────────────────────
-            var gbSource = new GroupBox
-            {
-                Text = "데이터 소스", Width = ctrlWidth,
-                Padding = new Padding(6, 4, 6, 6),
-                Margin = new Padding(2, 4, 2, 4),
-                AutoSize = true
-            };
-            var tlSource = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 1,
-                AutoSize = true, Margin = Padding.Empty
-            };
-            tlSource.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-            // 모드 선택 행
-            int rbW = ctrlWidth / 2 - 2;
-            rbtnCsvMode = new RadioButton { Text = "CSV 폴더 감시",  Checked = true,  Width = rbW, Height = 22, Left = 0,        Top = 2, AutoSize = false };
-            rbtnDbMode  = new RadioButton { Text = "DB 모니터링",    Checked = false, Width = rbW, Height = 22, Left = rbW + 4,  Top = 2, AutoSize = false };
-            var pnlMode = new Panel { Height = 26, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
-            pnlMode.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode });
+            // 데이터 소스 모드
+            rbtnCsvMode = new RadioButton { Text = "CSV 폴더 감시", Checked = true, AutoSize = true };
+            rbtnDbMode  = new RadioButton { Text = "DB 모니터링",   Checked = false, AutoSize = true };
             rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourceMode(false); };
             rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourceMode(true);  };
 
-            // CSV 소스
-            pnlCsvSource = new Panel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
-            int folderBtnW = ctrlWidth - 38;
-            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = folderBtnW, Height = btnH, Left = 0, Top = 0 };
+            // CSV 폴더 컨트롤
+            pnlCsvSource = new Panel { AutoSize = true, Visible = true };
+            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = 110, Height = BtnH };
             btnSelectFolder.Click += (s, e) => SelectFolder();
-            btnQuickFolder = new Button { Text = "▾", Width = 24, Height = btnH, Left = folderBtnW + 2, Top = 0 };
+            btnQuickFolder = new Button { Text = "▾", Width = 24, Height = BtnH };
             btnQuickFolder.Click += (s, e) => ShowFolderQuickMenu();
-            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth - 12, 0), Top = btnH + 4, Left = 0, ForeColor = Color.Gray };
-            pnlCsvSource.Height = btnH + 24;
-            pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, btnQuickFolder, lblFolder });
+            lblFolder = new Label
+            {
+                AutoSize = true, ForeColor = Color.Gray,
+                TextAlign = ContentAlignment.MiddleLeft,
+                MaximumSize = new Size(400, 0)
+            };
+            var folderFlow = new FlowLayoutPanel
+            {
+                AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, Padding = Padding.Empty
+            };
+            folderFlow.Controls.AddRange(new Control[] { btnSelectFolder, btnQuickFolder, lblFolder });
+            pnlCsvSource.Controls.Add(folderFlow);
 
-            // DB 소스
-            int lblW = 52, dbH = 24, dbGap = 4, dbY = 0;
-            pnlDbSource = new Panel { Width = ctrlWidth - 12, Margin = Padding.Empty, Visible = false };
-
-            var lblDevice = new Label  { Text = "장치:",  AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            cmbDbDevice   = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
-            btnDbRefresh  = new Button { Text = "↺", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
+            // DB 소스 컨트롤 (인라인)
+            pnlDbSource = new Panel { AutoSize = true, Visible = false };
+            var dbFlow = new FlowLayoutPanel
+            {
+                AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, Padding = Padding.Empty
+            };
+            var lblDevice  = new Label  { Text = "장치:",  AutoSize = false, Width = 38, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbDevice    = new ComboBox { Width = 160, Height = BtnH, DropDownStyle = ComboBoxStyle.DropDown };
+            btnDbRefresh   = new Button { Text = "↺", Width = 28, Height = BtnH };
             btnDbRefresh.Click += (s, e) => RefreshDbDevices();
-            dbY += dbH + dbGap;
-
-            var lblLabelDb = new Label { Text = "레이블:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
-            dbY += dbH + dbGap;
-
-            var lblFrom = new Label { Text = "시작:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            dtpDbFrom = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now.AddHours(-1) };
-            btnDbFullRange = new Button { Text = "↔", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
+            var lblLabelDb = new Label { Text = "레이블:", AutoSize = false, Width = 48, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbLabel     = new ComboBox { Width = 120, Height = BtnH, DropDownStyle = ComboBoxStyle.DropDown };
+            var lblFrom    = new Label { Text = "시작:", AutoSize = false, Width = 36, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbFrom      = new DateTimePicker { Width = 140, Height = BtnH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now.AddHours(-1) };
+            btnDbFullRange = new Button { Text = "↔", Width = 28, Height = BtnH };
             btnDbFullRange.Click += async (s, e) => await FillDbFullRangeAsync();
-            dbY += dbH + dbGap;
-
-            var lblTo = new Label { Text = "종료:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            dtpDbTo = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now };
-            dbY += dbH + dbGap;
-
-            pnlDbSource.Height = dbY + 2;
-            pnlDbSource.Controls.AddRange(new Control[] {
+            var lblTo      = new Label { Text = "종료:", AutoSize = false, Width = 36, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbTo        = new DateTimePicker { Width = 140, Height = BtnH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now };
+            dbFlow.Controls.AddRange(new Control[] {
                 lblDevice, cmbDbDevice, btnDbRefresh,
                 lblLabelDb, cmbDbLabel,
                 lblFrom, dtpDbFrom, btnDbFullRange,
-                lblTo, dtpDbTo,
+                lblTo, dtpDbTo
             });
+            pnlDbSource.Controls.Add(dbFlow);
 
-            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 모드 선택
-            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 소스 패널
-            tlSource.Controls.Add(pnlMode,      0, 0);
-            tlSource.Controls.Add(pnlCsvSource, 0, 1);
-            tlSource.Controls.Add(pnlDbSource,  0, 1);
-            gbSource.Controls.Add(tlSource);
-
-            // ── [C] 시작/중지 ───────────────────────────────────────────────────
+            // 시작/중지 버튼 (오른쪽 앵커)
+            btnStop = new Button
+            {
+                Text = "■  중지", Width = 90, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right, Enabled = false,
+                BackColor = Color.FromArgb(196, 43, 28), ForeColor = Color.White, FlatStyle = FlatStyle.Flat
+            };
             btnStart = new Button
             {
-                Text = "▶  진단 시작", Width = ctrlWidth, Height = btnH + 2,
-                Margin = new Padding(2, 6, 2, 2),
+                Text = "▶  진단 시작", Width = 110, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
                 Font = new Font(this.Font, FontStyle.Bold)
             };
-            btnStop = new Button
+            lblStatus = new Label
             {
-                Text = "■  중지", Width = ctrlWidth, Height = btnH,
-                Margin = new Padding(2, 0, 2, 2), Enabled = false,
-                BackColor = Color.FromArgb(196, 43, 28), ForeColor = Color.White, FlatStyle = FlatStyle.Flat
+                AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                ForeColor = Color.Gray, MaximumSize = new Size(200, 0)
             };
             btnStart.Click += (s, e) => StartWatch();
             btnStop.Click  += (s, e) => StopWatch();
 
-            lblStatus = new Label
+            // 왼쪽 소스 Flow
+            var toolbarLeft = new FlowLayoutPanel
             {
-                AutoSize = true, MaximumSize = new Size(ctrlWidth, 0),
-                Margin = new Padding(2, 2, 2, 6), ForeColor = Color.Gray
+                Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, Padding = Padding.Empty, Margin = Padding.Empty
+            };
+            toolbarLeft.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode, pnlCsvSource, pnlDbSource });
+
+            toolbar.Controls.Add(btnStop);
+            toolbar.Controls.Add(btnStart);
+            toolbar.Controls.Add(lblStatus);
+            toolbar.Controls.Add(toolbarLeft);
+
+            toolbar.Resize += (s, e) =>
+            {
+                int cy    = (toolbar.ClientSize.Height - BtnH) / 2;
+                int right = toolbar.ClientSize.Width - toolbar.Padding.Right;
+                btnStop.Top  = btnStart.Top  = cy;
+                btnStop.Left  = right - btnStop.Width;
+                btnStart.Left = btnStop.Left - btnStart.Width - 4;
+                lblStatus.Top  = cy + 2;
+                lblStatus.Left = btnStart.Left - lblStatus.PreferredWidth - 8;
             };
 
-            // ── [D] 축별 모델 경로 ─────────────────────────────────────────────
-            var gbModelPaths = new GroupBox
+            // ── 모드 전환 시 소스 패널 교체 ──────────────────────────────────
+            void SwitchSourcePanel(bool isDb)
             {
-                Text = "로드된 모델", Width = ctrlWidth,
-                Padding = new Padding(6), Margin = new Padding(2, 4, 2, 4),
-                MinimumSize = new Size(120, 80)
-            };
-            gridModelPaths = new DataGridView
-            {
-                Dock = DockStyle.Fill, ReadOnly = true,
-                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                RowHeadersVisible = false, BorderStyle = BorderStyle.None,
-                ColumnHeadersHeight = 22, RowTemplate = { Height = 20 }
-            };
-            var colAxis = new DataGridViewTextBoxColumn { Name = "Axis", HeaderText = "축", FillWeight = 20, ReadOnly = true };
-            var colPath = new DataGridViewTextBoxColumn { Name = "Path", HeaderText = "모델 파일", FillWeight = 80, ReadOnly = true };
-            gridModelPaths.Columns.AddRange(new DataGridViewColumn[] { colAxis, colPath });
-            gbModelPaths.Controls.Add(gridModelPaths);
-
-            left.Controls.AddRange(new Control[] {
-                gbModels, gbSource, btnStart, btnStop, lblStatus, gbModelPaths
-            });
-            left.ResumeLayout(false);
-            RefreshModelPathList();
-            leftWrap.Controls.Add(left);
-
-            // ══════════════════════════════════════════════════
-            //  Content Area (상태바 + 추론차트 + 하단)
-            // ══════════════════════════════════════════════════
-            var contentPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
-                Padding = Padding.Empty, Margin = Padding.Empty
-            };
-            contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));   // 상태 바 (칩 36px + 마진 + 패딩)
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 42));    // 추론 스코어 차트
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 58));    // 하단
+                pnlCsvSource.Visible = !isDb;
+                pnlDbSource.Visible  =  isDb;
+                toolbarLeft.PerformLayout();
+            }
+            rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourcePanel(false); };
+            rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourcePanel(true);  };
 
             // ── Row 0: Live Status Bar ─────────────────────────────────────────
             var statusBarPanel = new Panel
@@ -993,17 +938,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
             bottomPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            // Bottom-Left: KPI 카드 + 실시간 분류 현황 + 결함 분류 게이지 + 로컬 진단 차트
+            // Bottom-Left: KPI 카드 + 가속도AE 전역패널 + 실시간 분류 현황
             var leftColPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4,
                 Margin = new Padding(0, 0, 4, 0), Padding = Padding.Empty
             };
             leftColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // section 제목
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));   // KPI 카드
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 160));   // 실시간 분류 현황
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 게이지 + 로컬 차트
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // 섹션 제목
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));   // KPI 카드
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));    // 가속도 AE 전역 패널
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 실시간 분류 현황
 
             var lblKpiTitle = new Label
             {
@@ -1027,78 +972,47 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles,  2, 0);
 
-            // 결함 분류 게이지 + 로컬 차트 (하단 2열)
-            var gaugeLocalPanel = new TableLayoutPanel
+            // ── 가속도 AE 전역 스코어 패널 ──────────────────────────────────────
+            _pnlAccelAeBar = new Panel
             {
-                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
-                Margin = Padding.Empty, Padding = Padding.Empty,
-                MinimumSize = new Size(1, 1)
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(245, 245, 248),
+                Padding = new Padding(10, 0, 10, 0),
+                Margin = new Padding(0, 2, 0, 2)
             };
-            gaugeLocalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
-            gaugeLocalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
-            gaugeLocalPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            gaugeLocalPanel.SuspendLayout();
-
-            // 결함 게이지
-            var gaugeWrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 4, 0) };
-            var lblGaugeTitle = new Label
+            _pnlAccelAeBar.Paint += (s, e) =>
             {
-                Text = "결함 분류 확률",
+                using (var pen = new Pen(Color.FromArgb(210, 210, 220)))
+                    e.Graphics.DrawRectangle(pen, 0, 0, _pnlAccelAeBar.Width - 1, _pnlAccelAeBar.Height - 1);
+            };
+            var lblAccelAeTitle = new Label
+            {
+                Text = "가속도 AE (전역 단일 모델):",
+                AutoSize = true, Dock = DockStyle.Left,
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-                Dock = DockStyle.Top, Height = 24,
-                TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0)
+                ForeColor = Color.FromArgb(30, 80, 180),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 0, 12, 0)
             };
-            btnTestProbs = new Button { Text = "확률 랜덤", AutoSize = true, Dock = DockStyle.Right, Margin = new Padding(0, 2, 2, 2) };
-            btnTestProbs.Click += (s, e) => RandomizeClassProbsForAllAxes();
-            var defectBtnRow = new Panel { Dock = DockStyle.Top, Height = 28, Padding = Padding.Empty };
-            defectBtnRow.Controls.Add(btnTestProbs);
-            var gaugeHostPanel = new Panel { Dock = DockStyle.Fill, Padding = Padding.Empty };
-            axisGaugeFlow = new FlowLayoutPanel
+            _lblAccelAeScore = new Label
             {
-                Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
-                WrapContents = false, AutoScroll = true,
-                Padding = new Padding(0, 2, 4, 2), Margin = Padding.Empty
+                Text = "—", AutoSize = true, Dock = DockStyle.Left,
+                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(50, 50, 60),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 0, 10, 0)
             };
-            gaugeHostPanel.Controls.Add(axisGaugeFlow);
-            axisGaugeFlow.Resize += (s, e) =>
+            _lblAccelAeState = new Label
             {
-                int w = Math.Max(axisGaugeFlow.ClientSize.Width - 12, 160);
-                foreach (Control c in axisGaugeFlow.Controls)
-                    if (c is GroupBox gb) gb.Width = w;
-                ReflowGaugeHeights();
+                Text = "—", AutoSize = true, Dock = DockStyle.Left,
+                Font = new Font("Segoe UI", 9f),
+                ForeColor = Color.Gray,
+                TextAlign = ContentAlignment.MiddleLeft
             };
-            gaugeWrap.Controls.Add(gaugeHostPanel);
-            gaugeWrap.Controls.Add(defectBtnRow);
-            gaugeWrap.Controls.Add(lblGaugeTitle);
-
-            // 로컬 진단 차트
-            chartLine = new Chart { Dock = DockStyle.Fill, BackColor = Color.White, MinimumSize = new Size(1, 1) };
-            {
-                var ca = new ChartArea("a");
-                ca.BackColor = Color.White;
-                ca.AxisX.LabelStyle.Format  = "HH:mm:ss";
-                ca.AxisX.IntervalAutoMode   = IntervalAutoMode.VariableCount;
-                ca.AxisX.MajorGrid.Enabled  = true;
-                ca.AxisX.MajorGrid.LineColor = Color.FromArgb(230, 230, 235);
-                ca.AxisY.MajorGrid.Enabled  = true;
-                ca.AxisY.MajorGrid.LineColor = Color.FromArgb(230, 230, 235);
-                ca.AxisY.LabelStyle.Format  = "0.0";
-                chartLine.ChartAreas.Add(ca);
-                chartLine.Legends.Clear();
-                chartLine.Legends.Add(new Legend { Docking = Docking.Top, Alignment = StringAlignment.Near, Font = new Font("Segoe UI", 7.5f) });
-                var now2 = DateTime.Now;
-                var dummy = new Series(SkeletonSeriesName)
-                {
-                    ChartType = SeriesChartType.FastLine, XValueType = ChartValueType.DateTime,
-                    IsVisibleInLegend = false, Color = Color.Transparent
-                };
-                dummy.Points.AddXY(now2.AddMinutes(-5), 0);
-                dummy.Points.AddXY(now2, 0);
-                chartLine.Series.Add(dummy);
-            }
-            gaugeLocalPanel.Controls.Add(gaugeWrap, 0, 0);
-            gaugeLocalPanel.Controls.Add(WrapChartInPanel("로컬 진단 스코어", chartLine, Color.FromArgb(60, 60, 75)), 1, 0);
-            gaugeLocalPanel.ResumeLayout(false);
+            // Left dock 순서: 오른쪽 → 왼쪽 순으로 Controls.Add
+            _pnlAccelAeBar.Controls.Add(_lblAccelAeState);
+            _pnlAccelAeBar.Controls.Add(_lblAccelAeScore);
+            _pnlAccelAeBar.Controls.Add(lblAccelAeTitle);
 
             // ── 실시간 분류 현황 매트릭스 패널 ──────────────────────────────────
             var classMatrixPanel = BuildClassMatrixPanel();
@@ -1106,20 +1020,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             leftColPanel.SuspendLayout();
             leftColPanel.Controls.Add(lblKpiTitle,      0, 0);
             leftColPanel.Controls.Add(kpiPanel,         0, 1);
-            leftColPanel.Controls.Add(classMatrixPanel, 0, 2);
-            leftColPanel.Controls.Add(gaugeLocalPanel,  0, 3);
+            leftColPanel.Controls.Add(_pnlAccelAeBar,   0, 2);
+            leftColPanel.Controls.Add(classMatrixPanel, 0, 3);
             leftColPanel.ResumeLayout(false);
 
-            // Bottom-Right: 이벤트 로그 + 그리드 + 샘플 차트
+            // Bottom-Right: 이벤트 로그 + 이벤트 그리드
             var rightColPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
                 Margin = new Padding(4, 0, 0, 0), Padding = Padding.Empty
             };
             rightColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));   // section 제목
-            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 45));    // 이벤트 로그 + 그리드
-            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 55));    // 샘플 차트
+            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // 섹션 제목
+            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 이벤트 로그 + 그리드
 
             var lblEvents = new Label
             {
@@ -1134,8 +1047,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Margin = Padding.Empty, Padding = Padding.Empty
             };
             eventsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
+            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 35));
+            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 65));
 
             txtEventLog = new TextBox
             {
@@ -1155,38 +1068,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             eventsLayout.Controls.Add(txtEventLog, 0, 0);
             eventsLayout.Controls.Add(grid,        0, 1);
 
-            var lblSample = new Label
-            {
-                Text = "최근 감지 샘플 (축별)",
-                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-                Dock = DockStyle.Top, Height = 24,
-                TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0)
-            };
-            sampleGrid = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 1,
-                Margin = new Padding(2), Padding = Padding.Empty, AutoScroll = false,
-                GrowStyle = TableLayoutPanelGrowStyle.AddRows
-            };
-            sampleGrid.ColumnStyles.Clear(); sampleGrid.RowStyles.Clear();
-            sampleGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            sampleGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            sampleGrid.Resize += (s, e) => UpdateSampleGridLayout();
-
-            var sampleWrap = new Panel
-            {
-                Dock = DockStyle.Fill, Padding = Padding.Empty,
-                BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle
-            };
-            sampleWrap.Controls.Add(sampleGrid);
-            var sampleHost = new Panel { Dock = DockStyle.Fill, Padding = Padding.Empty };
-            sampleHost.Controls.Add(sampleWrap);
-            sampleHost.Controls.Add(lblSample);
-
             rightColPanel.SuspendLayout();
             rightColPanel.Controls.Add(lblEvents,    0, 0);
             rightColPanel.Controls.Add(eventsLayout, 0, 1);
-            rightColPanel.Controls.Add(sampleHost,   0, 2);
             rightColPanel.ResumeLayout(false);
 
             bottomPanel.SuspendLayout();
@@ -1195,13 +1079,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bottomPanel.ResumeLayout(false);
 
             contentPanel.SuspendLayout();
-            contentPanel.Controls.Add(statusBarPanel, 0, 0);
-            contentPanel.Controls.Add(dualChartPanel, 0, 1);
-            contentPanel.Controls.Add(bottomPanel,    0, 2);
+            contentPanel.Controls.Add(toolbar,        0, 0);
+            contentPanel.Controls.Add(statusBarPanel, 0, 1);
+            contentPanel.Controls.Add(dualChartPanel, 0, 2);
+            contentPanel.Controls.Add(bottomPanel,    0, 3);
             contentPanel.ResumeLayout(false);
 
             Controls.Add(contentPanel);
-            Controls.Add(leftWrap);
 
             // ── 타이머 ────────────────────────────────────────────────────────
             var timer = new System.Windows.Forms.Timer { Interval = 300 };
@@ -1247,64 +1131,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             this.Shown += (s, e) =>
             {
-                foreach (Control c in axisGaugeFlow.Controls)
-                    if (c is GroupBox gb)
-                    {
-                        int w = Math.Max(axisGaugeFlow.ClientSize.Width
-                                         - axisGaugeFlow.Padding.Horizontal
-                                         - gb.Margin.Horizontal, 160);
-                        gb.Width = w;
-                    }
-                axisGaugeFlow.PerformLayout();
-                axisGaugeFlow.Refresh();
+                if (axisGaugeFlow != null && !axisGaugeFlow.IsDisposed)
+                {
+                    foreach (Control c in axisGaugeFlow.Controls)
+                        if (c is GroupBox gb)
+                        {
+                            int w = Math.Max(axisGaugeFlow.ClientSize.Width
+                                             - axisGaugeFlow.Padding.Horizontal
+                                             - gb.Margin.Horizontal, 160);
+                            gb.Width = w;
+                        }
+                    axisGaugeFlow.PerformLayout();
+                    axisGaugeFlow.Refresh();
+                }
             };
 
-            void LayoutLeftAuto()
-            {
-                if (leftWrap == null || left == null) return;
-                int fixedH = 0;
-                Control[] fixedControls = { gbModels, gbSource, btnStart, btnStop, lblStatus };
-                foreach (var c in fixedControls)
-                {
-                    if (c == null || !c.Visible) continue;
-                    fixedH += c.Height + c.Margin.Vertical;
-                }
-                fixedH += left.Padding.Vertical;
-                int availH = Math.Max(gbModelPaths.MinimumSize.Height, leftWrap.ClientSize.Height - fixedH);
-                gbModelPaths.Height = availH;
-                int w2 = Math.Max(160, leftWrap.ClientSize.Width - left.Padding.Horizontal);
-                gbModelPaths.Width = w2;
-                left.PerformLayout();
-            }
-
-            leftWrap.Resize += (s, e) =>
-            {
-                int w = Math.Max(180, leftWrap.ClientSize.Width - 12);
-                foreach (Control c in new Control[] { gbModels, gbSource, btnStart, btnStop, gbModelPaths })
-                    if (c != null) c.Width = w;
-                if (btnSelectFolder != null)
-                {
-                    btnSelectFolder.Width = w - 38;
-                    if (btnQuickFolder != null) btnQuickFolder.Left = btnSelectFolder.Right + 2;
-                    lblFolder.MaximumSize = new Size(w - 12, 0);
-                }
-                if (pnlDbSource != null)
-                {
-                    int lw = 52, inner = w - 12;
-                    if (cmbDbDevice  != null) { cmbDbDevice.Width  = inner - lw - 28; btnDbRefresh.Left  = inner - 24; }
-                    if (cmbDbLabel   != null)   cmbDbLabel.Width   = inner - lw - 2;
-                    if (dtpDbFrom    != null) { dtpDbFrom.Width    = inner - lw - 28; btnDbFullRange.Left = inner - 24; }
-                    if (dtpDbTo      != null)   dtpDbTo.Width      = inner - lw - 2;
-                }
-                LayoutLeftAuto();
-            };
-            this.HandleCreated += (s, e) =>
-                BeginInvoke((Action)(() => { LayoutLeftAuto(); left.PerformLayout(); left.Refresh(); }));
-            this.Shown += (s, e) =>
-                BeginInvoke((Action)(() => { LayoutLeftAuto(); left.PerformLayout(); left.Refresh(); }));
-            this.Resize += (s, e) => LayoutLeftAuto();
-
-            LayoutLeftAuto();
             ResumeLayout(false);
         }
 
@@ -2522,10 +2363,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             box.Controls.Add(ch);
             sampleCharts[axis] = ch;
 
-            // 기존 + 새 컨트롤로 재배치 (예외 없음)
-            var list = sampleGrid.Controls.Cast<Control>().ToList();
-            list.Add(box);
-            RebuildSampleGrid(list);
+            // 기존 + 새 컨트롤로 재배치 (sampleGrid 없으면 무시)
+            if (sampleGrid != null)
+            {
+                var list = sampleGrid.Controls.Cast<Control>().ToList();
+                list.Add(box);
+                RebuildSampleGrid(list);
+            }
 
             return ch;
         }
@@ -2568,6 +2412,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         private void UpdateSampleGridLayout()
         {
+            if (sampleGrid == null) return;
             RebuildSampleGrid(sampleGrid.Controls.Cast<Control>().ToList());
         }
 
@@ -4763,8 +4608,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         : Color.FromArgb(220, 252, 231);
 
                 // 실시간 분류 현황 매트릭스 갱신 (정상/경고/위험 모두 반영)
-                if (result.Axis.HasValue)
-                    UpdateClassMatrix(result.Axis.Value, isAccel, normScore);
+                // 가속도(전역 단일 모델, axis 없음) → _pnlAccelAeBar 패널
+                // 토크(per-axis) → DGV 매트릭스 행
+                if (isAccel && !result.Axis.HasValue)
+                    UpdateAccelAeDisplay(normScore);
+                else if (!isAccel && result.Axis.HasValue)
+                    UpdateClassMatrix(result.Axis.Value, normScore);
 
                 bool hasCls = !string.IsNullOrEmpty(result.ClassName) &&
                               !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
@@ -4866,22 +4715,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         /// <summary>
         /// 실시간 분류 현황 매트릭스 CLS 열 갱신 (UI 스레드에서만 호출)
+        /// torque/combined per-axis 결과만 처리; accel은 전역 단일 모델이므로 여기 오지 않음
         /// </summary>
         private void UpdateClassMatrixCls(int axis, string sensorType, string className, object confValue)
         {
             if (_classMatrixDgv == null || axis < 0) return;
+
+            // accel CLS는 per-axis DGV 대상 아님 (전역 단일 모델) — 무시
+            if (string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase)) return;
 
             // 행 확보 (AE 결과보다 먼저 올 수도 있으므로 여기서도 생성)
             if (!_classMatrixAxisRow.TryGetValue(axis, out int rowIdx))
             {
                 rowIdx = _classMatrixDgv.Rows.Add();
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axis;
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AS].Value       = 0.0;
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ASTATE].Value   = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value   = "-";
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLS].Value     = "-";
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLSCONF].Value = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLS].Value     = "-";
@@ -4892,12 +4741,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int clsCol, confCol;
             switch (sensorType?.ToLowerInvariant())
             {
-                case "torque":
-                    clsCol  = CMG_COL_TCLS;     confCol = CMG_COL_TCLSCONF; break;
                 case "combined":
-                    clsCol  = CMG_COL_CCLS;     confCol = CMG_COL_CCLSCONF; break;
-                default: // "accel"
-                    clsCol  = CMG_COL_ACLS;     confCol = CMG_COL_ACLSCONF; break;
+                    clsCol  = CMG_COL_CCLS;  confCol = CMG_COL_CCLSCONF; break;
+                default: // "torque"
+                    clsCol  = CMG_COL_TCLS;  confCol = CMG_COL_TCLSCONF; break;
             }
 
             _classMatrixDgv.Rows[rowIdx].Cells[clsCol].Value  = className ?? "-";
@@ -4921,7 +4768,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>
-        /// 체크박스 CheckedChanged 시 호출 — 해당 sensorType의 칩과 DGV 열을 표시/숨깁니다.
+        /// 체크박스 CheckedChanged 시 호출 — 해당 sensorType의 칩과 컨트롤을 표시/숨깁니다.
+        /// 가속도: _pnlAccelAeBar 패널 (전역 단일 모델)
+        /// 토크/결합: DGV 열 그룹
         /// </summary>
         private void ApplySensorVisibility(string sensorType, bool visible)
         {
@@ -4935,25 +4784,28 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     kv.Value.Visible = visible;
             }
 
-            // 2) DGV 열 그룹 show/hide
-            if (_classMatrixDgv == null) return;
+            // 2) 센서별 컨트롤 show/hide
             switch (sensorType?.ToLowerInvariant())
             {
                 case "accel":
-                    _classMatrixDgv.Columns[CMG_COL_AS].Visible       = visible;
-                    _classMatrixDgv.Columns[CMG_COL_ASTATE].Visible   = visible;
-                    _classMatrixDgv.Columns[CMG_COL_ACLS].Visible     = visible;
-                    _classMatrixDgv.Columns[CMG_COL_ACLSCONF].Visible = visible;
+                    // 가속도는 전역 단일 모델 → _pnlAccelAeBar 패널
+                    if (_pnlAccelAeBar != null) _pnlAccelAeBar.Visible = visible;
                     break;
                 case "torque":
-                    _classMatrixDgv.Columns[CMG_COL_TS].Visible       = visible;
-                    _classMatrixDgv.Columns[CMG_COL_TSTATE].Visible   = visible;
-                    _classMatrixDgv.Columns[CMG_COL_TCLS].Visible     = visible;
-                    _classMatrixDgv.Columns[CMG_COL_TCLSCONF].Visible = visible;
+                    if (_classMatrixDgv != null)
+                    {
+                        _classMatrixDgv.Columns[CMG_COL_TS].Visible       = visible;
+                        _classMatrixDgv.Columns[CMG_COL_TSTATE].Visible   = visible;
+                        _classMatrixDgv.Columns[CMG_COL_TCLS].Visible     = visible;
+                        _classMatrixDgv.Columns[CMG_COL_TCLSCONF].Visible = visible;
+                    }
                     break;
                 case "combined":
-                    _classMatrixDgv.Columns[CMG_COL_CCLS].Visible     = visible;
-                    _classMatrixDgv.Columns[CMG_COL_CCLSCONF].Visible = visible;
+                    if (_classMatrixDgv != null)
+                    {
+                        _classMatrixDgv.Columns[CMG_COL_CCLS].Visible     = visible;
+                        _classMatrixDgv.Columns[CMG_COL_CCLSCONF].Visible = visible;
+                    }
                     break;
             }
         }
@@ -4984,7 +4836,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             var lbl = new Label
             {
-                Text = "실시간 분류 현황  ( AE: 이상탐지 점수/판정 │ CLS: 결함진단 결함명/신뢰도 )",
+                Text = "실시간 분류 현황  ( AE: 토크 이상탐지 점수/판정 │ CLS: 토크/결합 결함명/신뢰도 )",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 Dock = DockStyle.Top, Height = 22,
                 TextAlign = ContentAlignment.MiddleLeft,
@@ -5023,35 +4875,26 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             _classMatrixDgv.RowTemplate.Height = 24;
 
-            // ── AE 이상탐지 열 (col 0-4) ─────────────────────────────────────
+            // col 0: 축
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
                 { Name = "Axis",    HeaderText = "축",       Width = 34, ReadOnly = true });
+            // col 1-2: AE 토크 (per-axis)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "AScore",  HeaderText = "AE 가속도", Width = 78, ReadOnly = true,
-                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
-            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "AState",  HeaderText = "판정",     Width = 68, ReadOnly = true });
-            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TScore",  HeaderText = "AE 토크",  Width = 78, ReadOnly = true,
+                { Name = "TScore",  HeaderText = "AE 토크",  Width = 80, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
                 { Name = "TState",  HeaderText = "판정",     Width = 68, ReadOnly = true });
-            // ── CLS 결함진단 열 (col 5-8) ─────────────────────────────────────
+            // col 3-4: CLS 토크 결함 (per-axis)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "ACLS",    HeaderText = "가속도 결함", Width = 88, ReadOnly = true });
+                { Name = "TCLS",    HeaderText = "토크 결함",  Width = 90, ReadOnly = true });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "ACLSC",   HeaderText = "신뢰도", Width = 52, ReadOnly = true,
+                { Name = "TCLSC",   HeaderText = "신뢰도",   Width = 52, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            // col 5-6: CLS 결합 결함 (per-axis)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TCLS",    HeaderText = "토크 결함",   Width = 88, ReadOnly = true });
+                { Name = "CCLS",    HeaderText = "결합 결함",  Width = 90, ReadOnly = true });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TCLSC",   HeaderText = "신뢰도", Width = 52, ReadOnly = true,
-                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
-            // ── combined CLS 열 (col 9-10) ───────────────────────────────────
-            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "CCLS",    HeaderText = "결합 결함",   Width = 88, ReadOnly = true });
-            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "CCLSC",   HeaderText = "신뢰도", Width = 52, ReadOnly = true,
+                { Name = "CCLSC",   HeaderText = "신뢰도",   Width = 52, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
 
             // 마지막 열은 남은 공간 채우기
@@ -5071,15 +4914,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             if (e.RowIndex < 0) return;
 
-            // ── AE 이상탐지 열 색상 (점수 기반 3단계) ──────────────────────
-            if (e.ColumnIndex == CMG_COL_AS    || e.ColumnIndex == CMG_COL_ASTATE ||
-                e.ColumnIndex == CMG_COL_TS    || e.ColumnIndex == CMG_COL_TSTATE)
+            // ── AE 토크 이상탐지 열 색상 (점수 기반 3단계) ─────────────────
+            if (e.ColumnIndex == CMG_COL_TS || e.ColumnIndex == CMG_COL_TSTATE)
             {
-                bool isAccelCol = e.ColumnIndex == CMG_COL_AS || e.ColumnIndex == CMG_COL_ASTATE;
-                int  scoreCol   = isAccelCol ? CMG_COL_AS : CMG_COL_TS;
-
                 double score = 0;
-                var cell = _classMatrixDgv.Rows[e.RowIndex].Cells[scoreCol];
+                var cell = _classMatrixDgv.Rows[e.RowIndex].Cells[CMG_COL_TS];
                 if (cell.Value != null)
                     double.TryParse(cell.Value.ToString(), System.Globalization.NumberStyles.Any,
                         System.Globalization.CultureInfo.InvariantCulture, out score);
@@ -5098,15 +4937,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
 
             // ── CLS 결함진단 열 색상 (결함명 기반) ──────────────────────────
-            if (e.ColumnIndex == CMG_COL_ACLS     || e.ColumnIndex == CMG_COL_ACLSCONF ||
-                e.ColumnIndex == CMG_COL_TCLS      || e.ColumnIndex == CMG_COL_TCLSCONF ||
-                e.ColumnIndex == CMG_COL_CCLS      || e.ColumnIndex == CMG_COL_CCLSCONF)
+            if (e.ColumnIndex == CMG_COL_TCLS  || e.ColumnIndex == CMG_COL_TCLSCONF ||
+                e.ColumnIndex == CMG_COL_CCLS  || e.ColumnIndex == CMG_COL_CCLSCONF)
             {
-                int nameCol = (e.ColumnIndex == CMG_COL_ACLS || e.ColumnIndex == CMG_COL_ACLSCONF)
-                              ? CMG_COL_ACLS
-                              : (e.ColumnIndex == CMG_COL_TCLS || e.ColumnIndex == CMG_COL_TCLSCONF)
-                                ? CMG_COL_TCLS
-                                : CMG_COL_CCLS;
+                int nameCol = (e.ColumnIndex == CMG_COL_TCLS || e.ColumnIndex == CMG_COL_TCLSCONF)
+                              ? CMG_COL_TCLS
+                              : CMG_COL_CCLS;
 
                 string cls = _classMatrixDgv.Rows[e.RowIndex].Cells[nameCol].Value?.ToString() ?? "";
 
@@ -5126,9 +4962,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>
-        /// 실시간 분류 현황 매트릭스 갱신 (UI 스레드에서만 호출)
+        /// 실시간 분류 현황 매트릭스 갱신 — 토크 per-axis (UI 스레드에서만 호출)
+        /// 가속도 전역 결과는 UpdateAccelAeDisplay() 를 사용하세요.
         /// </summary>
-        private void UpdateClassMatrix(int axis, bool isAccel, double normScore)
+        private void UpdateClassMatrix(int axis, double normScore)
         {
             if (_classMatrixDgv == null || axis < 0) return;
 
@@ -5137,14 +4974,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 rowIdx = _classMatrixDgv.Rows.Add();
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axis;
-                // AE 열 초기값
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AS].Value       = 0.0;
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ASTATE].Value   = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value   = "-";
-                // CLS 열 초기값
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLS].Value     = "-";
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLSCONF].Value = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLS].Value     = "-";
@@ -5154,19 +4985,64 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // 상태 텍스트
             string stateText;
-            if (normScore <= 0)            stateText = "-";
-            else if (normScore >= DangerMultiplier) stateText = "🔴 위험";
-            else if (normScore >= WarnMultiplier)   stateText = "🟡 경고";
-            else                                    stateText = "✓ 정상";
+            if (normScore <= 0)                     stateText = "-";
+            else if (normScore >= DangerMultiplier)  stateText = "🔴 위험";
+            else if (normScore >= WarnMultiplier)    stateText = "🟡 경고";
+            else                                     stateText = "✓ 정상";
 
-            int scoreColIdx = isAccel ? CMG_COL_AS    : CMG_COL_TS;
-            int stateColIdx = isAccel ? CMG_COL_ASTATE : CMG_COL_TSTATE;
-
-            _classMatrixDgv.Rows[rowIdx].Cells[scoreColIdx].Value = normScore;
-            _classMatrixDgv.Rows[rowIdx].Cells[stateColIdx].Value = stateText;
+            _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value     = normScore;
+            _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value = stateText;
 
             // 색 갱신을 위해 해당 행 무효화
             _classMatrixDgv.InvalidateRow(rowIdx);
+        }
+
+        /// <summary>
+        /// 가속도 전역 AE 결과를 _pnlAccelAeBar 패널에 반영합니다 (UI 스레드에서만 호출).
+        /// </summary>
+        private void UpdateAccelAeDisplay(double normScore)
+        {
+            _accelAeNormScore = normScore;
+
+            string stateText;
+            Color  stateColor;
+            if (normScore <= 0)
+            {
+                stateText  = "—";
+                stateColor = Color.Gray;
+            }
+            else if (normScore >= DangerMultiplier)
+            {
+                stateText  = "🔴 위험";
+                stateColor = Color.FromArgb(160, 20, 20);
+            }
+            else if (normScore >= WarnMultiplier)
+            {
+                stateText  = "🟡 경고";
+                stateColor = Color.FromArgb(150, 100, 0);
+            }
+            else
+            {
+                stateText  = "✓ 정상";
+                stateColor = Color.FromArgb(20, 110, 50);
+            }
+
+            if (_lblAccelAeScore != null) _lblAccelAeScore.Text      = normScore > 0 ? $"{normScore:F3}" : "—";
+            if (_lblAccelAeState != null)
+            {
+                _lblAccelAeState.Text      = stateText;
+                _lblAccelAeState.ForeColor = stateColor;
+            }
+
+            // 패널 배경색 갱신
+            if (_pnlAccelAeBar != null)
+            {
+                _pnlAccelAeBar.BackColor = normScore <= 0
+                    ? Color.FromArgb(245, 245, 248)
+                    : normScore >= DangerMultiplier ? Color.FromArgb(255, 220, 220)
+                    : normScore >= WarnMultiplier   ? Color.FromArgb(255, 248, 210)
+                    : Color.FromArgb(220, 248, 228);
+            }
         }
 
         private static bool HasYColumns(string[] headers, OnnxAxisModel om, int axis)
