@@ -939,16 +939,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bottomPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             // Bottom-Left: KPI 카드 + 가속도AE 전역패널 + 실시간 분류 현황
+            // DPI 스케일 계산 — 화면 DC로 실제 DPI를 읽어 행 높이 보정
+            float _dpiScale;
+            using (var _dpiGfx = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
+                _dpiScale = _dpiGfx.DpiX / 96.0f;
+            int kpiRowH   = Math.Max(140, (int)(140 * _dpiScale));  // KPI 카드 행
+            int accelBarH = Math.Max(42,  (int)(42  * _dpiScale));  // 가속도 AE 바
+
             var leftColPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4,
                 Margin = new Padding(0, 0, 4, 0), Padding = Padding.Empty
             };
             leftColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // 섹션 제목
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));   // KPI 카드
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));    // 가속도 AE 전역 패널
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 실시간 분류 현황
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));         // 섹션 제목
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, kpiRowH));    // KPI 카드 (DPI 대응)
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, accelBarH));  // 가속도 AE 전역 패널
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));         // 실시간 분류 현황
 
             var lblKpiTitle = new Label
             {
@@ -965,9 +972,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, 110) };
-            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, 110) };
-            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, 110) };
+            int cardMinH = Math.Max(110, (int)(110 * _dpiScale));
+            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, cardMinH) };
+            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, cardMinH) };
+            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, cardMinH) };
             kpiPanel.Controls.Add(cardDanger,  0, 0);
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles,  2, 0);
