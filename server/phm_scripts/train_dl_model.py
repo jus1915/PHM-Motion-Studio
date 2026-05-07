@@ -460,8 +460,10 @@ def load_windows_from_dir(
                 print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
             else:
                 # 2차 fallback: CSV 헤더를 읽어 센서 타입 추론 (평탄한 폴더 구조 대응)
+                # combined CSV는 accel+torque 채널을 모두 포함하므로
+                # accel/torque 요청 시에도 combined 파일을 허용 (채널 추출은 channels 파라미터로 제한)
                 csv_files = [f for f in csv_files
-                             if _detect_sensor_type_from_headers(str(f)) == filter_kw]
+                             if _detect_sensor_type_from_headers(str(f)) in (filter_kw, "combined")]
                 print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
@@ -713,9 +715,10 @@ def load_segments_from_dir(
         else:
             path_filtered = [f for f in csv_files
                              if any(p.lower() == filter_kw for p in f.parts)]
+            # 경로 미매칭 시 헤더 기반 감지 — combined CSV도 accel/torque 채널 포함이므로 허용
             csv_files = path_filtered if path_filtered else [
                 f for f in csv_files
-                if _detect_sensor_type_from_headers(str(f)) == filter_kw
+                if _detect_sensor_type_from_headers(str(f)) in (filter_kw, "combined")
             ]
         print(f"[data] sensor_type={filter_kw} 필터 → {len(csv_files)}개 파일", file=sys.stderr)
 
@@ -1837,8 +1840,10 @@ def main() -> None:
         # ── AE: 윈도우 직접 로드 ─────────────────────────────────────────────
         _load_windows_raw()
         if not windows:
-            print(json.dumps({"error": "유효한 윈도우를 하나도 추출하지 못했습니다."}))
-            sys.exit(1)
+            print(json.dumps({"warning": "유효한 윈도우가 없어 AE 학습을 건너뜁니다 (데이터 없음). 수집 후 재시도하세요."}), flush=True)
+            print(f"[main] ⚠ 데이터 없음 — AE 학습 건너뜀 (sensor_type={params.get('sensor_type','?')}, "
+                  f"channels={channels}, filter_op={filter_op_column})", file=sys.stderr)
+            sys.exit(0)   # 데이터 없음은 오류가 아닌 정상 종료 (Airflow task 성공 처리)
         actual_n_channels = windows[0][0].shape[1]
         for _, lbl in windows:
             label_counts[lbl] = label_counts.get(lbl, 0) + 1
