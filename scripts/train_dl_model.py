@@ -193,9 +193,10 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
     """CSV 헤더를 읽어 센서 타입을 추론합니다.
 
     Returns:
-        "torque" — Trq 관련 컬럼이 있고 x/y/z 가속도 컬럼이 없는 경우
-        "accel"  — x, y, z 컬럼이 있는 경우
-        ""       — 판별 불가
+        "combined" — x/y/z 가속도 AND Trq 컬럼이 모두 있는 경우
+        "torque"   — Trq 관련 컬럼이 있고 x/y/z 가속도 컬럼이 없는 경우
+        "accel"    — x, y, z 컬럼만 있는 경우
+        ""         — 판별 불가
     """
     import csv as _csv
     for enc in ("utf-8-sig", "cp949", "utf-8", "latin-1"):
@@ -207,7 +208,9 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
                 continue
             has_trq = any("trq" in h or "vel(mm" in h or "pos(mm" in h for h in headers)
             has_xyz = any(h in ("x", "y", "z") for h in headers)
-            if has_trq and not has_xyz:
+            if has_trq and has_xyz:
+                return "combined"   # 통합 CSV (accel + torque 동시 수집)
+            if has_trq:
                 return "torque"
             if has_xyz:
                 return "accel"
@@ -372,10 +375,10 @@ def load_windows_from_dir(
 
     print(f"[data] rglob 결과: {len(csv_files)}개 CSV  (예: {csv_files[0] if csv_files else 'N/A'})", file=sys.stderr)
 
-    # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 없으면 헤더 기반 fallback
+    # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 헤더 기반, (3) 채널 존재 여부 fallback
     filter_kw = sensor_type.strip().lower()
-    if filter_kw in ("accel", "torque"):
-        # 1차: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
+    if filter_kw in ("accel", "torque", "combined"):
+        # 1차: 경로에 "Accel" / "Torque" / "Combined" 폴더가 있는 구조적 데이터
         path_filtered = [f for f in csv_files
                          if any(p.lower() == filter_kw for p in f.parts)]
         print(f"[data] 경로필터({filter_kw}): {len(path_filtered)}/{len(csv_files)}  "
@@ -385,9 +388,36 @@ def load_windows_from_dir(
             print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
         else:
             # 2차 fallback: CSV 헤더를 읽어 센서 타입 추론 (평탄한 폴더 구조 대응)
-            csv_files = [f for f in csv_files
-                         if _detect_sensor_type_from_headers(str(f)) == filter_kw]
-            print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
+            # combined 파일(accel+torque)은 accel/torque 어느 쪽 요청에도 사용 가능
+            def _header_match(f: "Path") -> bool:
+                detected = _detect_sensor_type_from_headers(str(f))
+                if detected == filter_kw:
+                    return True
+                # combined CSV는 accel / torque / combined 세 가지 학습에 모두 사용 가능
+                if detected == "combined" and filter_kw in ("accel", "torque", "combined"):
+                    return True
+                return False
+
+            header_filtered = [f for f in csv_files if _header_match(f)]
+            if header_filtered:
+                csv_files = header_filtered
+                print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
+            else:
+                # 3차 fallback: 요청 채널이 CSV 헤더에 실제로 존재하는지 확인
+                import csv as _csv_mod
+                def _has_channels(f: "Path") -> bool:
+                    ch_lower = [c.strip().lower() for c in channels]
+                    for enc in ("utf-8-sig", "cp949", "utf-8"):
+                        try:
+                            with open(str(f), newline="", encoding=enc, errors="replace") as fh:
+                                hdrs = [h.strip().lower() for h in (next(_csv_mod.reader(fh), []))]
+                            return all(c in hdrs for c in ch_lower)
+                        except Exception:
+                            continue
+                    return False
+
+                csv_files = [f for f in csv_files if _has_channels(f)]
+                print(f"[data] sensor_type={filter_kw} 채널 존재 여부 기반 → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
         segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
