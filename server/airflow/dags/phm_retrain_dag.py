@@ -6,15 +6,17 @@ PHM 모션 스튜디오 — 주기적 재학습 Airflow DAG
   - None 으로 설정하면 수동 트리거 전용
 
 C# AIForm 에서 POST /api/v1/dags/phm_retrain/dagRuns 로 즉시 트리거,
-  dag_run.conf 에 train_dl_model.py 파라미터를 포함해 전달합니다.
+  dag_run.conf 에 학습 파라미터를 포함해 전달합니다.
 
 dag_run.conf 주요 파라미터:
-  axis_count      : 가속도 센서 학습 대상 축 수 (기본 1)
-                    per-axis 모델: ae_fd_ax0.onnx, ae_fd_ax1.onnx ...
-  session         : "AD" (AE 이상탐지, 기본) | "FD" (분류)
-  data_dir        : 수집 CSV 루트 (Windows 경로도 자동 변환)
-  window_size     : 윈도우 크기 (기본 1024)
-  epochs          : 학습 에폭 (기본 30)
+  train_modes     : 실행할 학습 모드 목록 (기본 ["accel","torque","combined"])
+                    예) ["combined"] 이면 결합 모델만 학습
+  axis_count      : 학습 대상 축 수 (기본 0 → CSV 헤더 자동 감지)
+  session         : "CLS" (결함진단 분류, 기본) | "AE" (이상탐지)
+  data_dir        : 수집 CSV 루트 (Windows 경로는 PHM_DATA_ROOT 로 자동 변환)
+  window_size     : 윈도우 크기 (기본 128)
+  epochs          : 학습 에폭 (기본 150)
+  class_names     : 분류 클래스 목록 (기본 ["normal","overload","looseness"])
 
 환경변수:
   PHM_SCRIPTS_DIR      : train_dl_model.py 위치 (기본: /opt/phm/scripts)
@@ -44,42 +46,33 @@ from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 
 # ── 기본 설정 ────────────────────────────────────────────────────────────────
-_SCHEDULE = os.getenv("PHM_RETRAIN_SCHEDULE", "0 2 * * *")   # 매일 새벽 2시
+_SCHEDULE    = os.getenv("PHM_RETRAIN_SCHEDULE", "0 2 * * *")   # 매일 새벽 2시
 _SCRIPTS_DIR = Path(os.getenv(
     "PHM_SCRIPTS_DIR",
     Path(__file__).resolve().parents[1],  # dags/ 의 부모 = scripts/
 ))
 _SCRIPT_PATH = _SCRIPTS_DIR / "train_dl_model.py"
 
-_DATA_ROOT       = os.getenv("PHM_DATA_ROOT",       "/opt/phm/data")
-_MODELS_ROOT     = os.getenv("PHM_MODELS_ROOT",     "/opt/phm/models")
-_INFERENCE_URL   = os.getenv("PHM_INFERENCE_URL",   "http://phm-inference:8000")
+_DATA_ROOT     = os.getenv("PHM_DATA_ROOT",     "/opt/phm/data")
+_MODELS_ROOT   = os.getenv("PHM_MODELS_ROOT",   "/opt/phm/models")
+_INFERENCE_URL = os.getenv("PHM_INFERENCE_URL", "http://phm-inference:8000")
 
 # C# 앱이 conf 를 전달하지 않을 때 사용하는 기본값
 _DEFAULT_CONF: dict = {
-    "data_dir":                _DATA_ROOT,
-    "channels":                ["x", "y", "z"],
-    "sensor_type":             "combined",
-    "label_column":            "",
-    "class_names":             ["normal", "overload", "looseness", "overspeed"],
-    "normal_classes":          ["normal"],   # AE 모드: 정상으로 취급할 클래스
-    "window_size":             256,
-    "stride":                  64,
-    "epochs":                  150,
-    "batch_size":              64,
-    "lr":                      0.001,
-    "val_split":               0.2,
-    "seed":                    42,
-    "label_smoothing":         0.1,
-    # 채널 증강
-    "add_fft_channels":        True,
-    "add_derivative_channels": True,
-    "add_abs_channels":        True,
-    # 전역 정규화 (학습 구간 통계 기반, 데이터 누수 없음)
-    "global_normalize":        True,
-    # "AE" = AE 이상탐지, "CLS" = 결함진단 분류
-    # 구버전 호환: "AD"→"AE", "FD"→"CLS" (train_dl_model.py 내부 자동 변환)
-    "session":                 "CLS",
+    "data_dir":         _DATA_ROOT,
+    "label_column":     "Label",
+    "class_names":      ["normal", "overload", "looseness"],
+    "window_size":      128,
+    "stride":           32,
+    "epochs":           150,
+    "batch_size":       64,
+    "lr":               0.0005,
+    "val_split":        0.2,
+    "seed":             42,
+    "label_smoothing":  0.0,
+    "session":          "CLS",
+    # 기본 학습 모드: accel / torque / combined 모두 실행
+    "train_modes":      ["accel", "torque", "combined"],
 }
 
 # Windows 드라이브 패턴 (예: C:\, D:\)
@@ -208,123 +201,124 @@ _default_args = {
 }
 
 
-# ── 태스크 함수 ───────────────────────────────────────────────────────────────
+# ── session / output prefix 헬퍼 ─────────────────────────────────────────────
 def _resolve_session(params: dict) -> str:
     """session 값을 정규화합니다 (AD→AE, FD→CLS)."""
-    raw = str(params.get("session", "AE")).upper()
+    raw = str(params.get("session", "CLS")).upper()
     return {"AD": "AE", "FD": "CLS"}.get(raw, raw)
 
 
 def _output_prefix(session: str, sensor: str) -> str:
-    """session·sensor_type 에 따른 모델 파일명 prefix를 반환합니다.
+    """session·sensor 에 따른 모델 파일명 prefix를 반환합니다.
 
-    AE  + accel  → ae_fd
-    AE  + torque → ae_torque
-    CLS + accel  → cls_fd
-    CLS + torque → cls_torque
+    CLS + accel    → cls_accel
+    CLS + torque   → cls_torque
+    CLS + combined → cls_combined
+    AE  + accel    → ae_fd
+    AE  + torque   → ae_torque
+    AE  + combined → ae_combined
     """
     if session == "CLS":
-        return "cls_fd" if sensor == "accel" else "cls_torque"
+        if sensor == "accel":
+            return "cls_accel"
+        if sensor == "torque":
+            return "cls_torque"
+        return "cls_combined"
     else:
-        return "ae_fd"  if sensor == "accel" else "ae_torque"
+        if sensor == "accel":
+            return "ae_fd"
+        if sensor == "torque":
+            return "ae_torque"
+        return "ae_combined"
 
 
-def run_training(**context) -> None:
-    """
-    dag_run.conf 의 params 를 그대로 train_dl_model.py 에 전달합니다.
-    sensor_type / output 을 직접 지정할 때 사용하는 범용 태스크입니다.
+def _get_axis_count(conf: dict) -> int:
+    """conf 에서 axis_count 를 꺼내거나 CSV 스캔으로 자동 감지합니다."""
+    raw = int(conf.pop("axis_count", 0))
+    if raw > 0:
+        print(f"[PHM] axis_count conf 지정: {raw}개 축", flush=True)
+        return raw
+    data_dir = _normalize_data_dir(conf.get("data_dir", _DATA_ROOT))
+    return _detect_axis_count(data_dir)
 
-    output 미지정 시 session·sensor_type 에 따라 자동 결정:
-      AE  + accel  → ae_fd.onnx
-      AE  + torque → ae_torque.onnx
-      CLS + accel  → cls_fd.onnx
-      CLS + torque → cls_torque.onnx
-    """
-    conf: dict = context["dag_run"].conf or {}
-    params = {**_DEFAULT_CONF, **conf}
-    if "output" not in params:
-        session = _resolve_session(params)
-        sensor  = params.get("sensor_type", "accel")
-        prefix  = _output_prefix(session, sensor)
-        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}.onnx")
-    _execute_training(params, context.get("run_id", "manual"))
 
+def _is_mode_enabled(conf: dict, mode: str) -> bool:
+    """train_modes 목록에 mode 가 포함되어 있으면 True."""
+    modes = conf.get("train_modes", _DEFAULT_CONF["train_modes"])
+    if isinstance(modes, str):
+        modes = [m.strip() for m in modes.split(",")]
+    return mode in [str(m).lower() for m in modes]
+
+
+# ── 태스크 함수 ───────────────────────────────────────────────────────────────
 
 def run_training_accel(**context) -> None:
     """
-    가속도 전용 학습 태스크 — 축별 per-axis 모델 학습.
+    가속도 전용 CLS 학습 태스크 — 축별 per-axis 모델 학습.
 
-    conf 파라미터:
-      axis_count  : 학습할 축 수 (기본 0 → CSV 헤더 자동 감지).
-      session     : "AE" (기본, AE 이상탐지) | "CLS" (결함진단 분류)
-      그 외 _DEFAULT_CONF 참조.
+    channels     = ["x", "y", "z"]
+    augment_mode = "standard"  (FFT + derivative + z-score 정규화)
+    normalize    = True
 
-    출력 파일 (session에 따라 자동 결정):
-      AE  → ae_fd_ax0.onnx,  ae_fd_ax1.onnx  ...
-      CLS → cls_fd_ax0.onnx, cls_fd_ax1.onnx ...
+    출력: cls_accel_ax0.onnx, cls_accel_ax1.onnx, ...
     """
     conf = dict(context["dag_run"].conf or {})
-    _raw_ax = int(conf.pop("axis_count", 0))
-    run_id  = str(context.get("run_id", "manual"))
-    if _raw_ax <= 0:
-        _data_dir = _normalize_data_dir(conf.get("data_dir", _DATA_ROOT))
-        axis_count = _detect_axis_count(_data_dir)
-    else:
-        axis_count = _raw_ax
-        print(f"[PHM] axis_count conf 지정: {axis_count}개 축", flush=True)
+
+    # train_modes 필터
+    if not _is_mode_enabled(conf, "accel"):
+        print("[PHM] train_modes 에 'accel' 없음 → 가속도 학습 건너뜀", flush=True)
+        return
+
+    axis_count = _get_axis_count(conf)
+    run_id     = str(context.get("run_id", "manual"))
 
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 가속도 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["sensor_type"]      = "combined"
+        params["sensor_type"]      = "accel"
         params["channels"]         = ["x", "y", "z"]
         params["filter_op_column"] = f"Op_Ax{ax}"
-        params.setdefault("session", "AE")
-        # session에 따라 출력 파일명 결정 (AE→ae_fd, CLS→cls_fd)
+        params["augment_mode"]     = "standard"
+        params["normalize"]        = True
+        params.setdefault("session", "CLS")
         session = _resolve_session(params)
         prefix  = _output_prefix(session, "accel")
         params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}  (session={session})", flush=True)
-        _execute_training(params, f"{run_id}_ax{ax}")
+        _execute_training(params, f"{run_id}_accel_ax{ax}")
 
     print(f"\n[PHM] 가속도 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
 def run_training_torque(**context) -> None:
     """
-    토크 전용 학습 태스크 — 축별 per-axis 모델 학습.
+    토크 전용 CLS 학습 태스크 — 축별 per-axis 모델 학습.
 
-    conf 파라미터:
-      axis_count : 학습할 축 수 (0 또는 미지정 → CSV 스캔으로 자동 감지).
-      session    : "AE" (기본, AE 이상탐지) | "CLS" (결함진단 분류)
+    channels     = ["Ax{n}_Trq(%)"]
+    augment_mode = "mixed"  (derivative + stats, 정규화 없음)
+    normalize    = False
 
-    각 축별로:
-      channels         = ["Ax{n}_Trq(%)"]   ← 해당 축 토크만
-      filter_op_column = "Op_Ax{n}"         ← 해당 축이 움직인 행만
-
-    출력 파일 (session에 따라 자동 결정):
-      AE  → ae_torque_ax0.onnx,  ae_torque_ax1.onnx  ...
-      CLS → cls_torque_ax0.onnx, cls_torque_ax1.onnx ...
+    출력: cls_torque_ax0.onnx, cls_torque_ax1.onnx, ...
     """
     conf = dict(context["dag_run"].conf or {})
-    _raw_ax = int(conf.pop("axis_count", 0))
-    run_id  = str(context.get("run_id", "manual"))
 
-    if _raw_ax <= 0:
-        _data_dir  = _normalize_data_dir(conf.get("data_dir", _DATA_ROOT))
-        axis_count = _detect_axis_count(_data_dir)
-    else:
-        axis_count = _raw_ax
-        print(f"[PHM] torque axis_count conf 지정: {axis_count}개 축", flush=True)
+    # train_modes 필터
+    if not _is_mode_enabled(conf, "torque"):
+        print("[PHM] train_modes 에 'torque' 없음 → 토크 학습 건너뜀", flush=True)
+        return
+
+    axis_count = _get_axis_count(conf)
+    run_id     = str(context.get("run_id", "manual"))
 
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["sensor_type"]      = "combined"
+        params["sensor_type"]      = "torque"
         params["channels"]         = [f"Ax{ax}_Trq(%)"]
         params["filter_op_column"] = f"Op_Ax{ax}"
-        params.setdefault("session", "AE")
-        # session에 따라 출력 파일명 결정 (AE→ae_torque, CLS→cls_torque)
+        params["augment_mode"]     = "mixed"
+        params["normalize"]        = False
+        params.setdefault("session", "CLS")
         session = _resolve_session(params)
         prefix  = _output_prefix(session, "torque")
         params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
@@ -332,6 +326,44 @@ def run_training_torque(**context) -> None:
         _execute_training(params, f"{run_id}_torque_ax{ax}")
 
     print(f"\n[PHM] 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+
+
+def run_training_combined(**context) -> None:
+    """
+    결합(가속도 + 토크) CLS 학습 태스크 — 축별 per-axis 모델 학습.
+
+    channels     = ["x", "y", "z", "Ax{n}_Trq(%)"]
+    augment_mode = "mixed"  (accel→FFT+deriv / torque→deriv+stats, 정규화 없음)
+    normalize    = False
+
+    출력: cls_combined_ax0.onnx, cls_combined_ax1.onnx, ...
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    # train_modes 필터
+    if not _is_mode_enabled(conf, "combined"):
+        print("[PHM] train_modes 에 'combined' 없음 → 결합 학습 건너뜀", flush=True)
+        return
+
+    axis_count = _get_axis_count(conf)
+    run_id     = str(context.get("run_id", "manual"))
+
+    for ax in range(axis_count):
+        print(f"\n[PHM] ━━━ 결합 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        params = {**_DEFAULT_CONF, **conf}
+        params["sensor_type"]      = "combined"
+        params["channels"]         = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
+        params["filter_op_column"] = f"Op_Ax{ax}"
+        params["augment_mode"]     = "mixed"
+        params["normalize"]        = False
+        params.setdefault("session", "CLS")
+        session = _resolve_session(params)
+        prefix  = _output_prefix(session, "combined")
+        params["output"] = str(Path(_MODELS_ROOT) / f"{prefix}_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}  (session={session})", flush=True)
+        _execute_training(params, f"{run_id}_combined_ax{ax}")
+
+    print(f"\n[PHM] 결합 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
 def reload_inference_cache(**context) -> None:
@@ -357,7 +389,7 @@ def reload_inference_cache(**context) -> None:
 # ── DAG 정의 ──────────────────────────────────────────────────────────────────
 with DAG(
     dag_id="phm_retrain",
-    description="PHM 모션 스튜디오 — DL 모델 주기적 재학습 (per-axis 지원)",
+    description="PHM 모션 스튜디오 — DL 모델 주기적 재학습 (accel / torque / combined 병렬)",
     default_args=_default_args,
     schedule_interval=_SCHEDULE,
     start_date=days_ago(1),
@@ -370,15 +402,27 @@ with DAG(
         task_id="train_accel",
         python_callable=run_training_accel,
         doc_md=(
-            "가속도 신호(x/y/z) AE 이상탐지 모델 학습. "
-            "conf.axis_count 만큼 축별(ae_fd_ax{n}.onnx) 순차 학습."
+            "가속도 신호(x/y/z) CLS 분류 모델 학습. "
+            "augment_mode=standard. 출력: cls_accel_ax{n}.onnx"
         ),
     )
 
     t_torque = PythonOperator(
         task_id="train_torque",
         python_callable=run_training_torque,
-        doc_md="토크 신호 AE 이상탐지 모델 학습 (ae_torque.onnx, 전축 단일).",
+        doc_md=(
+            "토크 신호 CLS 분류 모델 학습. "
+            "augment_mode=mixed. 출력: cls_torque_ax{n}.onnx"
+        ),
+    )
+
+    t_combined = PythonOperator(
+        task_id="train_combined",
+        python_callable=run_training_combined,
+        doc_md=(
+            "가속도+토크 결합 CLS 분류 모델 학습. "
+            "augment_mode=mixed. 출력: cls_combined_ax{n}.onnx"
+        ),
     )
 
     t_reload = PythonOperator(
@@ -387,5 +431,5 @@ with DAG(
         doc_md="학습 완료 후 추론 서버(phm-inference:8000)의 모델 캐시를 재로드.",
     )
 
-    # 가속도 → 토크 → 추론 서버 캐시 재로드
-    t_accel >> t_torque >> t_reload
+    # accel / torque / combined 병렬 학습 → 완료 후 캐시 재로드
+    [t_accel, t_torque, t_combined] >> t_reload

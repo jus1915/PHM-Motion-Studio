@@ -137,10 +137,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private Label            _dlClassListLbl;        // "결함 클래스:" ↔ "정상 클래스:"
 
         // ── Airflow 패널 ─────────────────────────────────────────────────────
-        private TextBox _aflUrl, _aflDagId;
-        private Button  _aflBtnTrigger, _aflBtnStatus;
-        private Label   _aflStatusLbl;
-        private string  _aflLastRunId;
+        private TextBox  _aflUrl, _aflDagId;
+        private Button   _aflBtnTrigger, _aflBtnStatus;
+        private Label    _aflStatusLbl;
+        private ComboBox _aflTrainMode;   // 학습 모드: 전체 / accel / torque / combined
+        private string   _aflLastRunId;
 
         public AIForm()
         {
@@ -2025,11 +2026,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.FromArgb(0, 140, 220),
             };
 
-            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 8, RowCount = 1 };
+            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 9, RowCount = 1 };
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));   // "URL:"
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));    // URL textbox
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));   // "DAG:"
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));  // DAG ID textbox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));  // 학습 모드 ComboBox
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // Trigger button
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));   // Status button
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));    // Status label
@@ -2043,6 +2045,20 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText };
             _aflDagId = new TextBox { Dock = DockStyle.Fill,
                 Text = Services.ServerSettings.Current.AirflowDagId ?? "phm_retrain" };
+
+            _aflTrainMode = new ComboBox
+            {
+                Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
+                Margin = new Padding(2, 4, 2, 4),
+            };
+            _aflTrainMode.Items.AddRange(new object[]
+            {
+                "전체 (all)",
+                "가속도 (accel)",
+                "토크 (torque)",
+                "결합 (combined)",
+            });
+            _aflTrainMode.SelectedIndex = 0; // 기본값: 전체
 
             _aflBtnTrigger = new Button
             {
@@ -2070,9 +2086,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tl.Controls.Add(_aflUrl,          1, 0);
             tl.Controls.Add(lblDag,          2, 0);
             tl.Controls.Add(_aflDagId,        3, 0);
-            tl.Controls.Add(_aflBtnTrigger,   4, 0);
-            tl.Controls.Add(_aflBtnStatus,    5, 0);
-            tl.Controls.Add(_aflStatusLbl,    6, 0);
+            tl.Controls.Add(_aflTrainMode,    4, 0);
+            tl.Controls.Add(_aflBtnTrigger,   5, 0);
+            tl.Controls.Add(_aflBtnStatus,    6, 0);
+            tl.Controls.Add(_aflStatusLbl,    7, 0);
 
             grp.Controls.Add(tl);
             return grp;
@@ -2103,6 +2120,18 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     "설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
+
+            // 학습 모드 ComboBox → train_modes 목록 결정
+            string[] trainModes;
+            int modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
+            switch (modeIdx)
+            {
+                case 1:  trainModes = new[] { "accel" };    break;
+                case 2:  trainModes = new[] { "torque" };   break;
+                case 3:  trainModes = new[] { "combined" }; break;
+                default: trainModes = new[] { "accel", "torque", "combined" }; break; // 전체
+            }
+            paramsObj["train_modes"] = trainModes;
 
             _aflBtnTrigger.Enabled = false;
             _aflStatusLbl.ForeColor = Color.DodgerBlue;

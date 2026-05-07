@@ -121,10 +121,13 @@ namespace PHM_Project_DockPanel.Services.Core
                     string cp = _combinedLogger.OutputPath;
                     if (!string.IsNullOrEmpty(cp) && File.Exists(cp))
                     {
-                        // 가속도 채널 추론
-                        await RunInference(cp, "accel",  axis, ct);
-                        // 토크 채널 추론
-                        await RunInference(cp, "torque", axis, ct);
+                        // 가속도 채널 추론 (x, y, z → cls_accel_ax{n}.onnx)
+                        await RunInference(cp, "accel",    axis, ct);
+                        // 토크 채널 추론   (Ax{n}_Trq% → cls_torque_ax{n}.onnx)
+                        await RunInference(cp, "torque",   axis, ct);
+                        // 결합 채널 추론   (x,y,z + Trq → cls_combined_ax{n}.onnx)
+                        // ※ cls_combined_ax{n}.onnx 없으면 서버에서 404 → 폴백 처리됨
+                        await RunInference(cp, "combined", axis, ct);
                     }
                 }
                 else
@@ -303,14 +306,14 @@ namespace PHM_Project_DockPanel.Services.Core
 
             if (sensorType == "accel")
             {
-                // 우선: 단일 센서 x, y, z (combined CSV 신규 포맷 / 단독 accel CSV)
+                // x, y, z (combined CSV 신규 포맷 / 단독 accel CSV)
                 for (int i = 0; i < headers.Length; i++)
                 {
                     string h = headers[i].Trim().ToLower();
                     if (h == "x" || h == "y" || h == "z")
                         result.Add(i);
                 }
-                // 폴백: 구 combined CSV 포맷 Ax{n}_x, Ax{n}_y, Ax{n}_z
+                // 폴백: 구 포맷 Ax{n}_x, Ax{n}_y, Ax{n}_z
                 if (result.Count == 0 && axis.HasValue)
                 {
                     string px = "ax" + axis.Value + "_x";
@@ -324,14 +327,34 @@ namespace PHM_Project_DockPanel.Services.Core
                     }
                 }
             }
-            else
+            else if (sensorType == "combined")
+            {
+                // 가속도: x, y, z
+                for (int i = 0; i < headers.Length; i++)
+                {
+                    string h = headers[i].Trim().ToLower();
+                    if (h == "x" || h == "y" || h == "z")
+                        result.Add(i);
+                }
+                // 토크: Ax{n}_Trq(%) — 채널 순서 학습과 동일 (accel 다음에 torque)
+                if (axis.HasValue)
+                {
+                    string target = "ax" + axis.Value.ToString() + "_trq(%)";
+                    for (int i = 0; i < headers.Length; i++)
+                    {
+                        if (headers[i].Trim().ToLower() == target)
+                            result.Add(i);
+                    }
+                }
+            }
+            else  // "torque"
             {
                 if (axis.HasValue)
                 {
                     string target = "ax" + axis.Value.ToString() + "_trq(%)";
                     for (int i = 0; i < headers.Length; i++)
                     {
-                        if (headers[i].ToLower() == target)
+                        if (headers[i].Trim().ToLower() == target)
                             result.Add(i);
                     }
                 }
@@ -340,7 +363,7 @@ namespace PHM_Project_DockPanel.Services.Core
                 {
                     for (int i = 0; i < headers.Length; i++)
                     {
-                        string h = headers[i].ToLower();
+                        string h = headers[i].Trim().ToLower();
                         if (h.Contains("trq") || h.Contains("torque"))
                             result.Add(i);
                     }

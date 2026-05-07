@@ -19,6 +19,7 @@ Per-axis 모델 지원:
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -65,8 +66,9 @@ _FALLBACK_CANDIDATES = {
 
 # CLS(결함진단) 전용 후보 파일 — 신규 cls_ 접두사 우선, cnn1d_ 레거시 폴백
 _CLS_CANDIDATES = {
-    "accel":  ["cls_fd.onnx",     "cnn1d_fd.onnx"],
-    "torque": ["cls_torque.onnx", "cnn1d_torque.onnx"],
+    "accel":    ["cls_accel.onnx",    "cls_fd.onnx",     "cnn1d_fd.onnx"],
+    "torque":   ["cls_torque.onnx",   "cnn1d_torque.onnx"],
+    "combined": ["cls_combined.onnx"],  # AE 없이 CLS 단독 운영
 }
 
 # 최대 지원 축 수 (health 엔드포인트에서 스캔용)
@@ -76,30 +78,21 @@ _MAX_AXIS_SCAN = 8
 def _per_axis_candidates(sensor_type: str, axis: int) -> List[str]:
     """AE per-axis 모델 후보 파일명 목록 (우선순위 높은 순)."""
     if sensor_type == "accel":
-        return [
-            f"ae_fd_ax{axis}.onnx",
-            f"cnn1d_fd_ax{axis}.onnx",
-        ]
+        return [f"ae_fd_ax{axis}.onnx", f"cnn1d_fd_ax{axis}.onnx"]
     if sensor_type == "torque":
-        return [
-            f"ae_torque_ax{axis}.onnx",
-            f"cnn1d_torque_ax{axis}.onnx",
-        ]
+        return [f"ae_torque_ax{axis}.onnx", f"cnn1d_torque_ax{axis}.onnx"]
+    # "combined": AE 모델 없음
     return []
 
 
 def _per_axis_cls_candidates(sensor_type: str, axis: int) -> List[str]:
-    """CLS per-axis 모델 후보 파일명 목록 (신규 cls_ 접두사 우선)."""
+    """CLS per-axis 모델 후보 파일명 목록 (신규 cls_ 접두사 우선, 레거시 폴백)."""
     if sensor_type == "accel":
-        return [
-            f"cls_fd_ax{axis}.onnx",
-            f"cnn1d_fd_ax{axis}.onnx",
-        ]
+        return [f"cls_accel_ax{axis}.onnx", f"cls_fd_ax{axis}.onnx", f"cnn1d_fd_ax{axis}.onnx"]
     if sensor_type == "torque":
-        return [
-            f"cls_torque_ax{axis}.onnx",
-            f"cnn1d_torque_ax{axis}.onnx",
-        ]
+        return [f"cls_torque_ax{axis}.onnx", f"cnn1d_torque_ax{axis}.onnx"]
+    if sensor_type == "combined":
+        return [f"cls_combined_ax{axis}.onnx"]
     return []
 
 
@@ -253,69 +246,145 @@ class PredictResponse(BaseModel):
     raw_threshold: Optional[float] = None
 
 
-# ── 헬퍼 — Z-score per-sample 정규화 ─────────────────────────────────────────
+# ── 헬퍼 — Z-score 정규화 ────────────────────────────────────────────────────
 def _zscore(arr: np.ndarray) -> np.ndarray:
-    """arr shape (1, T, C) → 정규화된 동일 shape"""
-    mean = arr.mean(axis=1, keepdims=True)      # (1, 1, C)
+    """(1, T, C) 배열을 채널별 z-score 정규화합니다."""
+    mean = arr.mean(axis=1, keepdims=True)
     std  = arr.std(axis=1, keepdims=True)
     std  = np.where(std < 1e-8, 1.0, std)
     return (arr - mean) / std
 
 
+def _zscore_ch(arr: np.ndarray) -> np.ndarray:
+    """(T, C) 배열을 채널별 z-score 정규화합니다."""
+    mean = arr.mean(axis=0, keepdims=True)
+    std  = arr.std(axis=0, keepdims=True)
+    std  = np.where(std < 1e-8, 1.0, std)
+    return ((arr - mean) / std).astype(np.float32)
+
+
+# ── 헬퍼 — mixed 채널 증강 (_add_mixed_feature_channels 와 동일 로직) ──────────
+def _augment_mixed(raw: np.ndarray, meta: dict) -> np.ndarray:
+    """
+    augment_mode="mixed" 전처리 (normalize=False RAW 데이터용).
+
+    가속도 채널(x/y/z): FFT magnitude(채널별 z-score) + derivative
+    토크 채널(*_Trq%):  derivative + 통계 tile(mean/std/rms/min/max/ptp)
+    공통:              abs (전채널)
+
+    채널 식별은 meta["channels"] 로 수행합니다.
+    """
+    channels   = meta.get("channels", [])
+    accel_idx  = [i for i, ch in enumerate(channels) if ch.strip().lower() in ("x", "y", "z")]
+    torque_idx = [i for i, ch in enumerate(channels) if "trq" in ch.lower()]
+
+    add_fft   = bool(meta.get("add_fft_channels",        True))
+    add_deriv = bool(meta.get("add_derivative_channels", True))
+    add_stats = bool(meta.get("add_torque_stats",        True))
+    add_abs   = bool(meta.get("add_abs_channels",        True))
+
+    T, _ = raw.shape
+    parts: List[np.ndarray] = [raw]
+
+    if accel_idx:
+        accel = raw[:, accel_idx]
+        if add_fft:
+            fft_raw   = np.abs(np.fft.rfft(accel, axis=0)).astype(np.float32)
+            half      = fft_raw.shape[0]
+            fft_tiled = np.tile(fft_raw, (math.ceil(T / half), 1))[:T]
+            parts.append(_zscore_ch(fft_tiled))
+        if add_deriv:
+            parts.append(np.diff(accel, axis=0, prepend=accel[:1]).astype(np.float32))
+
+    if torque_idx:
+        torque = raw[:, torque_idx]
+        if add_deriv:
+            parts.append(np.diff(torque, axis=0, prepend=torque[:1]).astype(np.float32))
+        if add_stats:
+            stats_rows = np.array([
+                torque.mean(axis=0),
+                torque.std(axis=0),
+                np.sqrt(np.mean(torque.astype(np.float64) ** 2, axis=0)),
+                torque.min(axis=0),
+                torque.max(axis=0),
+                torque.ptp(axis=0),
+            ], dtype=np.float32)                                     # (6, n_torque)
+            parts.append(np.tile(stats_rows.T.reshape(1, -1), (T, 1)).astype(np.float32))
+
+    if add_abs:
+        parts.append(np.abs(raw).astype(np.float32))
+
+    return np.concatenate(parts, axis=1).astype(np.float32)
+
+
+# ── 헬퍼 — standard 채널 증강 (_add_feature_channels 와 동일 로직) ─────────────
+def _augment_standard(raw: np.ndarray, meta: dict) -> np.ndarray:
+    """
+    augment_mode="standard" 전처리 (per-window z-score 정규화 후 호출).
+
+    전채널 균일: FFT magnitude(채널별 z-score) + derivative + abs
+    """
+    add_fft   = bool(meta.get("add_fft_channels",        True))
+    add_deriv = bool(meta.get("add_derivative_channels", True))
+    add_abs   = bool(meta.get("add_abs_channels",        True))
+
+    T, _ = raw.shape
+    parts: List[np.ndarray] = [raw]
+
+    if add_fft:
+        fft_raw   = np.abs(np.fft.rfft(raw, axis=0)).astype(np.float32)
+        half      = fft_raw.shape[0]
+        fft_tiled = np.tile(fft_raw, (math.ceil(T / half), 1))[:T]
+        parts.append(_zscore_ch(fft_tiled))
+
+    if add_deriv:
+        parts.append(np.diff(raw, axis=0, prepend=raw[:1]).astype(np.float32))
+
+    if add_abs:
+        parts.append(np.abs(raw).astype(np.float32))
+
+    return np.concatenate(parts, axis=1).astype(np.float32) if len(parts) > 1 else parts[0]
+
+
 # ── 헬퍼 — 채널 증강 + 정규화 (학습과 동일한 전처리) ─────────────────────────
 def _preprocess_window(
-    window_flat,          # list[float] | flat np.ndarray
+    window_flat,      # list[float] | flat np.ndarray
     window_size: int,
-    n_channels:  int,     # C# 가 전송한 RAW 채널 수
+    n_channels:  int,
     meta:        dict,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    학습 시와 동일한 채널 증강 + 정규화를 적용합니다.
+    meta["augment_mode"] 에 따라 학습과 동일한 전처리를 적용합니다.
+
+    "mixed"    → _augment_mixed()    — normalize=False (RAW 진폭 보존)
+    "standard" → _augment_standard() — per-window z-score 후 증강
 
     Returns:
-        raw_arr:  (1, T, n_raw)   — 원본 데이터 (RMS 계산용)
-        proc_arr: (1, T, n_model) — 증강+정규화 완료 (모델 입력용)
+        raw_arr:  (1, T, n_raw)   — 원본 (RMS 계산용)
+        proc_arr: (1, T, n_model) — 증강+정규화 완료 (모델 입력)
     """
-    raw = np.array(window_flat, dtype=np.float32).reshape(window_size, n_channels)
+    raw     = np.array(window_flat, dtype=np.float32).reshape(window_size, n_channels)
+    raw_arr = raw[np.newaxis, :, :].astype(np.float32)
 
-    add_abs   = bool(meta.get("add_abs_channels",        False))
-    add_deriv = bool(meta.get("add_derivative_channels", False))
-    add_fft   = bool(meta.get("add_fft_channels",        False))
+    augment_mode = str(meta.get("augment_mode", "standard")).lower()
+    do_augment   = bool(meta.get("add_augmented_channels", True))
 
-    extras: List[np.ndarray] = [raw]
-    if add_abs:
-        extras.append(np.abs(raw))
-    if add_deriv:
-        deriv      = np.empty_like(raw)
-        deriv[0]   = 0.0
-        deriv[1:]  = raw[1:] - raw[:-1]
-        extras.append(deriv)
-    if add_fft:
-        T, C         = raw.shape
-        fft_mag      = np.abs(np.fft.rfft(raw, axis=0))   # (T//2+1, C)
-        fft_len      = fft_mag.shape[0]
-        x_old        = np.linspace(0.0, 1.0, fft_len)
-        x_new        = np.linspace(0.0, 1.0, T)
-        fft_resized  = np.stack(
-            [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C)],
-            axis=1,
-        ).astype(np.float32)
-        extras.append(fft_resized)
-
-    aug      = np.concatenate(extras, axis=1) if len(extras) > 1 else extras[0]
-    raw_arr  = raw[np.newaxis, :, :].astype(np.float32)   # (1, T, n_raw)
-    proc_arr = aug[np.newaxis, :, :].astype(np.float32)   # (1, T, n_model)
-
-    # 정규화: global norm (메타에 저장된 통계) 우선, 없으면 per-sample z-score
-    norm_mean = meta.get("norm_mean")
-    norm_std  = meta.get("norm_std")
-    if norm_mean is not None and norm_std is not None:
-        m        = np.array(norm_mean, dtype=np.float32).reshape(1, 1, -1)
-        s        = np.array(norm_std,  dtype=np.float32).reshape(1, 1, -1)
-        s        = np.where(s < 1e-8, 1.0, s)
-        proc_arr = (proc_arr - m) / s
-    elif meta.get("standardize_per_sample", True):
-        proc_arr = _zscore(proc_arr)
+    if augment_mode == "mixed":
+        aug = _augment_mixed(raw, meta) if do_augment else raw
+        proc_arr = aug[np.newaxis, :, :].astype(np.float32)
+    else:
+        # standard: per-window z-score → 증강
+        norm_raw = _zscore_ch(raw)
+        aug      = _augment_standard(norm_raw, meta) if do_augment else norm_raw
+        proc_arr = aug[np.newaxis, :, :].astype(np.float32)
+        # global norm (메타에 통계 있으면 덮어쓰기)
+        nm = meta.get("norm_mean")
+        ns = meta.get("norm_std")
+        if nm is not None and ns is not None:
+            m = np.array(nm, dtype=np.float32).reshape(1, 1, -1)
+            s = np.where(np.array(ns, dtype=np.float32).reshape(1, 1, -1) < 1e-8, 1.0,
+                         np.array(ns, dtype=np.float32).reshape(1, 1, -1))
+            proc_arr = ((aug[np.newaxis] - m) / s).astype(np.float32)
 
     return raw_arr, proc_arr
 
@@ -348,9 +417,10 @@ def health():
                 files.append(fname)
         available_ae[st] = files
 
-    # 사용 가능한 CLS 모델 스캔
+    # 사용 가능한 CLS 모델 스캔 (accel / torque / combined)
     available_cls: dict = {}
-    for st, fallbacks in _CLS_CANDIDATES.items():
+    for st in list(_CLS_CANDIDATES.keys()):
+        fallbacks = _CLS_CANDIDATES.get(st, [])
         files = []
         for ax in range(_MAX_AXIS_SCAN):
             for fname in _per_axis_cls_candidates(st, ax):
@@ -358,9 +428,10 @@ def health():
                     files.append(fname)
                     break
         for fname in fallbacks:
-            if (MODELS_ROOT / fname).exists():
+            if (MODELS_ROOT / fname).exists() and fname not in files:
                 files.append(fname)
-        available_cls[st] = files
+        if files:
+            available_cls[st] = files
 
     return {
         "status":               "ok",
@@ -557,10 +628,91 @@ def _ae_score(
 def predict_combined(req: CombinedPredictRequest):
     """AE 이상탐지 + CLS 결함진단을 한 번에 수행합니다.
 
-    - AE 모델은 필수 (없으면 404).
-    - CLS 모델은 선택 — 없으면 cls_available=False, cls_* 필드 null.
-    - window 전처리(z-score, window_size 조정)는 AE/CLS 각각 독립 수행.
+    sensor_type="accel" | "torque":
+      AE 모델 필수 + CLS 모델 선택 (없으면 cls_available=False).
+
+    sensor_type="combined":
+      CLS 전용 — AE 모델 없이 CLS 단독 운영.
+      is_anomaly = (예측 클래스 != "normal").
+      CLS도 없으면 404.
+
+    window 전처리는 각 모델의 meta["augment_mode"] 에 따라 독립 수행.
     """
+    expected = req.window_size * req.n_channels
+    if len(req.window) != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"window 길이 {len(req.window)} ≠ {req.window_size}×{req.n_channels}={expected}",
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # "combined" 센서 타입: CLS 전용 경로
+    # ══════════════════════════════════════════════════════════════════════════
+    if req.sensor_type == "combined":
+        cls_sess, cls_meta = _load_cls_model(req.sensor_type, req.axis)
+        if cls_sess is None:
+            avail: List[str] = []
+            if req.axis is not None:
+                for fn in _per_axis_cls_candidates(req.sensor_type, req.axis):
+                    if (MODELS_ROOT / fn).exists():
+                        avail.append(fn)
+            for fn in _CLS_CANDIDATES.get(req.sensor_type, []):
+                if (MODELS_ROOT / fn).exists():
+                    avail.append(fn)
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"combined CLS 모델 없음 (axis={req.axis}). "
+                    f"사용 가능: {avail if avail else '없음 — Airflow train_combined 을 먼저 실행하세요.'}"
+                ),
+            )
+        try:
+            cls_ws = int(cls_meta.get("window_size", req.window_size))
+            if cls_ws != req.window_size:
+                need = cls_ws * req.n_channels
+                if len(req.window) < need:
+                    raise HTTPException(status_code=400,
+                        detail=f"CLS window_size={cls_ws} 이지만 데이터({len(req.window)}샘플) 부족")
+                eff_win, eff_ws = list(req.window[-need:]), cls_ws
+            else:
+                eff_win, eff_ws = req.window, req.window_size
+
+            _, cls_proc = _preprocess_window(eff_win, eff_ws, req.n_channels, cls_meta)
+            cls_input   = cls_sess.get_inputs()[0].name
+            logits      = cls_sess.run(None, {cls_input: cls_proc})[0]
+            exp_l       = np.exp(logits - logits.max(axis=1, keepdims=True))
+            probs       = exp_l / exp_l.sum(axis=1, keepdims=True)
+            pred_idx    = int(np.argmax(probs[0]))
+            confidence  = float(probs[0][pred_idx])
+            cls_names   = cls_meta.get("class_names", ["normal", "fault"])
+            class_name  = cls_names[pred_idx] if pred_idx < len(cls_names) else str(pred_idx)
+            is_fault    = class_name.lower() != "normal"
+            anomaly_score = round(confidence if is_fault else (1.0 - confidence), 6)
+
+            return CombinedPredictResponse(
+                sensor_type    = req.sensor_type,
+                axis           = req.axis,
+                ae_model_file  = None,
+                is_anomaly     = is_fault,
+                anomaly_score  = anomaly_score,
+                threshold      = 1.0,
+                raw_mae        = None,
+                raw_threshold  = None,
+                cls_available  = True,
+                cls_model_file = cls_meta.get("source_file"),
+                cls_class_name = class_name,
+                cls_confidence = round(confidence, 6),
+                cls_is_fault   = is_fault,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500,
+                detail=f"combined CLS 추론 실패: {type(e).__name__}: {e}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # "accel" | "torque": AE 필수 + CLS 선택
+    # ══════════════════════════════════════════════════════════════════════════
     # ── AE 모델 로드 ─────────────────────────────────────────────
     ae_sess, ae_meta = _load_model(req.sensor_type, req.axis)
     if ae_sess is None:
@@ -578,13 +730,6 @@ def predict_combined(req: CombinedPredictRequest):
                 f"AE 모델 없음 (sensor_type={req.sensor_type!r}, axis={req.axis}). "
                 f"사용 가능: {avail if avail else '없음 — Airflow 학습(AE)을 먼저 실행하세요.'}"
             ),
-        )
-
-    expected = req.window_size * req.n_channels
-    if len(req.window) != expected:
-        raise HTTPException(
-            status_code=400,
-            detail=f"window 길이 {len(req.window)} ≠ {req.window_size}×{req.n_channels}={expected}",
         )
 
     # ── AE window 전처리 ─────────────────────────────────────────
