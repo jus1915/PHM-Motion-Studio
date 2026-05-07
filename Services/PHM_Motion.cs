@@ -457,6 +457,10 @@ namespace PHM_Project_DockPanel.Services
 
             bool anyStarted = false;
 
+            // WMX / Ajin 두 제어기 모두 미연결이면 Op_Ax 컬럼 생략
+            // (pathOk 블록 안팎 모두 사용하므로 먼저 선언)
+            bool controllerConnected = _controller.IsConnected;
+
             if (pathOk)
             {
                 int axisCount = AxisConfig.AxisCount > 0
@@ -468,9 +472,6 @@ namespace PHM_Project_DockPanel.Services
                 bool canPollingTorque = _ajinLogger != null &&
                                         (_controller.IsAjin || _controller.IsSimulationMode);
                 bool useCombined = logAccel && logTorque && _accelLogger != null && canPollingTorque;
-
-                // WMX / Ajin 두 제어기 모두 미연결이면 Op_Ax 컬럼 생략
-                bool controllerConnected = _controller.IsConnected;
 
                 if (useCombined)
                 {
