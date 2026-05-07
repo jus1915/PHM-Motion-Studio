@@ -1568,8 +1568,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             var modeFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
             _dlRdoCls = new RadioButton { Text = "분류(CLS)", Checked = true, AutoSize = true };
             _dlRdoAe  = new RadioButton { Text = "AE(이상탐지)", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
-            _dlRdoCls.CheckedChanged += (s, e) => { if (_dlRdoCls.Checked) UpdateDlModeUi(); };
-            _dlRdoAe.CheckedChanged  += (s, e) => { if (_dlRdoAe.Checked)  UpdateDlModeUi(); };
+            _dlRdoCls.CheckedChanged += (s, e) => { if (_dlRdoCls.Checked) { UpdateDlModeUi(); UpdateTriggerButtonText(); } };
+            _dlRdoAe.CheckedChanged  += (s, e) => { if (_dlRdoAe.Checked)  { UpdateDlModeUi(); UpdateTriggerButtonText(); } };
             modeFlow.Controls.AddRange(new Control[] { _dlRdoCls, _dlRdoAe });
             tl.Controls.Add(modeFlow, 1, row++);
 
@@ -2104,7 +2104,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void UpdateTriggerButtonText()
         {
             if (_aflBtnTrigger == null) return;
-            bool isAe    = (_session == SessionType.AnomalyDetection);
+            bool isAe    = (_dlRdoAe?.Checked == true);   // DL 탭 라디오 버튼 기준
             int  modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
 
             var tasks = new System.Collections.Generic.List<string>();
@@ -2167,7 +2167,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // AE  태스크: train_ae_accel (단일 전역) / train_ae_torque (축별)
             // CLS 태스크: train_accel    (축별)       / train_torque    (축별) / train_combined (축별)
             // 결합(combined)은 CLS 전용 — AE combined 모델 없음
-            bool isAeSession  = (_session == SessionType.AnomalyDetection);
+            bool isAeSession  = (_dlRdoAe?.Checked == true);   // DL 탭 라디오 버튼 기준
             bool isCls        = !isAeSession;
             int  modeIdx      = _aflTrainMode?.SelectedIndex ?? 0;
             // modeIdx: 0=전체, 1=가속도, 2=토크, 3=결합
