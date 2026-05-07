@@ -1367,8 +1367,10 @@ def main() -> None:
         sys.exit(1)
 
     if len(windows) == 0:
-        print(json.dumps({"error": "유효한 윈도우를 하나도 추출하지 못했습니다. 데이터 경로와 채널 설정을 확인하십시오."}))
-        sys.exit(1)
+        print(json.dumps({"warning": "유효한 윈도우가 없어 학습을 건너뜁니다 (데이터 없음). 수집 후 재시도하세요."}), flush=True)
+        print(f"[main] ⚠ 데이터 없음 — 학습 건너뜀 (sensor_type={params.get('sensor_type','?')}, "
+              f"channels={channels}, filter_op={params.get('filter_op_column')})", file=sys.stderr)
+        sys.exit(0)   # 데이터 없음은 오류가 아닌 정상 종료
 
     # _resolve_channels 가 채널을 확장했을 수 있으므로 실제 데이터 shape 으로 재설정
     # 예: channels=["Trq(%)"] → Ax0_Trq(%)/Ax1_Trq(%)/Ax2_Trq(%) 3채널로 확장된 경우
