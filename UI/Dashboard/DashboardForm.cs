@@ -389,26 +389,33 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Random _rng = new Random(); // ← 추가
 
         // ── 서버 실시간 추론 UI ──────────────────────────────────────────────────
-        // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2")
+        // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2", "combined_ax0")
         private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
         private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
+
+        // ── 센서 표시 필터 체크박스 ──────────────────────────────────────────
+        private CheckBox _chkShowAccel;             // 가속도 결과 표시 여부
+        private CheckBox _chkShowTorque;            // 토크 결과 표시 여부
+        private CheckBox _chkShowCombined;          // 결합 결과 표시 여부
 
         // ── 실시간 분류 현황 매트릭스 ─────────────────────────────────────────
         // 행=축, 열=AE 점수/상태 + CLS 결함/신뢰도 → 3단계 색 코딩
         private DataGridView _classMatrixDgv;
         private readonly Dictionary<int, int> _classMatrixAxisRow = new Dictionary<int, int>(); // axis → rowIdx
         // ── AE 이상탐지 열 ──────────────────────────────
-        private const int CMG_COL_AXIS   = 0;
-        private const int CMG_COL_AS     = 1;   // [AE] 가속도 점수
-        private const int CMG_COL_ASTATE = 2;   // [AE] 가속도 판정
-        private const int CMG_COL_TS     = 3;   // [AE] 토크 점수
-        private const int CMG_COL_TSTATE = 4;   // [AE] 토크 판정
+        private const int CMG_COL_AXIS    = 0;
+        private const int CMG_COL_AS      = 1;   // [AE] 가속도 점수
+        private const int CMG_COL_ASTATE  = 2;   // [AE] 가속도 판정
+        private const int CMG_COL_TS      = 3;   // [AE] 토크 점수
+        private const int CMG_COL_TSTATE  = 4;   // [AE] 토크 판정
         // ── CLS 결함진단 열 ─────────────────────────────
-        private const int CMG_COL_ACLS    = 5;  // [CLS] 가속도 결함명
-        private const int CMG_COL_ACLSCONF= 6;  // [CLS] 가속도 신뢰도
-        private const int CMG_COL_TCLS    = 7;  // [CLS] 토크 결함명
-        private const int CMG_COL_TCLSCONF= 8;  // [CLS] 토크 신뢰도
+        private const int CMG_COL_ACLS     = 5;  // [CLS] 가속도 결함명
+        private const int CMG_COL_ACLSCONF = 6;  // [CLS] 가속도 신뢰도
+        private const int CMG_COL_TCLS     = 7;  // [CLS] 토크 결함명
+        private const int CMG_COL_TCLSCONF = 8;  // [CLS] 토크 신뢰도
+        private const int CMG_COL_CCLS     = 9;  // [CLS] 결합 결함명
+        private const int CMG_COL_CCLSCONF = 10; // [CLS] 결합 신뢰도
         // 마지막 스코어 보관 (색 재계산용)
         private readonly Dictionary<string, double> _classMatrixLastScore = new Dictionary<string, double>();
         private readonly Dictionary<string, Panel>  _statusChips      = new Dictionary<string, Panel>();
@@ -925,6 +932,35 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _statusFlow.HorizontalScroll.Value = newVal;
                 _statusFlow.PerformLayout();
             };
+            // ── 센서 표시 필터 체크박스 (상태 바 오른쪽) ──────────────────────
+            _chkShowAccel    = new CheckBox { Text = "가속도", Checked = true, AutoSize = true,
+                Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(30, 100, 200),
+                Padding = new Padding(0, 0, 4, 0) };
+            _chkShowTorque   = new CheckBox { Text = "토크",   Checked = true, AutoSize = true,
+                Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(160, 80, 0),
+                Padding = new Padding(0, 0, 4, 0) };
+            _chkShowCombined = new CheckBox { Text = "결합",   Checked = true, AutoSize = true,
+                Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(60, 140, 60),
+                Padding = new Padding(0, 0, 4, 0) };
+            _chkShowAccel.CheckedChanged    += (s, e) => ApplySensorVisibility("accel",    _chkShowAccel.Checked);
+            _chkShowTorque.CheckedChanged   += (s, e) => ApplySensorVisibility("torque",   _chkShowTorque.Checked);
+            _chkShowCombined.CheckedChanged += (s, e) => ApplySensorVisibility("combined", _chkShowCombined.Checked);
+
+            var lblFilter = new Label { Text = "표시:", AutoSize = true,
+                Font = new Font("Segoe UI", 8f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(55, 55, 65),
+                Padding = new Padding(8, 0, 4, 0) };
+
+            var filterFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Right, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Padding = new Padding(0, 3, 6, 0)
+            };
+            filterFlow.Controls.AddRange(new Control[] { lblFilter, _chkShowAccel, _chkShowTorque, _chkShowCombined });
+
+            // Right dock → Fill 순으로 Controls.Add (Right이 먼저여야 Fill이 남은 공간 차지)
+            statusBarPanel.Controls.Add(filterFlow);
             statusBarPanel.Controls.Add(_statusFlow);
             statusBarPanel.Controls.Add(lblStatusTitle);
 
@@ -4521,6 +4557,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 c.ContextMenuStrip = cms;
 
             chip.Controls.AddRange(new Control[] { lblName, lblState, lblScore });
+
+            // 체크박스 상태에 따라 초기 Visible 결정
+            // key = "accel_ax0" / "torque_ax1" / "combined_ax0" — 첫 번째 '_' 앞이 sensorType
+            string chipSensor = key.Contains("_") ? key.Substring(0, key.IndexOf('_')) : key;
+            chip.Visible = _IsSensorEnabled(chipSensor);
+
             _statusFlow.Controls.Add(chip);
 
             _statusChips[key]      = chip;
@@ -4635,6 +4677,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private void OnLiveInferenceResult(string sensorType, InferenceResult result)
         {
             if (result == null) return;
+            if (!_IsSensorEnabled(sensorType)) return;
 
             bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
             // 키: "accel_ax0", "torque_ax2" 등 (axis 없으면 "accel", "torque")
@@ -4667,7 +4710,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             BeginInvoke(new Action(() =>
             {
                 string axLabel     = result.Axis.HasValue ? $" Ax{result.Axis.Value}" : "";
-                string displayName = (isAccel ? "가속도" : "토크") + axLabel;
+                string sensorLabel = isAccel ? "가속도"
+                                   : string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase) ? "결합"
+                                   : "토크";
+                string displayName = sensorLabel + axLabel;
 
                 // 칩이 없으면 상태 바에 동적 추가
                 EnsureLiveChip(key, displayName);
@@ -4732,7 +4778,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     object confVal = result.Confidence.HasValue
                         ? (object)result.Confidence.Value
                         : (object)"-";
-                    UpdateClassMatrixCls(result.Axis.Value, isAccel, result.ClassName, confVal);
+                    UpdateClassMatrixCls(result.Axis.Value, sensorType, result.ClassName, confVal);
                 }
 
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
@@ -4780,6 +4826,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private void OnLiveClsInferenceResult(string sensorType, CombinedInferenceResult combined)
         {
             if (combined == null || combined.IsError || !combined.Axis.HasValue) return;
+            if (!_IsSensorEnabled(sensorType)) return;
+
             bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
 
             if (!IsHandleCreated || IsDisposed) return;
@@ -4799,15 +4847,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                               ? (object)(combined.ClsConfidence.Value)
                               : (object)"-";
                 }
-                UpdateClassMatrixCls(combined.Axis.Value, isAccel, clsName, confVal);
+                UpdateClassMatrixCls(combined.Axis.Value, sensorType, clsName, confVal);
 
                 // 결함 감지 시 이벤트 로그에도 기록
                 if (combined.ClsAvailable && combined.ClsIsFault == true)
                 {
-                    string axLabel = $" Ax{combined.Axis.Value}";
-                    string sensor  = isAccel ? "가속도" : "토크";
-                    string conf    = combined.ClsConfidence.HasValue
-                                     ? $"  신뢰도={combined.ClsConfidence.Value:P0}" : "";
+                    string axLabel   = $" Ax{combined.Axis.Value}";
+                    string sensor    = isAccel ? "가속도"
+                                     : string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase) ? "결합"
+                                     : "토크";
+                    string conf      = combined.ClsConfidence.HasValue
+                                       ? $"  신뢰도={combined.ClsConfidence.Value:P0}" : "";
                     AppendEventLog(
                         $"[{DateTime.Now:HH:mm:ss}] 🔶 결함진단 {sensor}{axLabel} = {clsName}{conf}");
                 }
@@ -4817,7 +4867,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         /// <summary>
         /// 실시간 분류 현황 매트릭스 CLS 열 갱신 (UI 스레드에서만 호출)
         /// </summary>
-        private void UpdateClassMatrixCls(int axis, bool isAccel, string className, object confValue)
+        private void UpdateClassMatrixCls(int axis, string sensorType, string className, object confValue)
         {
             if (_classMatrixDgv == null || axis < 0) return;
 
@@ -4834,11 +4884,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLSCONF].Value = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLSCONF].Value = "-";
                 _classMatrixAxisRow[axis] = rowIdx;
             }
 
-            int clsCol  = isAccel ? CMG_COL_ACLS     : CMG_COL_TCLS;
-            int confCol = isAccel ? CMG_COL_ACLSCONF  : CMG_COL_TCLSCONF;
+            int clsCol, confCol;
+            switch (sensorType?.ToLowerInvariant())
+            {
+                case "torque":
+                    clsCol  = CMG_COL_TCLS;     confCol = CMG_COL_TCLSCONF; break;
+                case "combined":
+                    clsCol  = CMG_COL_CCLS;     confCol = CMG_COL_CCLSCONF; break;
+                default: // "accel"
+                    clsCol  = CMG_COL_ACLS;     confCol = CMG_COL_ACLSCONF; break;
+            }
 
             _classMatrixDgv.Rows[rowIdx].Cells[clsCol].Value  = className ?? "-";
             _classMatrixDgv.Rows[rowIdx].Cells[confCol].Value = confValue ?? (object)"-";
@@ -4846,8 +4906,61 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>
-        /// Teaching Sequence 한 회차 완료 → 설비 사용률(cycles) 카드 갱신
+        // ── 센서 표시 필터 헬퍼 ─────────────────────────────────────────────────
+
+        /// <summary>체크박스 상태 기반으로 해당 sensorType의 표시 여부를 반환합니다.</summary>
+        private bool _IsSensorEnabled(string sensorType)
+        {
+            switch (sensorType?.ToLowerInvariant())
+            {
+                case "accel":    return _chkShowAccel    == null || _chkShowAccel.Checked;
+                case "torque":   return _chkShowTorque   == null || _chkShowTorque.Checked;
+                case "combined": return _chkShowCombined == null || _chkShowCombined.Checked;
+                default:         return true;
+            }
+        }
+
+        /// <summary>
+        /// 체크박스 CheckedChanged 시 호출 — 해당 sensorType의 칩과 DGV 열을 표시/숨깁니다.
         /// </summary>
+        private void ApplySensorVisibility(string sensorType, bool visible)
+        {
+            // 1) 상태 바 칩 show/hide
+            foreach (var kv in _statusChips)
+            {
+                string chipSensor = kv.Key.Contains("_")
+                    ? kv.Key.Substring(0, kv.Key.IndexOf('_'))
+                    : kv.Key;
+                if (string.Equals(chipSensor, sensorType, StringComparison.OrdinalIgnoreCase))
+                    kv.Value.Visible = visible;
+            }
+
+            // 2) DGV 열 그룹 show/hide
+            if (_classMatrixDgv == null) return;
+            switch (sensorType?.ToLowerInvariant())
+            {
+                case "accel":
+                    _classMatrixDgv.Columns[CMG_COL_AS].Visible       = visible;
+                    _classMatrixDgv.Columns[CMG_COL_ASTATE].Visible   = visible;
+                    _classMatrixDgv.Columns[CMG_COL_ACLS].Visible     = visible;
+                    _classMatrixDgv.Columns[CMG_COL_ACLSCONF].Visible = visible;
+                    break;
+                case "torque":
+                    _classMatrixDgv.Columns[CMG_COL_TS].Visible       = visible;
+                    _classMatrixDgv.Columns[CMG_COL_TSTATE].Visible   = visible;
+                    _classMatrixDgv.Columns[CMG_COL_TCLS].Visible     = visible;
+                    _classMatrixDgv.Columns[CMG_COL_TCLSCONF].Visible = visible;
+                    break;
+                case "combined":
+                    _classMatrixDgv.Columns[CMG_COL_CCLS].Visible     = visible;
+                    _classMatrixDgv.Columns[CMG_COL_CCLSCONF].Visible = visible;
+                    break;
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>Teaching Sequence 한 회차 완료 → 설비 사용률(cycles) 카드 갱신</summary>
         private void OnLoopCompleted(int count)
         {
             cycles = count;
@@ -4934,9 +5047,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
                 { Name = "TCLSC",   HeaderText = "신뢰도", Width = 52, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            // ── combined CLS 열 (col 9-10) ───────────────────────────────────
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "CCLS",    HeaderText = "결합 결함",   Width = 88, ReadOnly = true });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "CCLSC",   HeaderText = "신뢰도", Width = 52, ReadOnly = true,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
 
             // 마지막 열은 남은 공간 채우기
-            _classMatrixDgv.Columns[CMG_COL_TCLSCONF].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            _classMatrixDgv.Columns[CMG_COL_CCLSCONF].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
             _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
 
@@ -4980,10 +5099,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // ── CLS 결함진단 열 색상 (결함명 기반) ──────────────────────────
             if (e.ColumnIndex == CMG_COL_ACLS     || e.ColumnIndex == CMG_COL_ACLSCONF ||
-                e.ColumnIndex == CMG_COL_TCLS      || e.ColumnIndex == CMG_COL_TCLSCONF)
+                e.ColumnIndex == CMG_COL_TCLS      || e.ColumnIndex == CMG_COL_TCLSCONF ||
+                e.ColumnIndex == CMG_COL_CCLS      || e.ColumnIndex == CMG_COL_CCLSCONF)
             {
-                bool isAccelCol = e.ColumnIndex == CMG_COL_ACLS || e.ColumnIndex == CMG_COL_ACLSCONF;
-                int  nameCol    = isAccelCol ? CMG_COL_ACLS : CMG_COL_TCLS;
+                int nameCol = (e.ColumnIndex == CMG_COL_ACLS || e.ColumnIndex == CMG_COL_ACLSCONF)
+                              ? CMG_COL_ACLS
+                              : (e.ColumnIndex == CMG_COL_TCLS || e.ColumnIndex == CMG_COL_TCLSCONF)
+                                ? CMG_COL_TCLS
+                                : CMG_COL_CCLS;
 
                 string cls = _classMatrixDgv.Rows[e.RowIndex].Cells[nameCol].Value?.ToString() ?? "";
 
@@ -5024,6 +5147,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_ACLSCONF].Value = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLSCONF].Value = "-";
                 _classMatrixAxisRow[axis] = rowIdx;
             }
 
