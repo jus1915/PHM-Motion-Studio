@@ -714,10 +714,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
                 Padding = Padding.Empty, Margin = Padding.Empty
             };
+            // DPI 스케일을 먼저 계산해서 행 높이에 반영
+            float _dpiScaleEarly;
+            using (var _dg = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
+                _dpiScaleEarly = _dg.DpiX / 96.0f;
+            int statusBarH = Math.Max(56, (int)(56 * _dpiScaleEarly));  // 상태 바 (칩) 높이
+
             contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));    // 툴바
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));    // 상태 바 (칩)
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 2×2 메인 그리드
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));          // 툴바
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, statusBarH));  // 상태 바 (칩)
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));          // 2×2 메인 그리드
 
             // ── Row 0: 상단 툴바 ──────────────────────────────────────────────
             var toolbar = new Panel
@@ -908,10 +914,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             statusBarPanel.Controls.Add(_statusFlow);
             statusBarPanel.Controls.Add(lblStatusTitle);
 
-            // ── DPI 스케일 계산 (화면 DC) ─────────────────────────────────────
-            float _dpiScale;
-            using (var _dpiGfx = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
-                _dpiScale = _dpiGfx.DpiX / 96.0f;
+            // ── DPI 스케일 (앞서 계산한 값 재사용) ───────────────────────────
+            float _dpiScale = _dpiScaleEarly;
             int kpiRowH   = Math.Max(140, (int)(140 * _dpiScale));
             int accelBarH = Math.Max(38,  (int)(38  * _dpiScale));
 
