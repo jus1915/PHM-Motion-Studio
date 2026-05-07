@@ -965,9 +965,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 110) };
-            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 110) };
-            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 110) };
+            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, 110) };
+            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, 110) };
+            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, 110) };
             kpiPanel.Controls.Add(cardDanger,  0, 0);
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles,  2, 0);
@@ -5165,9 +5165,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 base.OnPaint(e);
                 Graphics g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                Rectangle shadowRect = this.ClientRectangle; shadowRect.Inflate(-2, -2); shadowRect.Offset(2, 3);
-                using (System.Drawing.Drawing2D.GraphicsPath shadowPath = Rounded(shadowRect, 16))
-                using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(40, 0, 0, 0)))
+                Rectangle shadowRect = this.ClientRectangle; shadowRect.Inflate(-3, -4); shadowRect.Offset(2, 2);
+                using (System.Drawing.Drawing2D.GraphicsPath shadowPath = Rounded(shadowRect, 14))
+                using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(35, 0, 0, 0)))
                 { g.FillPath(shadowBrush, shadowPath); }
                 Rectangle rect = this.ClientRectangle; rect.Inflate(-4, -6);
                 using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(rect, 16))
