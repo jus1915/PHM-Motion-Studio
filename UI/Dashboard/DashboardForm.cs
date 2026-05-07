@@ -707,18 +707,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             //  콘텐츠 패널 (전체 — 사이드바 없음)
             // ══════════════════════════════════════════════════
             // ══════════════════════════════════════════════════
-            //  Content Area (툴바 + 상태바 + 추론차트 + 하단)
+            //  Content Area (툴바 + 상태바 + 2×2 메인 그리드)
             // ══════════════════════════════════════════════════
             var contentPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4,
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
                 Padding = Padding.Empty, Margin = Padding.Empty
             };
             contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));   // 툴바
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));   // 상태 바 (칩)
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 40));    // 추론 스코어 차트
-            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 60));    // 하단
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));    // 툴바
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));    // 상태 바 (칩)
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 2×2 메인 그리드
 
             // ── Row 0: 상단 툴바 ──────────────────────────────────────────────
             var toolbar = new Panel
@@ -909,52 +908,40 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             statusBarPanel.Controls.Add(_statusFlow);
             statusBarPanel.Controls.Add(lblStatusTitle);
 
-            // ── Row 1: Dual Inference Score Charts ────────────────────────────
-            var dualChartPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
-                Padding = new Padding(6, 4, 6, 2), Margin = Padding.Empty,
-                BackColor = Color.FromArgb(245, 247, 250)
-            };
-            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            dualChartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            _chartAccel  = BuildLiveInferenceChart(isAccel: true);
-            _chartTorque = BuildLiveInferenceChart(isAccel: false);
-            dualChartPanel.SuspendLayout();
-            dualChartPanel.Controls.Add(WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166)),  0, 0);
-            dualChartPanel.Controls.Add(WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15)), 1, 0);
-            dualChartPanel.ResumeLayout(false);
-
-            // ── Row 2: Bottom ──────────────────────────────────────────────────
-            var bottomPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
-                Padding = new Padding(6, 2, 6, 6), Margin = Padding.Empty,
-                BackColor = Color.FromArgb(245, 247, 250)
-            };
-            bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
-            bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
-            bottomPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            // Bottom-Left: KPI 카드 + 가속도AE 전역패널 + 실시간 분류 현황
-            // DPI 스케일 계산 — 화면 DC로 실제 DPI를 읽어 행 높이 보정
+            // ── DPI 스케일 계산 (화면 DC) ─────────────────────────────────────
             float _dpiScale;
             using (var _dpiGfx = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
                 _dpiScale = _dpiGfx.DpiX / 96.0f;
-            int kpiRowH   = Math.Max(140, (int)(140 * _dpiScale));  // KPI 카드 행
-            int accelBarH = Math.Max(38,  (int)(38  * _dpiScale));  // 가속도 AE 바 (분류 현황 내부)
+            int kpiRowH   = Math.Max(140, (int)(140 * _dpiScale));
+            int accelBarH = Math.Max(38,  (int)(38  * _dpiScale));
 
-            var leftColPanel = new TableLayoutPanel
+            // ── 2×2 메인 그리드 ───────────────────────────────────────────────
+            // ┌──────────────────────┬──────────────────────┐
+            // │ (0,0) 설비 상태 현황  │ (1,0) 실시간 분류 현황│
+            // ├──────────────────────┼──────────────────────┤
+            // │ (0,1) 이상 스코어 차트│ (1,1) 발생 이벤트    │
+            // └──────────────────────┴──────────────────────┘
+            var mainPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2,
+                Padding = new Padding(6, 4, 6, 6), Margin = Padding.Empty,
+                BackColor = Color.FromArgb(245, 247, 250)
+            };
+            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44));
+            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 56));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 38));   // 상단 행 (KPI + 분류 현황)
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 62));   // 하단 행 (차트 + 이벤트)
+
+            // ── (0,0) 상단-좌: 설비 상태 현황 ────────────────────────────────
+            var leftTopPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
-                Margin = new Padding(0, 0, 4, 0), Padding = Padding.Empty
+                Margin = new Padding(0, 0, 4, 4), Padding = Padding.Empty
             };
-            leftColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));         // 섹션 제목
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, kpiRowH));    // KPI 카드 (DPI 대응)
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));         // 실시간 분류 현황 (가속도AE 바 포함)
+            leftTopPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));         // 섹션 제목
+            leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));         // KPI 카드 (flex)
+            leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, accelBarH));  // 가속도 AE 바
 
             var lblKpiTitle = new Label
             {
@@ -979,11 +966,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles,  2, 0);
 
-            // ── 가속도 AE 전역 스코어 패널 (실시간 분류 현황 섹션 내부 상단에 배치) ─────
+            // 가속도 AE 전역 스코어 패널
             _pnlAccelAeBar = new Panel
             {
-                Dock = DockStyle.Top,
-                Height = accelBarH,
+                Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(245, 245, 248),
                 Padding = new Padding(10, 0, 10, 0)
             };
@@ -1016,21 +1002,38 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 ForeColor = Color.Gray,
                 TextAlign = ContentAlignment.MiddleLeft
             };
-            // Left dock 순서: 오른쪽 → 왼쪽 순으로 Controls.Add
             _pnlAccelAeBar.Controls.Add(_lblAccelAeState);
             _pnlAccelAeBar.Controls.Add(_lblAccelAeScore);
             _pnlAccelAeBar.Controls.Add(lblAccelAeTitle);
 
-            // ── 실시간 분류 현황 매트릭스 패널 ──────────────────────────────────
+            leftTopPanel.SuspendLayout();
+            leftTopPanel.Controls.Add(lblKpiTitle,    0, 0);
+            leftTopPanel.Controls.Add(kpiPanel,       0, 1);
+            leftTopPanel.Controls.Add(_pnlAccelAeBar, 0, 2);
+            leftTopPanel.ResumeLayout(false);
+
+            // ── (1,0) 상단-우: 실시간 분류 현황 ──────────────────────────────
             var classMatrixPanel = BuildClassMatrixPanel();
 
-            leftColPanel.SuspendLayout();
-            leftColPanel.Controls.Add(lblKpiTitle,      0, 0);
-            leftColPanel.Controls.Add(kpiPanel,         0, 1);
-            leftColPanel.Controls.Add(classMatrixPanel, 0, 2);
-            leftColPanel.ResumeLayout(false);
+            // ── (0,1) 하단-좌: 이상 스코어 차트 ─────────────────────────────
+            var dualChartPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+                Padding = new Padding(0, 4, 4, 0), Margin = Padding.Empty,
+                BackColor = Color.FromArgb(245, 247, 250)
+            };
+            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            dualChartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            // Bottom-Right: 이벤트 로그 + 이벤트 그리드
+            _chartAccel  = BuildLiveInferenceChart(isAccel: true);
+            _chartTorque = BuildLiveInferenceChart(isAccel: false);
+            dualChartPanel.SuspendLayout();
+            dualChartPanel.Controls.Add(WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166)),  0, 0);
+            dualChartPanel.Controls.Add(WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15)), 1, 0);
+            dualChartPanel.ResumeLayout(false);
+
+            // ── (1,1) 하단-우: 발생 이벤트 ───────────────────────────────────
             var rightColPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
@@ -1079,16 +1082,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             rightColPanel.Controls.Add(eventsLayout, 0, 1);
             rightColPanel.ResumeLayout(false);
 
-            bottomPanel.SuspendLayout();
-            bottomPanel.Controls.Add(leftColPanel,  0, 0);
-            bottomPanel.Controls.Add(rightColPanel, 1, 0);
-            bottomPanel.ResumeLayout(false);
+            // 2×2 조립
+            mainPanel.SuspendLayout();
+            mainPanel.Controls.Add(leftTopPanel,    0, 0);
+            mainPanel.Controls.Add(classMatrixPanel, 1, 0);
+            mainPanel.Controls.Add(dualChartPanel,  0, 1);
+            mainPanel.Controls.Add(rightColPanel,   1, 1);
+            mainPanel.ResumeLayout(false);
 
             contentPanel.SuspendLayout();
             contentPanel.Controls.Add(toolbar,        0, 0);
             contentPanel.Controls.Add(statusBarPanel, 0, 1);
-            contentPanel.Controls.Add(dualChartPanel, 0, 2);
-            contentPanel.Controls.Add(bottomPanel,    0, 3);
+            contentPanel.Controls.Add(mainPanel,      0, 2);
             contentPanel.ResumeLayout(false);
 
             Controls.Add(contentPanel);
@@ -4908,12 +4913,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
 
-            // DockStyle.Top 역순 배치: 나중에 추가한 것이 위로 올라오므로
-            // DGV(Fill) → _pnlAccelAeBar(Top) → lbl(Top) 순으로 추가
             wrap.Controls.Add(_classMatrixDgv);
-            if (_pnlAccelAeBar != null)
-                wrap.Controls.Add(_pnlAccelAeBar);  // lbl 바로 아래
-            wrap.Controls.Add(lbl);                 // 최상단
+            wrap.Controls.Add(lbl);   // Top — 최상단 헤더
             return wrap;
         }
 
