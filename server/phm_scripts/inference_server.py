@@ -1,15 +1,22 @@
 """
 PHM 추론 서버 — FastAPI + ONNX Runtime
 ========================================
-POST /predict  : 신호 윈도우 → 이상탐지 / 분류 결과 반환
-GET  /health   : 로드된 모델 목록 반환
-GET  /models/reload : 모델 캐시 재로드
+POST /predict         : 신호 윈도우 → 이상탐지(AE) 결과 반환
+POST /predict/combined: 이상탐지(AE) + 결함진단(CLS) 동시 반환
+GET  /health          : 로드된 모델 목록 반환
+GET  /models/reload   : 모델 캐시 재로드
 
-Per-axis 모델 지원:
-  PredictRequest.axis (int, optional) 를 지정하면 해당 축 전용 모델을 우선 로드합니다.
-    axis=0 → ae_fd_ax0.onnx 우선, 없으면 ae_fd.onnx 로 폴백
-    axis=1 → ae_fd_ax1.onnx 우선, 없으면 ae_fd.onnx 로 폴백
-  axis 미지정 시 기존 동작(ae_fd.onnx / cnn1d_fd.onnx) 유지
+모델 구조:
+  accel (가속도, 단일 센서):
+    AE  → ae_accel.onnx       (axis=None, 단일 전역 모델)
+    CLS → cls_accel.onnx      (axis=None, 단일 전역 모델)
+  torque (토크, 축별):
+    AE  → ae_torque_ax{n}.onnx  (axis=n, per-axis 모델)
+    CLS → cls_torque_ax{n}.onnx (axis=n, per-axis 모델)
+  combined (결합, 축별, CLS 전용):
+    CLS → cls_combined_ax{n}.onnx
+
+  accel 은 물리적으로 단일 센서이므로 axis 없이 항상 axis=None 으로 요청합니다.
 
 환경변수:
   PHM_MODELS_ROOT : ONNX 모델 루트 경로 (기본 /opt/phm/models)
@@ -58,9 +65,11 @@ app = FastAPI(title="PHM Inference Server", version="2.0.0")
 # cache_key = "{sensor_type}" 또는 "{sensor_type}_ax{n}"
 _sessions: dict = {}
 
-# 기본(레거시) 후보 파일 — axis 미지정 시 또는 per-axis 모델 없을 때 폴백
+# AE 전역 후보 파일 — axis=None 시 또는 per-axis 모델 없을 때 폴백
+# accel: 단일 전역 모델 ae_accel.onnx (레거시 ae_fd.onnx 폴백)
+# torque: 전역 폴백은 없음 — per-axis 모델만 사용
 _FALLBACK_CANDIDATES = {
-    "accel":  ["ae_fd.onnx",     "cnn1d_fd.onnx"],
+    "accel":  ["ae_accel.onnx",  "ae_fd.onnx",     "cnn1d_fd.onnx"],
     "torque": ["ae_torque.onnx", "cnn1d_torque.onnx"],
 }
 
@@ -76,9 +85,13 @@ _MAX_AXIS_SCAN = 8
 
 
 def _per_axis_candidates(sensor_type: str, axis: int) -> List[str]:
-    """AE per-axis 모델 후보 파일명 목록 (우선순위 높은 순)."""
+    """AE per-axis 모델 후보 파일명 목록 (우선순위 높은 순).
+
+    accel: 단일 전역 모델만 사용하므로 per-axis 후보 없음 → []
+    torque: 축별 AE 모델 ae_torque_ax{n}.onnx
+    """
     if sensor_type == "accel":
-        return [f"ae_fd_ax{axis}.onnx", f"cnn1d_fd_ax{axis}.onnx"]
+        return []   # accel 은 단일 전역 모델 (axis=None 으로만 요청)
     if sensor_type == "torque":
         return [f"ae_torque_ax{axis}.onnx", f"cnn1d_torque_ax{axis}.onnx"]
     # "combined": AE 모델 없음
@@ -86,9 +99,14 @@ def _per_axis_candidates(sensor_type: str, axis: int) -> List[str]:
 
 
 def _per_axis_cls_candidates(sensor_type: str, axis: int) -> List[str]:
-    """CLS per-axis 모델 후보 파일명 목록 (신규 cls_ 접두사 우선, 레거시 폴백)."""
+    """CLS per-axis 모델 후보 파일명 목록 (신규 cls_ 접두사 우선, 레거시 폴백).
+
+    accel: 단일 전역 CLS 모델만 사용하므로 per-axis 후보 없음 → []
+    torque: 축별 CLS 모델 cls_torque_ax{n}.onnx
+    combined: 축별 CLS 모델 cls_combined_ax{n}.onnx
+    """
     if sensor_type == "accel":
-        return [f"cls_accel_ax{axis}.onnx", f"cls_fd_ax{axis}.onnx", f"cnn1d_fd_ax{axis}.onnx"]
+        return []   # accel 은 단일 전역 모델 (axis=None 으로만 요청)
     if sensor_type == "torque":
         return [f"cls_torque_ax{axis}.onnx", f"cnn1d_torque_ax{axis}.onnx"]
     if sensor_type == "combined":

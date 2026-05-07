@@ -469,6 +469,9 @@ namespace PHM_Project_DockPanel.Services
                                         (_controller.IsAjin || _controller.IsSimulationMode);
                 bool useCombined = logAccel && logTorque && _accelLogger != null && canPollingTorque;
 
+                // WMX / Ajin 두 제어기 모두 미연결이면 Op_Ax 컬럼 생략
+                bool controllerConnected = _controller.IsConnected;
+
                 if (useCombined)
                 {
                     // ── 통합 모드: Accel + Torque → 단일 CSV ─────────────
@@ -476,7 +479,7 @@ namespace PHM_Project_DockPanel.Services
                     {
                         var combined = new CombinedCsvLogger(
                             getTorque: ax => _ajinLogger.ReadTorque(ax),
-                            getAxisOp: GetAxisOperation,
+                            getAxisOp: controllerConnected ? (Func<int, string>)GetAxisOperation : null,
                             axes:      allAxes,
                             log:       msg => AppEvents.RaiseLog(msg));
 
@@ -594,20 +597,27 @@ namespace PHM_Project_DockPanel.Services
                 _inferenceService?.Dispose();
                 if (_accelLogger != null)
                 {
-                    _accelLogger.GetAxisOperation = GetAxisOperation;
+                    // 제어기 연결 시만 Op_Ax 컬럼 기록 (단독 가속도 CSV에도 동일 정책)
+                    _accelLogger.GetAxisOperation = controllerConnected ? (Func<int, string>)GetAxisOperation : null;
                     int _axCnt = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
-                    _accelLogger.LoggedAxes = System.Linq.Enumerable.Range(0, _axCnt).ToArray();
+                    _accelLogger.LoggedAxes = controllerConnected
+                        ? System.Linq.Enumerable.Range(0, _axCnt).ToArray()
+                        : null;
                 }
                 if (_ajinLogger != null)
-                    _ajinLogger.GetAxisOperation = GetAxisOperation;
+                    _ajinLogger.GetAxisOperation = controllerConnected ? (Func<int, string>)GetAxisOperation : null;
+
                 int _axCntInfer = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
-                int[] _inferAxes = System.Linq.Enumerable.Range(0, _axCntInfer).ToArray();
+                // 제어기 연결 시: per-axis 추론 / 미연결 시: axis 없이 단일 추론
+                int[] _inferAxes = controllerConnected
+                    ? System.Linq.Enumerable.Range(0, _axCntInfer).ToArray()
+                    : null;
                 _inferenceService = new ContinuousInferenceService(
                     inferUrl,
-                    _combinedLogger ?? (object)null,   // 통합 모드이면 combined, 아니면 null
+                    _combinedLogger ?? (object)null,
                     _accelLogger,
                     _ajinLogger,
-                    getAxisOperation: GetAxisOperation,
+                    getAxisOperation: controllerConnected ? (Func<int, string>)GetAxisOperation : null,
                     axes:             _inferAxes);
                 _inferenceService.Start();
             }

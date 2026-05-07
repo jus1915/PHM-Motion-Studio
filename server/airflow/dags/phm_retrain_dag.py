@@ -72,7 +72,9 @@ _DEFAULT_CONF: dict = {
     "label_smoothing":  0.0,
     "session":          "CLS",
     # 기본 학습 모드: accel / torque / combined 모두 실행
-    "train_modes":      ["accel", "torque", "combined"],
+    # CLS 분류: accel / torque / combined
+    # AE 이상탐지: ae_accel (단일 전역) / ae_torque (축별)
+    "train_modes":      ["accel", "torque", "combined", "ae_accel", "ae_torque"],
 }
 
 # Windows 드라이브 패턴 (예: C:\, D:\)
@@ -226,7 +228,7 @@ def _output_prefix(session: str, sensor: str) -> str:
         return "cls_combined"
     else:
         if sensor == "accel":
-            return "ae_fd"
+            return "ae_accel"   # 단일 전역 모델 (per-axis 없음)
         if sensor == "torque":
             return "ae_torque"
         return "ae_combined"
@@ -366,6 +368,72 @@ def run_training_combined(**context) -> None:
     print(f"\n[PHM] 결합 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
+def run_training_ae_accel(**context) -> None:
+    """
+    AE 이상탐지 — 가속도 단일 전역 모델 학습 (축 구분 없음).
+
+    · channels          = ["x", "y", "z"]
+    · filter_op_column  = None  (Idle/Pos 구분 없이 전체 학습)
+    · augment_mode      = "standard"
+    · normalize         = True
+    · 출력: ae_accel.onnx  (단일, 축 suffix 없음)
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    if not _is_mode_enabled(conf, "ae_accel"):
+        print("[PHM] train_modes 에 'ae_accel' 없음 → AE 가속도 학습 건너뜀", flush=True)
+        return
+
+    run_id = str(context.get("run_id", "manual"))
+    params = {**_DEFAULT_CONF, **conf}
+    params["session"]           = "AE"
+    params["sensor_type"]       = "accel"
+    params["channels"]          = ["x", "y", "z"]
+    params["filter_op_column"]  = None   # Op 컬럼 없는 CSV 도 허용, 전체 행 학습
+    params["augment_mode"]      = "standard"
+    params["normalize"]         = True
+    # 단일 모델: 축 suffix 없음
+    params["output"] = str(Path(_MODELS_ROOT) / "ae_accel.onnx")
+    print(f"[PHM] AE 가속도 단일 모델 출력: {params['output']}", flush=True)
+    _execute_training(params, f"{run_id}_ae_accel")
+    print("[PHM] AE 가속도 학습 완료", flush=True)
+
+
+def run_training_ae_torque(**context) -> None:
+    """
+    AE 이상탐지 — 토크 축별 모델 학습.
+
+    · channels          = ["Ax{n}_Trq(%)"]
+    · filter_op_column  = None  (Idle/Pos 구분 없이 전체 학습)
+    · augment_mode      = "mixed"
+    · normalize         = False
+    · 출력: ae_torque_ax0.onnx, ae_torque_ax1.onnx, ...
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    if not _is_mode_enabled(conf, "ae_torque"):
+        print("[PHM] train_modes 에 'ae_torque' 없음 → AE 토크 학습 건너뜀", flush=True)
+        return
+
+    axis_count = _get_axis_count(conf)
+    run_id     = str(context.get("run_id", "manual"))
+
+    for ax in range(axis_count):
+        print(f"\n[PHM] ━━━ AE 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        params = {**_DEFAULT_CONF, **conf}
+        params["session"]           = "AE"
+        params["sensor_type"]       = "torque"
+        params["channels"]          = [f"Ax{ax}_Trq(%)"]
+        params["filter_op_column"]  = None   # Op 컬럼 없는 CSV 도 허용, 전체 행 학습
+        params["augment_mode"]      = "mixed"
+        params["normalize"]         = False
+        params["output"] = str(Path(_MODELS_ROOT) / f"ae_torque_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}", flush=True)
+        _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
+
+    print(f"\n[PHM] AE 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+
+
 def reload_inference_cache(**context) -> None:
     """
     학습 완료 후 추론 서버의 모델 캐시를 재로드합니다.
@@ -425,11 +493,29 @@ with DAG(
         ),
     )
 
+    t_ae_accel = PythonOperator(
+        task_id="train_ae_accel",
+        python_callable=run_training_ae_accel,
+        doc_md=(
+            "가속도 AE 이상탐지 모델 학습 (단일 전역, 축 구분 없음). "
+            "augment_mode=standard, filter_op=None. 출력: ae_accel.onnx"
+        ),
+    )
+
+    t_ae_torque = PythonOperator(
+        task_id="train_ae_torque",
+        python_callable=run_training_ae_torque,
+        doc_md=(
+            "토크 AE 이상탐지 모델 학습 (축별). "
+            "augment_mode=mixed, filter_op=None. 출력: ae_torque_ax{n}.onnx"
+        ),
+    )
+
     t_reload = PythonOperator(
         task_id="reload_inference_cache",
         python_callable=reload_inference_cache,
         doc_md="학습 완료 후 추론 서버(phm-inference:8000)의 모델 캐시를 재로드.",
     )
 
-    # accel / torque / combined 병렬 학습 → 완료 후 캐시 재로드
-    [t_accel, t_torque, t_combined] >> t_reload
+    # CLS(accel/torque/combined) + AE(ae_accel/ae_torque) 병렬 학습 → 완료 후 캐시 재로드
+    [t_accel, t_torque, t_combined, t_ae_accel, t_ae_torque] >> t_reload

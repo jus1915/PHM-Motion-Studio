@@ -56,10 +56,11 @@ namespace PHM_Project_DockPanel.Services.Core
             : this(inferenceServerUrl, null, accelLogger, torqueLogger, getAxisOperation, axes)
         { }
 
+        /// <summary>현재 Op 상태: 하나라도 Pos면 "Pos", 아니면 "Idle"</summary>
         private string GetCurrentOp()
         {
             if (_getAxisOperation == null || _axes == null)
-                return "Pos";
+                return "Pos";   // 제어기 없음 → 항상 Pos 취급 (CLS도 항상 실행)
 
             foreach (int ax in _axes)
                 if (_getAxisOperation(ax) == "Pos")
@@ -68,6 +69,7 @@ namespace PHM_Project_DockPanel.Services.Core
             return "Idle";
         }
 
+        /// <summary>현재 움직이는 축 번호 (없으면 null)</summary>
         private int? GetMovingAxis()
         {
             if (_getAxisOperation == null || _axes == null)
@@ -96,100 +98,164 @@ namespace PHM_Project_DockPanel.Services.Core
         {
             while (!ct.IsCancellationRequested)
             {
-                string op = GetCurrentOp();
-
-                if (op == "Idle")
-                {
-                    try { await Task.Delay(100, ct); }
-                    catch { break; }
-                    continue;
-                }
-
-                // Pos 상태
                 try { await Task.Delay(IntervalMs, ct); }
                 catch { break; }
 
-                int? curAxis = GetMovingAxis();
-                if (curAxis.HasValue)
-                    _lastMovingAxis = curAxis;
+                // ── (1) AE 추론: Idle/Pos 무관하게 항상 실행 ──────────────────
+                //   • 가속도: 단일 센서 → axis = null, Op 필터 없음
+                //   • 토크:   축별     → axis = n,    Op 필터 없음
+                await RunAeInferenceAll(ct);
 
-                int? axis = _lastMovingAxis;
-
-                // ── 통합 CSV (accel + torque 동시 수집) ──────────────
-                if (_combinedLogger != null && _combinedLogger.IsLogging)
+                // ── (2) CLS 추론: Pos 상태일 때만 실행 ────────────────────────
+                //   • 가속도: 단일 센서 → axis = null, Op 필터 있음 (Pos 행만)
+                //   • 토크:   축별     → axis = n,    Op 필터 있음
+                //   • 결합:   축별     → axis = n,    Op 필터 있음
+                string op = GetCurrentOp();
+                if (op == "Pos")
                 {
-                    string cp = _combinedLogger.OutputPath;
-                    if (!string.IsNullOrEmpty(cp) && File.Exists(cp))
-                    {
-                        // 가속도 채널 추론 (x, y, z → cls_accel_ax{n}.onnx)
-                        await RunInference(cp, "accel",    axis, ct);
-                        // 토크 채널 추론   (Ax{n}_Trq% → cls_torque_ax{n}.onnx)
-                        await RunInference(cp, "torque",   axis, ct);
-                        // 결합 채널 추론   (x,y,z + Trq → cls_combined_ax{n}.onnx)
-                        // ※ cls_combined_ax{n}.onnx 없으면 서버에서 404 → 폴백 처리됨
-                        await RunInference(cp, "combined", axis, ct);
-                    }
+                    int? curAxis = GetMovingAxis();
+                    if (curAxis.HasValue)
+                        _lastMovingAxis = curAxis;
+                    int? clsAxis = _lastMovingAxis;
+
+                    await RunClsInferenceAll(clsAxis, ct);
                 }
-                else
-                {
-                    // ── 단독 가속도 ──────────────────────────────────────
-                    if (_accelLogger != null && _accelLogger.IsRunning)
-                    {
-                        string[] paths = _accelLogger.CsvPathByModule;
-                        if (paths != null)
-                        {
-                            foreach (string p in paths)
-                            {
-                                if (string.IsNullOrEmpty(p) || !File.Exists(p)) continue;
-                                await RunInference(p, "accel", axis, ct);
-                                break;
-                            }
-                        }
-                    }
+            }
+        }
 
-                    // ── 단독 토크 ────────────────────────────────────────
-                    if (_torqueLogger != null && _torqueLogger.IsLogging)
+        // ──────────────────────────────────────────────────────────────────────
+        //  AE 추론 (항상 실행, Op 필터 없음)
+        // ──────────────────────────────────────────────────────────────────────
+
+        private async Task RunAeInferenceAll(CancellationToken ct)
+        {
+            if (_combinedLogger != null && _combinedLogger.IsLogging)
+            {
+                string cp = _combinedLogger.OutputPath;
+                if (string.IsNullOrEmpty(cp) || !File.Exists(cp)) return;
+
+                // 가속도 AE: 단일 센서 → axis = null
+                await RunAeInference(cp, "accel", null, ct);
+
+                // 토크 AE: 축별
+                if (_axes != null)
+                    foreach (int ax in _axes)
+                        await RunAeInference(cp, "torque", ax, ct);
+            }
+            else
+            {
+                // 단독 가속도 AE
+                if (_accelLogger != null && _accelLogger.IsRunning)
+                {
+                    string[] paths = _accelLogger.CsvPathByModule;
+                    if (paths != null)
+                        foreach (string p in paths)
+                        {
+                            if (!string.IsNullOrEmpty(p) && File.Exists(p))
+                            { await RunAeInference(p, "accel", null, ct); break; }
+                        }
+                }
+
+                // 단독 토크 AE: 축별
+                if (_torqueLogger != null && _torqueLogger.IsLogging)
+                {
+                    string p = _torqueLogger.OutputPath;
+                    if (!string.IsNullOrEmpty(p) && File.Exists(p))
                     {
-                        string p = _torqueLogger.OutputPath;
-                        if (!string.IsNullOrEmpty(p) && File.Exists(p))
-                            await RunInference(p, "torque", axis, ct);
+                        if (_axes != null)
+                            foreach (int ax in _axes)
+                                await RunAeInference(p, "torque", ax, ct);
+                        else
+                            await RunAeInference(p, "torque", null, ct);
                     }
                 }
             }
         }
 
-        private async Task RunInference(
-            string csvPath,
-            string sensorType,
-            int? axis,
-            CancellationToken ct)
+        // ──────────────────────────────────────────────────────────────────────
+        //  CLS 추론 (Pos 상태 전용, Op 필터 있음)
+        // ──────────────────────────────────────────────────────────────────────
+
+        private async Task RunClsInferenceAll(int? axis, CancellationToken ct)
+        {
+            if (_combinedLogger != null && _combinedLogger.IsLogging)
+            {
+                string cp = _combinedLogger.OutputPath;
+                if (string.IsNullOrEmpty(cp) || !File.Exists(cp)) return;
+
+                // 가속도 CLS: 단일 센서 → axis = null
+                await RunClsInference(cp, "accel",    null, ct);
+                // 토크 CLS: 축별
+                await RunClsInference(cp, "torque",   axis, ct);
+                // 결합 CLS: 축별
+                await RunClsInference(cp, "combined", axis, ct);
+            }
+            else
+            {
+                if (_accelLogger != null && _accelLogger.IsRunning)
+                {
+                    string[] paths = _accelLogger.CsvPathByModule;
+                    if (paths != null)
+                        foreach (string p in paths)
+                        {
+                            if (!string.IsNullOrEmpty(p) && File.Exists(p))
+                            { await RunClsInference(p, "accel", null, ct); break; }
+                        }
+                }
+
+                if (_torqueLogger != null && _torqueLogger.IsLogging)
+                {
+                    string p = _torqueLogger.OutputPath;
+                    if (!string.IsNullOrEmpty(p) && File.Exists(p))
+                        await RunClsInference(p, "torque", axis, ct);
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────────
+        //  개별 추론 메서드
+        // ──────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// AE 이상탐지 추론 — filterOp=false (전체 데이터), /predict 엔드포인트 사용.
+        /// </summary>
+        private async Task RunAeInference(
+            string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh);
+            float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh,
+                filterOp: false);   // Idle/Pos 무관하게 전체 행 사용
             if (window == null) return;
 
-            // ── /predict/combined 호출 (AE 이상탐지 + CLS 결함진단 동시) ────
+            InferenceResult result = await _client.PredictAsync(
+                window, WindowSize, nCh, sensorType, axis, ct);
+            AppEvents.RaiseInferenceResult(sensorType, result);
+        }
+
+        /// <summary>
+        /// CLS 결함진단 추론 — filterOp=true (Pos 행만), /predict/combined 엔드포인트 사용.
+        /// </summary>
+        private async Task RunClsInference(
+            string csvPath, string sensorType, int? axis, CancellationToken ct)
+        {
+            int nCh;
+            float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh,
+                filterOp: true);    // Pos 행만 사용
+            if (window == null) return;
+
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
                 window, WindowSize, nCh, sensorType, axis, ct);
 
-            if (combined.IsError)
-            {
-                // combined 엔드포인트 실패(구버전 서버 등) → /predict 폴백
-                InferenceResult fallback = await _client.PredictAsync(
-                    window, WindowSize, nCh, sensorType, axis, ct);
-                AppEvents.RaiseInferenceResult(sensorType, fallback);
-                return;
-            }
+            if (combined.IsError) return;   // CLS 모델 없음 → 조용히 무시
 
-            // AE 결과 발행 (기존 InferenceResultReceived 구독자용)
-            AppEvents.RaiseInferenceResult(sensorType, combined.ToAeResult());
-
-            // CLS 결과 발행 (ClsAvailable=false 이면 "모델 없음" 상태로 발행)
+            // CLS 결과만 발행 (AE는 RunAeInference에서 별도 발행)
             AppEvents.RaiseClsInferenceResult(sensorType, combined);
         }
 
         /// <summary>
         /// CSV 끝 windowSize 행에서 신호 윈도우를 읽습니다.
+        /// filterOp=true: Op==Pos 행만 사용 (CLS용)
+        /// filterOp=false: 전체 행 사용 (AE용)
         /// 성공 시 float 배열 반환, 실패 시 null.
         /// </summary>
         private static float[] ReadLastWindow(
@@ -197,7 +263,8 @@ namespace PHM_Project_DockPanel.Services.Core
             string sensorType,
             int windowSize,
             int? axis,
-            out int nChannels)
+            out int nChannels,
+            bool filterOp = true)
         {
             nChannels = 0;
             try
@@ -219,51 +286,20 @@ namespace PHM_Project_DockPanel.Services.Core
                 int[] signalCols = GetSignalColumnIndices(headers, sensorType, axis);
                 if (signalCols.Length == 0) return null;
 
-                // Op 컬럼 인덱스 탐색
-                int targetOpCol = -1;
-                if (axis.HasValue)
+                // ── Op 필터 (filterOp=true일 때만 적용) ──────────────────
+                List<string> dataLines;
+                if (!filterOp)
                 {
-                    string opName = "Op_Ax" + axis.Value.ToString();
-                    for (int i = 0; i < headers.Length; i++)
-                    {
-                        if (string.Equals(headers[i].Trim(), opName,
-                                StringComparison.OrdinalIgnoreCase))
-                        {
-                            targetOpCol = i;
-                            break;
-                        }
-                    }
+                    // AE: 모든 행 사용
+                    dataLines = new List<string>(lines.Length - 1);
+                    for (int li = 1; li < lines.Length; li++)
+                        dataLines.Add(lines[li]);
                 }
                 else
                 {
-                    for (int i = 0; i < headers.Length; i++)
-                    {
-                        if (string.Equals(headers[i].Trim(), "Op",
-                                StringComparison.OrdinalIgnoreCase))
-                        {
-                            targetOpCol = i;
-                            break;
-                        }
-                    }
-                }
-
-                // Pos 행만 필터
-                List<string> dataLines = new List<string>();
-                for (int li = 1; li < lines.Length; li++)
-                {
-                    string line = lines[li];
-                    if (targetOpCol < 0)
-                    {
-                        dataLines.Add(line);
-                        continue;
-                    }
-                    string[] cols = line.Split(',');
-                    if (targetOpCol < cols.Length &&
-                        string.Equals(cols[targetOpCol].Trim(), "Pos",
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        dataLines.Add(line);
-                    }
+                    // CLS: Op==Pos 행만 사용
+                    // axis 지정 시: Op_Ax{n} 컬럼 / null 시: 임의의 Op_Ax* 컬럼 중 하나라도 Pos
+                    dataLines = FilterPosByOp(lines, headers, axis);
                 }
 
                 if (dataLines.Count < windowSize) return null;
@@ -297,6 +333,56 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Op 필터: axis 지정 시 Op_Ax{n}==Pos 행, null 시 임의 Op_Ax* 컬럼 중 하나라도 Pos 행.
+        /// Op 컬럼이 없으면 모든 행 반환 (제어기 미연결 케이스).
+        /// </summary>
+        private static List<string> FilterPosByOp(string[] lines, string[] headers, int? axis)
+        {
+            var result = new List<string>();
+
+            // Op 컬럼 인덱스 탐색
+            List<int> opCols = new List<int>();
+            if (axis.HasValue)
+            {
+                // Op_Ax{n} 단일 컬럼
+                string opName = "Op_Ax" + axis.Value;
+                for (int i = 0; i < headers.Length; i++)
+                    if (string.Equals(headers[i].Trim(), opName, StringComparison.OrdinalIgnoreCase))
+                    { opCols.Add(i); break; }
+            }
+            else
+            {
+                // 임의 Op_Ax* 컬럼 전체 (accel 단일 센서: 어느 축이든 움직이면 Pos)
+                for (int i = 0; i < headers.Length; i++)
+                    if (headers[i].Trim().StartsWith("Op_Ax", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(headers[i].Trim(), "Op", StringComparison.OrdinalIgnoreCase))
+                        opCols.Add(i);
+            }
+
+            for (int li = 1; li < lines.Length; li++)
+            {
+                string line = lines[li];
+                if (opCols.Count == 0)
+                {
+                    // Op 컬럼 없음 → 제어기 미연결 → 모든 행 포함
+                    result.Add(line);
+                    continue;
+                }
+                string[] cols = line.Split(',');
+                bool isPos = false;
+                foreach (int oc in opCols)
+                {
+                    if (oc < cols.Length &&
+                        string.Equals(cols[oc].Trim(), "Pos", StringComparison.OrdinalIgnoreCase))
+                    { isPos = true; break; }
+                }
+                if (isPos) result.Add(line);
+            }
+
+            return result;
         }
 
         private static int[] GetSignalColumnIndices(

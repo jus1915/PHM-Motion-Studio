@@ -35,6 +35,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private readonly Func<int, string> _getAxisOp;
         private readonly int[]             _axes;
         private readonly Action<string>    _log;
+        /// <summary>제어기 연결 시 true → Op_Ax 컬럼 포함. 미연결 시 false → Op_Ax 컬럼 생략.</summary>
+        private readonly bool              _hasOpColumns;
 
         // ── 링 버퍼 (토크 + Op 동시 저장) ────────────────────────
         // 크기 = 8192: 1kHz 기준 ≈8초, 빠른 샘플레이트에도 여유
@@ -78,10 +80,11 @@ namespace PHM_Project_DockPanel.Services.DAQ
             int[]             axes,
             Action<string>    log = null)
         {
-            _getTorque = getTorque ?? throw new ArgumentNullException(nameof(getTorque));
-            _getAxisOp = getAxisOp;
-            _axes      = axes ?? new int[0];
-            _log       = log ?? (_ => { });
+            _getTorque    = getTorque ?? throw new ArgumentNullException(nameof(getTorque));
+            _getAxisOp    = getAxisOp;
+            _axes         = axes ?? new int[0];
+            _log          = log ?? (_ => { });
+            _hasOpColumns = (getAxisOp != null);   // 제어기 연결 여부
 
             int n  = _axes.Length;
             _tBuf  = new double[RING * n];
@@ -102,11 +105,12 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 Directory.CreateDirectory(dir);
                 _filePath = Path.Combine(dir, baseName + "_Combined.csv");
 
-                // 헤더: 토크(축별) | 가속도(단일 센서 x/y/z) | Op(축별)
+                // 헤더: 토크(축별) | 가속도(단일 센서 x/y/z) | Op(축별, 제어기 연결 시만)
                 var hdr = new StringBuilder("time_s");
                 foreach (int ax in _axes) hdr.Append($",Ax{ax}_Trq(%)");
                 hdr.Append(",x,y,z");
-                foreach (int ax in _axes) hdr.Append($",Op_Ax{ax}");
+                if (_hasOpColumns)
+                    foreach (int ax in _axes) hdr.Append($",Op_Ax{ax}");
 
                 _writer = new StreamWriter(
                     _filePath, false, Encoding.UTF8, bufferSize: 65536);
@@ -219,9 +223,10 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     sb.Append(",").Append(block[1, i].ToString("G6", CultureInfo.InvariantCulture));
                     sb.Append(",").Append(block[2, i].ToString("G6", CultureInfo.InvariantCulture));
 
-                    // Op: 축별 (링 버퍼 → 해당 시점의 상태)
-                    for (int ai = 0; ai < nAxes; ai++)
-                        sb.Append(",").Append(_opBuf[rBase + ai] ?? "Pos");
+                    // Op: 축별 (링 버퍼 → 해당 시점의 상태) — 제어기 연결 시만 기록
+                    if (_hasOpColumns)
+                        for (int ai = 0; ai < nAxes; ai++)
+                            sb.Append(",").Append(_opBuf[rBase + ai] ?? "Pos");
 
                     _writer.WriteLine(sb.ToString());
                 }
@@ -260,8 +265,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
                     sb.Append(",").Append(block[1, i].ToString("G6", CultureInfo.InvariantCulture));
                     sb.Append(",").Append(block[2, i].ToString("G6", CultureInfo.InvariantCulture));
 
-                    // Op: 현재 상태
-                    for (int ai = 0; ai < nAxes; ai++) sb.Append(",").Append(opNow[ai]);
+                    // Op: 현재 상태 — 제어기 연결 시만 기록
+                    if (_hasOpColumns)
+                        for (int ai = 0; ai < nAxes; ai++) sb.Append(",").Append(opNow[ai]);
 
                     _writer.WriteLine(sb.ToString());
                 }

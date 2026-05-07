@@ -14,7 +14,7 @@ import os
 import sys
 import time
 import traceback
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple  # noqa: F401
 
 # train_dl_model.py 와 같은 디렉터리에 있다고 가정
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,7 +24,9 @@ from train_dl_model import (
     _add_feature_channels,
     _add_mixed_feature_channels,
     train,
+    train_ae,
     export_onnx,
+    export_onnx_ae,
     save_meta,
 )
 
@@ -81,6 +83,8 @@ ADD_ABS_CHANNELS        = True
 # (그룹명, 채널 목록, Op 필터 컬럼, 출력 파일명 스템, augment_mode, normalize)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── CLS 결함진단 학습 대상 ───────────────────────────────────────────────────
+# (그룹명, 채널 목록, Op 필터 컬럼, 출력 파일명 스템, augment_mode, normalize)
 JOBS: List[Tuple[str, List[str], str, str, str, bool]] = [
     # 가속도 — 축별 (standard 증강, normalize=True)
     ("Accel-Ax0", ["x", "y", "z"], "Op_Ax0", "cls_accel_ax0", "standard", True),
@@ -94,6 +98,18 @@ JOBS: List[Tuple[str, List[str], str, str, str, bool]] = [
     ("Combined-Ax0", ["x", "y", "z", "Ax0_Trq(%)"], "Op_Ax0", "cls_combined_ax0", "mixed", False),
     ("Combined-Ax1", ["x", "y", "z", "Ax1_Trq(%)"], "Op_Ax1", "cls_combined_ax1", "mixed", False),
     ("Combined-Ax2", ["x", "y", "z", "Ax2_Trq(%)"], "Op_Ax2", "cls_combined_ax2", "mixed", False),
+]
+
+# ── AE 이상탐지 학습 대상 ────────────────────────────────────────────────────
+# filter_op_col=None → Idle/Pos 구분 없이 전체 행 학습
+# (그룹명, 채널 목록, Op 필터 컬럼(None=전체), 출력 파일명 스템, augment_mode, normalize)
+AE_JOBS: List[Tuple[str, List[str], Optional[str], str, str, bool]] = [
+    # 가속도 — 단일 전역 모델 (standard 증강, normalize=True)
+    ("AE-Accel",      ["x", "y", "z"],    None, "ae_accel",      "standard", True),
+    # 토크 — 축별 (mixed 증강, normalize=False)
+    ("AE-Torque-Ax0", ["Ax0_Trq(%)"],     None, "ae_torque_ax0", "mixed",    False),
+    ("AE-Torque-Ax1", ["Ax1_Trq(%)"],     None, "ae_torque_ax1", "mixed",    False),
+    ("AE-Torque-Ax2", ["Ax2_Trq(%)"],     None, "ae_torque_ax2", "mixed",    False),
 ]
 
 
@@ -245,6 +261,145 @@ def run_job(
         return {"name": name, "error": str(exc)}
 
 
+def run_ae_job(
+    name: str,
+    channels: List[str],
+    filter_op_col: Optional[str],
+    output_stem: str,
+    augment_mode: str = "standard",
+    normalize: bool   = True,
+) -> dict:
+    """단일 AE 이상탐지 모델을 학습하고 결과 dict를 반환합니다.
+
+    filter_op_col=None 이면 Op 필터 없이 전체 행(Idle+Pos)을 학습에 사용합니다.
+    """
+    output_path = os.path.join(OUTPUT_DIR, output_stem + ".onnx")
+
+    # AE 학습용 params (session="AE", class_names=normal만 포함)
+    params = {
+        "session":               "AE",
+        "sensor_type":           SENSOR_TYPE,
+        "channels":              channels,
+        "class_names":           ["normal"],   # AE: 정상 데이터만으로 학습
+        "window_size":           WINDOW_SIZE,
+        "stride":                STRIDE,
+        "epochs":                EPOCHS,
+        "batch_size":            BATCH_SIZE,
+        "lr":                    LR,
+        "val_split":             VAL_SPLIT,
+        "seed":                  SEED,
+        "filter_op_column":      filter_op_col,
+        "output":                output_path,
+        "normalize":             normalize,
+        "augment_mode":          augment_mode,
+        "add_augmented_channels":True,
+        "add_fft_channels":      ADD_FFT_CHANNELS,
+        "add_derivative_channels":ADD_DERIVATIVE_CHANNELS,
+        "add_torque_stats":      ADD_TORQUE_STATS,
+        "add_abs_channels":      ADD_ABS_CHANNELS,
+    }
+
+    _banner(
+        f"[{name}] AE 시작  채널={channels}  필터={filter_op_col}  "
+        f"augment={augment_mode}  normalize={normalize}"
+    )
+    t0 = time.time()
+
+    try:
+        # ── 1. 데이터 로드 (정상 데이터만) ──────────────────────────────────
+        windows, _ = load_windows_from_dir(
+            data_dir         = DATA_DIR,
+            channels         = channels,
+            label_column     = "Label",
+            class_names      = ["normal"],
+            window_size      = WINDOW_SIZE,
+            stride           = STRIDE,
+            sensor_type      = SENSOR_TYPE,
+            normalize        = normalize,
+            filter_op_column = filter_op_col,
+        )
+
+        if not windows:
+            print(f"[{name}] ❌ 정상 윈도우 없음 — 건너뜀", file=sys.stderr)
+            return {"name": name, "error": "유효 윈도우 없음"}
+
+        n_windows  = len(windows)
+        n_channels = windows[0][0].shape[1]
+
+        # ── 2. 채널 증강 ─────────────────────────────────────────────────────
+        pre_aug = n_channels
+        if augment_mode == "mixed":
+            windows = _add_mixed_feature_channels(
+                windows,
+                channels             = channels,
+                add_accel_fft        = ADD_FFT_CHANNELS,
+                add_accel_derivative = ADD_DERIVATIVE_CHANNELS,
+                add_torque_derivative= ADD_DERIVATIVE_CHANNELS,
+                add_torque_stats     = ADD_TORQUE_STATS,
+                add_abs              = ADD_ABS_CHANNELS,
+            )
+        else:
+            windows = _add_feature_channels(
+                windows,
+                add_fft        = ADD_FFT_CHANNELS,
+                add_derivative = ADD_DERIVATIVE_CHANNELS,
+                add_abs        = ADD_ABS_CHANNELS,
+            )
+        n_channels = windows[0][0].shape[1]
+        print(
+            f"[{name}] 채널 증강({augment_mode}): {pre_aug} → {n_channels}채널",
+            file=sys.stderr,
+        )
+
+        # ── 3. AE 학습 ───────────────────────────────────────────────────────
+        ae_model, best_val_mae, epochs_done, mae_thr, rms_mean, rms_thr, rms_std = train_ae(
+            params     = params,
+            windows    = windows,
+            n_channels = n_channels,
+        )
+
+        # ── 4. ONNX 내보내기 + 메타 저장 ─────────────────────────────────────
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        export_onnx_ae(ae_model, output_path, WINDOW_SIZE, n_channels)
+        save_meta(
+            output_path        = output_path,
+            params             = params,
+            class_names        = ["normal"],
+            channels           = channels,
+            val_accuracy       = 0.0,
+            val_mse            = best_val_mae,
+            threshold          = mae_thr,
+            rms_mean           = rms_mean,
+            rms_thr            = rms_thr,
+            rms_std            = rms_std,
+            epochs_trained     = epochs_done,
+            n_channels_override= n_channels,
+        )
+
+        elapsed = time.time() - t0
+        _banner(
+            f"[{name}] 완료  windows={n_windows}  mae={best_val_mae:.6f}"
+            f"  mae_thr={mae_thr:.6f}  {int(elapsed//60)}m{int(elapsed%60):02d}s"
+        )
+
+        return {
+            "name":    name,
+            "windows": n_windows,
+            "cls_dist":{"normal": n_windows},
+            "win_acc": 0.0,     # AE: 정확도 개념 없음
+            "seg_acc": None,
+            "epochs":  epochs_done,
+            "elapsed": elapsed,
+            "output":  output_stem + ".onnx",
+            "mae":     best_val_mae,
+            "mae_thr": mae_thr,
+        }
+
+    except Exception as exc:
+        traceback.print_exc()
+        return {"name": name, "error": str(exc)}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 결과 표 출력
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -304,9 +459,12 @@ def print_summary(results: List[dict]) -> None:
 
     ok      = [r for r in results if "error" not in r]
     failed  = [r for r in results if "error" in r]
-    accel_ok    = [r for r in ok if "accel"    in r["name"].lower()]
-    torque_ok   = [r for r in ok if "torque"   in r["name"].lower()]
-    combined_ok = [r for r in ok if "combined" in r["name"].lower()]
+    # CLS 그룹
+    accel_ok    = [r for r in ok if "accel"    in r["name"].lower() and not r["name"].startswith("AE-")]
+    torque_ok   = [r for r in ok if "torque"   in r["name"].lower() and not r["name"].startswith("AE-")]
+    combined_ok = [r for r in ok if "combined" in r["name"].lower() and not r["name"].startswith("AE-")]
+    # AE 그룹
+    ae_ok       = [r for r in ok if r["name"].startswith("AE-")]
 
     print(f"\n{SEP}")
     print(f"  PHM 통합 학습 결과   ({len(ok)}/{len(results)} 성공)")
@@ -338,9 +496,22 @@ def print_summary(results: List[dict]) -> None:
         print(_avg_row("Combined 평균", combined_ok))
         print(f"  {DIV}")
 
-    # 전체 평균
-    if ok:
-        print(_avg_row("전체 평균", ok))
+    # AE 이상탐지 그룹 (win_acc=0 이므로 별도 표기)
+    if ae_ok:
+        for r in ae_ok:
+            mae_str = f"mae={r.get('mae', 0.0):.6f}  thr={r.get('mae_thr', 0.0):.6f}"
+            t = r.get("elapsed", 0)
+            t_str = f"{int(t//60)}m{int(t%60):02d}s"
+            print(
+                f"  {r['name']:<{_GW}} {r['windows']:>{_WW}}  "
+                f"{'':>{len(CLASS_NAMES)*(_CW+2)-2}}  {mae_str}  {t_str}",
+            )
+        print(f"  {DIV}")
+
+    # 전체 평균 (CLS만)
+    cls_ok = [r for r in ok if not r["name"].startswith("AE-")]
+    if cls_ok:
+        print(_avg_row("CLS 평균", cls_ok))
     print(SEP)
 
     # 실패 목록
@@ -358,10 +529,11 @@ def print_summary(results: List[dict]) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    t_total = time.time()
+    t_total   = time.time()
+    all_jobs  = len(JOBS) + len(AE_JOBS)
 
     print(f"\n{'═'*72}", file=sys.stderr)
-    print(f"  PHM 통합 학습 시작  ({len(JOBS)}개 모델)", file=sys.stderr)
+    print(f"  PHM 통합 학습 시작  (CLS {len(JOBS)}개 + AE {len(AE_JOBS)}개 = {all_jobs}개 모델)", file=sys.stderr)
     print(f"  DATA_DIR   = {DATA_DIR}", file=sys.stderr)
     print(f"  OUTPUT_DIR = {OUTPUT_DIR}", file=sys.stderr)
     print(f"  window={WINDOW_SIZE}  stride={STRIDE}  epochs={EPOCHS}  "
@@ -369,13 +541,25 @@ def main() -> None:
     print(f"{'═'*72}\n", file=sys.stderr)
 
     results: List[dict] = []
+
+    # ── CLS 결함진단 ──────────────────────────────────────────────────────────
     for idx, job in enumerate(JOBS, 1):
         name, channels, filter_op, output_stem = job[0], job[1], job[2], job[3]
         augment_mode = job[4] if len(job) > 4 else DEFAULT_AUGMENT_MODE
         normalize    = job[5] if len(job) > 5 else DEFAULT_NORMALIZE
 
-        print(f"\n[{idx}/{len(JOBS)}]", file=sys.stderr)
+        print(f"\n[CLS {idx}/{len(JOBS)}]", file=sys.stderr)
         result = run_job(name, channels, filter_op, output_stem, augment_mode, normalize)
+        results.append(result)
+
+    # ── AE 이상탐지 ───────────────────────────────────────────────────────────
+    for idx, job in enumerate(AE_JOBS, 1):
+        name, channels, filter_op, output_stem = job[0], job[1], job[2], job[3]
+        augment_mode = job[4] if len(job) > 4 else "standard"
+        normalize    = job[5] if len(job) > 5 else True
+
+        print(f"\n[AE {idx}/{len(AE_JOBS)}]", file=sys.stderr)
+        result = run_ae_job(name, channels, filter_op, output_stem, augment_mode, normalize)
         results.append(result)
 
     total_elapsed = time.time() - t_total

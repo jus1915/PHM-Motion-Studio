@@ -104,12 +104,14 @@ namespace PHM_Project_DockPanel.Services.WMX
         // ── 폴링 루프 ─────────────────────────────────────────────
         private void PollLoop(CancellationToken token)
         {
-            // 헤더: time_s(초) + 축별 토크만 — 가속도 CSV 컬럼명(time_s)과 통일
+            // 헤더: time_s(초) + 축별 토크 + Op(제어기 연결 시만)
+            bool hasOp = GetAxisOperation != null;
             var header = new StringBuilder("time_s");
             foreach (int ax in _axes)
                 header.Append($",Ax{ax}_Trq(%)");
-            foreach (int ax in _axes)
-                header.Append($",Op_Ax{ax}");
+            if (hasOp)
+                foreach (int ax in _axes)
+                    header.Append($",Op_Ax{ax}");
 
             var sw = Stopwatch.StartNew();
 
@@ -146,11 +148,9 @@ namespace PHM_Project_DockPanel.Services.WMX
                             TorqueSampled?.Invoke(Device ?? _fileSuffix, ax, trq, DateTime.UtcNow);
                         }
 
-                        for (int _oi = 0; _oi < _axes.Length; _oi++)
-                        {
-                            string _opNow = GetAxisOperation?.Invoke(_axes[_oi]) ?? "Pos";
-                            line.Append("," + _opNow);
-                        }
+                        if (hasOp)
+                            for (int _oi = 0; _oi < _axes.Length; _oi++)
+                                line.Append("," + (GetAxisOperation?.Invoke(_axes[_oi]) ?? "Pos"));
                         writer.WriteLine(line.ToString());
 
                         // ── 고정 인터벌 대기 ──────────────────────────────
