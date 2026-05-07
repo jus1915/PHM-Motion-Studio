@@ -946,7 +946,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             leftColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // 섹션 제목
-            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));   // KPI 카드
+            leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));   // KPI 카드
             leftColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));    // 가속도 AE 전역 패널
             leftColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 실시간 분류 현황
 
@@ -965,9 +965,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 80) };
-            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 80) };
-            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 80) };
+            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 110) };
+            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 110) };
+            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3), MinimumSize = new Size(50, 110) };
             kpiPanel.Controls.Add(cardDanger,  0, 0);
             kpiPanel.Controls.Add(cardWarning, 1, 0);
             kpiPanel.Controls.Add(cardCycles,  2, 0);
@@ -5097,15 +5097,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public string DeltaText { get { return _delta.Text; } set { _delta.Text = value; } }
             public string Footnote { get { return _foot.Text; } set { _foot.Text = value; } }
 
-            private readonly Label _title = new Label { Font = new Font("Segoe UI", 12, FontStyle.Bold) };
-            private readonly Label _value = new Label { Font = new Font("Segoe UI", 22, FontStyle.Bold) };
-            private readonly Label _delta = new Label { Font = new Font("Segoe UI", 10) };
-            private readonly Label _foot = new Label { Font = new Font("Segoe UI", 9), ForeColor = Color.Gray };
+            private readonly Label _title = new Label { Font = new Font("Segoe UI", 10, FontStyle.Bold) };
+            private readonly Label _value = new Label { Font = new Font("Segoe UI", 20, FontStyle.Bold) };
+            private readonly Label _delta = new Label { Font = new Font("Segoe UI", 9) };
+            private readonly Label _foot = new Label { Font = new Font("Segoe UI", 8), ForeColor = Color.Gray };
 
             public KpiCard()
             {
                 this.DoubleBuffered = true;
-                this.Padding = new Padding(16);     // 카드 내부 여백
+                this.Padding = new Padding(10, 8, 10, 8);   // 카드 내부 여백 (좌우10, 상하8)
                 this.BackColor = Color.White;
 
                 // ---- 내부 레이아웃: 행을 퍼센트 비율로 꽉 채움 ----
@@ -5136,8 +5136,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _value.Dock = DockStyle.Fill;
                 _value.Margin = new Padding(0, 2, 0, 2);
                 _value.TextAlign = ContentAlignment.MiddleLeft;
-                // 보기 좋은 기본 폰트 (필요 시 조정)
-                if (_value.Font.Size < 14) _value.Font = new Font(_value.Font.FontFamily, 16, FontStyle.Bold);
 
                 _delta.AutoSize = false;
                 _delta.Dock = DockStyle.Fill;
