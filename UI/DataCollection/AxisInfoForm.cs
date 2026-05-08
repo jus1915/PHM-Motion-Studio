@@ -105,8 +105,12 @@ namespace PHM_Project_DockPanel.Windows
             Padding = new Padding(5);
             this.MinimumSize = new Size(960, 560);
 
-            // === 상단 패널 ===
-            var topPanel = new Panel { Dock = DockStyle.Top, Height = 60, Padding = new Padding(0) };
+            // === 상단 패널 (DPI 스케일 반영) ===
+            float _dpiScale;
+            using (var _dg = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
+                _dpiScale = _dg.DpiX / 96.0f;
+            int topPanelH = Math.Max(92, (int)(92 * _dpiScale));
+            var topPanel = new Panel { Dock = DockStyle.Top, Height = topPanelH, Padding = new Padding(0) };
 
             // ===== (좌측) 상태 라벨들: 세로 정렬 =====
             var leftStatusPanel = new FlowLayoutPanel
