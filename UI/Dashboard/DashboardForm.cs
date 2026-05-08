@@ -4364,21 +4364,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var s = chart.Series.FindByName(seriesName);
             if (s != null) return s;
 
-            int axIdx = 0;
+            int axIdx = -1;  // -1 = 전역(global) 모델
             int ux = key.LastIndexOf("_ax", StringComparison.OrdinalIgnoreCase);
             if (ux >= 0) int.TryParse(key.Substring(ux + 3), out axIdx);
+            bool isGlobal = axIdx < 0;
+            if (isGlobal) axIdx = 0;  // 색상 인덱스용
 
             Color[] accelColors  = { Color.FromArgb(0, 112, 204),  Color.FromArgb(0, 170, 230),  Color.FromArgb(70, 130, 210), Color.FromArgb(100, 160, 240) };
             Color[] torqueColors = { Color.FromArgb(210, 55, 20),  Color.FromArgb(240, 100, 40), Color.FromArgb(255, 150, 0),  Color.FromArgb(200, 75, 55)  };
             Color c = isAccel ? accelColors[axIdx % accelColors.Length]
                                : torqueColors[axIdx % torqueColors.Length];
 
+            string legendText = isGlobal
+                ? (isAccel ? "가속도 (전역)" : "토크 (전역)")
+                : (isAccel ? $"Ax{axIdx} 가속" : $"Ax{axIdx} 토크");
+
             s = new Series(seriesName)
             {
                 ChartType   = SeriesChartType.FastLine,
                 XValueType  = ChartValueType.DateTime,
                 BorderWidth = 2,
-                LegendText  = isAccel ? $"Ax{axIdx} 가속" : $"Ax{axIdx} 토크",
+                LegendText  = legendText,
                 Color       = c
             };
             // 스켈레톤 제거 (첫 실제 시리즈 추가 시)
