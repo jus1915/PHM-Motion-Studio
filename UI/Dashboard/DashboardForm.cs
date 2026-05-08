@@ -4653,10 +4653,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
                     string levelTag = isDanger ? "🔴 위험" : "🟡 경고";
 
-                    if (isDanger) { cntDanger++;  cardDanger.ValueText  = cntDanger  + " 건"; }
-                    else          { cntWarning++; cardWarning.ValueText = cntWarning + " 건"; }
-
-                    // 가속도 전역 이상은 KPI 카운트만 올리고 로그·그리드에는 남기지 않음
+                    // AE(이상탐지)는 KPI 카운트에 포함하지 않음 — CLS(결함진단)에서만 집계
+                    // 가속도 전역 이상은 로그·그리드에도 남기지 않음
                     if (!accelGlobal)
                     {
                         AppendEventLog(
@@ -4706,7 +4704,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 }
                 UpdateClassMatrixCls(combined.Axis.Value, sensorType, clsName, confVal);
 
-                // 결함 감지 시 이벤트 로그에도 기록
+                // 결함 감지 시 KPI 카운트 + 이벤트 로그 기록
                 if (combined.ClsAvailable && combined.ClsIsFault == true)
                 {
                     string axLabel   = $" Ax{combined.Axis.Value}";
@@ -4715,6 +4713,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                      : "토크";
                     string conf      = combined.ClsConfidence.HasValue
                                        ? $"  신뢰도={combined.ClsConfidence.Value:P0}" : "";
+
+                    // 신뢰도 0.7 이상 → 위험, 미만 → 경고
+                    bool isCritical = combined.ClsConfidence.HasValue
+                                      ? combined.ClsConfidence.Value >= 0.7f
+                                      : true; // 신뢰도 없으면 위험으로 분류
+                    if (isCritical) { cntDanger++;  cardDanger.ValueText  = cntDanger  + " 건"; }
+                    else            { cntWarning++; cardWarning.ValueText = cntWarning + " 건"; }
+
                     AppendEventLog(
                         $"[{DateTime.Now:HH:mm:ss}] 🔶 결함진단 {sensor}{axLabel} = {clsName}{conf}");
                 }
