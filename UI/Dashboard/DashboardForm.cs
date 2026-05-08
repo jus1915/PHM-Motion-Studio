@@ -393,6 +393,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
         private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
         private bool  _liveChartFirstData = true;   // 첫 실데이터 수신 시 스켈레톤 제거 플래그
+        private Label _lblAccelModelInfo;           // 가속도 차트 모델 정보 라벨
+        private Label _lblTorqueModelInfo;          // 토크 차트 모델 정보 라벨
+        private readonly System.Collections.Generic.HashSet<string> _seenAccelModels  = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Generic.HashSet<string> _seenTorqueModels = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
 
         // ── 센서 표시 필터 체크박스 ──────────────────────────────────────────
@@ -1034,8 +1038,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _chartAccel  = BuildLiveInferenceChart(isAccel: true);
             _chartTorque = BuildLiveInferenceChart(isAccel: false);
             dualChartPanel.SuspendLayout();
-            dualChartPanel.Controls.Add(WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166)),  0, 0);
-            dualChartPanel.Controls.Add(WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15)), 1, 0);
+            dualChartPanel.Controls.Add(WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166),  out _lblAccelModelInfo),  0, 0);
+            dualChartPanel.Controls.Add(WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15), out _lblTorqueModelInfo), 1, 0);
             dualChartPanel.ResumeLayout(false);
 
             // ── (1,1) 하단-우: 발생 이벤트 ───────────────────────────────────
@@ -1212,7 +1216,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>차트를 제목 라벨과 함께 패널에 감쌉니다.</summary>
-        private Panel WrapChartInPanel(string title, Chart chart, Color titleColor)
+        private Panel WrapChartInPanel(string title, Chart chart, Color titleColor, out Label modelInfoLabel)
         {
             var panel = new Panel
             {
@@ -1229,12 +1233,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 Text      = title,
                 Font      = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-                Dock      = DockStyle.Top, Height = 26,
+                Dock      = DockStyle.Top, Height = 22,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Padding   = new Padding(8, 0, 0, 0),
                 ForeColor = titleColor, BackColor = Color.White
             };
+            // 모델 정보 라벨 (제목 바로 아래, 추론 결과 수신 시 갱신)
+            modelInfoLabel = new Label
+            {
+                Text      = "모델: 수신 대기 중...",
+                Font      = new Font("Segoe UI", 7.5f),
+                Dock      = DockStyle.Top, Height = 17,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding   = new Padding(10, 0, 0, 0),
+                ForeColor = Color.FromArgb(120, 120, 140), BackColor = Color.White
+            };
             panel.Controls.Add(chart);
+            panel.Controls.Add(modelInfoLabel);
             panel.Controls.Add(lbl);
             return panel;
         }
@@ -4655,6 +4670,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 else if (!isAccel && result.Axis.HasValue)
                     UpdateClassMatrix(result.Axis.Value, normScore);
 
+                // 사용 모델 파일명 라벨 갱신
+                if (!string.IsNullOrEmpty(result.ModelFile))
+                    UpdateModelInfoLabel(isAccel, result.ModelFile);
+
                 bool hasCls = !string.IsNullOrEmpty(result.ClassName) &&
                               !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
                               !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase);
@@ -4730,6 +4749,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                               : (object)"-";
                 }
                 UpdateClassMatrixCls(combined.Axis.Value, sensorType, clsName, confVal);
+
+                // 사용 모델 파일명 라벨 갱신 (AE + CLS)
+                if (!string.IsNullOrEmpty(combined.AeModelFile) || !string.IsNullOrEmpty(combined.ClsModelFile))
+                    UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile);
 
                 // 결함 감지 시 KPI 카운트 + 이벤트 로그 기록
                 if (combined.ClsAvailable && combined.ClsIsFault == true)
@@ -5041,6 +5064,42 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         /// <summary>
         /// 가속도 전역 AE 결과를 _pnlAccelAeBar 패널에 반영합니다 (UI 스레드에서만 호출).
         /// </summary>
+        /// <summary>수신된 모델 파일명을 차트 하단 모델 정보 라벨에 반영합니다.</summary>
+        private void UpdateModelInfoLabel(bool isAccel, string modelFile, string clsModelFile = null)
+        {
+            if (string.IsNullOrWhiteSpace(modelFile)) return;
+
+            var seen  = isAccel ? _seenAccelModels  : _seenTorqueModels;
+            var lbl   = isAccel ? _lblAccelModelInfo : _lblTorqueModelInfo;
+            if (lbl == null || lbl.IsDisposed) return;
+
+            bool changed = false;
+            string fn = System.IO.Path.GetFileName(modelFile);
+            if (!string.IsNullOrEmpty(fn) && seen.Add(fn)) changed = true;
+
+            if (!string.IsNullOrEmpty(clsModelFile))
+            {
+                string cfn = System.IO.Path.GetFileName(clsModelFile);
+                if (!string.IsNullOrEmpty(cfn) && seen.Add("cls:" + cfn)) changed = true;
+            }
+
+            if (!changed) return;
+
+            // AE 모델: 파일명 목록, CLS 모델: "cls:" prefix 제거 후 표시
+            var aeFiles  = new System.Collections.Generic.List<string>();
+            var clsFiles = new System.Collections.Generic.List<string>();
+            foreach (var s in seen)
+            {
+                if (s.StartsWith("cls:")) clsFiles.Add(s.Substring(4));
+                else aeFiles.Add(s);
+            }
+
+            var parts = new System.Collections.Generic.List<string>();
+            if (aeFiles.Count  > 0) parts.Add("AE: "  + string.Join(", ", aeFiles));
+            if (clsFiles.Count > 0) parts.Add("CLS: " + string.Join(", ", clsFiles));
+            lbl.Text = "모델  " + string.Join("  |  ", parts);
+        }
+
         private void UpdateAccelAeDisplay(double normScore)
         {
             _accelAeNormScore = normScore;
