@@ -423,7 +423,9 @@ def run_training_ae_torque(**context) -> None:
         params["session"]           = "AE"
         params["sensor_type"]       = "torque"
         params["channels"]          = [f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"]  = None   # Op 컬럼 없는 CSV 도 허용, 전체 행 학습
+        # Ax{n} 토크 AE는 해당 축이 실제로 움직이는(Pos) 구간만 학습해야
+        # 다른 축만 이동 중일 때의 near-zero 토크가 "정상"으로 오염되지 않음
+        params["filter_op_column"]  = f"Op_Ax{ax}"
         params["augment_mode"]      = "mixed"
         params["normalize"]         = False
         params["output"] = str(Path(_MODELS_ROOT) / f"ae_torque_ax{ax}.onnx")
