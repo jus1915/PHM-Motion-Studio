@@ -623,8 +623,15 @@ def _ae_score(
     """
     input_name = sess.get_inputs()[0].name
     recon  = sess.run(None, {input_name: proc_arr})[0]
-    mae    = float(np.abs(proc_arr - recon).mean())
     thr    = float(meta.get("threshold", 0.1))
+
+    # ── 재구성 오차: 평균(MAE) + 95th percentile 혼합 ─────────────────────────
+    # 순간 충격/외력은 전체 윈도우 중 일부 샘플에서만 오차가 크게 나타남.
+    # 평균만 쓰면 나머지 정상 샘플에 희석되어 탐지 불가 → peak 성분 추가.
+    err_per_step = np.abs(proc_arr - recon).mean(axis=-1)[0]  # (T,) 시간축 오차
+    mae_mean = float(err_per_step.mean())
+    mae_peak = float(np.percentile(err_per_step, 95))         # 상위 5% 오차 대표값
+    mae      = mae_mean * 0.5 + mae_peak * 0.5                # 평균+피크 혼합
 
     rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
     rms_thr  = float(meta.get("rms_thr",  float("inf")))
@@ -637,9 +644,9 @@ def _ae_score(
         rms_norm = 0.0
 
     if sensor_type == "accel":
-        TH_SCALE = 2.0; RMS_WEIGHT = 0.25; ANOMALY_THRESHOLD = 1.5
+        TH_SCALE = 1.0; RMS_WEIGHT = 0.3; ANOMALY_THRESHOLD = 1.0
     else:
-        TH_SCALE = 1.3; RMS_WEIGHT = 0.35; ANOMALY_THRESHOLD = 1.3
+        TH_SCALE = 1.0; RMS_WEIGHT = 0.3; ANOMALY_THRESHOLD = 1.0
 
     mae_norm     = mae / max(thr * TH_SCALE, 1e-8)
     score_normed = mae_norm + RMS_WEIGHT * rms_norm

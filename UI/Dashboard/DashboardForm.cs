@@ -443,8 +443,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double ema, int count)>
             _scoreBaseline = new System.Collections.Concurrent.ConcurrentDictionary<string, (double, int)>();
         private const double SpikeEmaAlpha  = 0.1;  // EMA 감쇠율 (느릴수록 베이스라인 안정적)
-        private const double SpikeFactor    = 4.0;  // EMA 대비 이 배수 이상이면 spike 판정
-                                                    // (2.0 → 오탐 과다: 가감속 구간 score가 ema×2 초과 빈발)
+        private const double SpikeFactor    = 2.5;  // EMA 대비 이 배수 이상이면 spike 판정
+                                                    // 서버가 MAE+peak 혼합 스코어 반환하므로 충격 시 spike 폭 확대됨
         private const int    SpikeWarmup    = 30;   // 워밍업 후 spike 판정 시작 (충분한 베이스라인 수집)
 
         // ── 위험/경고 등급 임계 배수 (normScore = rawScore / threshold 기준) ──
