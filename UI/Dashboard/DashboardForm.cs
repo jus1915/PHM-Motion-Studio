@@ -392,6 +392,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2", "combined_ax0")
         private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
         private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
+        private bool  _liveChartFirstData = true;   // 첫 실데이터 수신 시 스켈레톤 제거 플래그
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
 
         // ── 센서 표시 필터 체크박스 ──────────────────────────────────────────
@@ -4296,6 +4297,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (_chartAccel == null || _chartTorque == null) return;
             if (_liveScoreQueue.IsEmpty) return;
 
+            // 첫 실데이터 수신 시 스켈레톤 시리즈 제거 (X축 고정 방지)
+            if (_liveChartFirstData)
+            {
+                foreach (var ch in new[] { _chartAccel, _chartTorque })
+                {
+                    var sk = ch.Series.FindByName("_sk_");
+                    if (sk != null) ch.Series.Remove(sk);
+                }
+                _liveChartFirstData = false;
+            }
+
+            var latestTime = DateTime.MinValue;
             Tuple<string, DateTime, double> liveItem;
             while (_liveScoreQueue.TryDequeue(out liveItem))
             {
@@ -4303,16 +4316,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Chart target = isAccel ? _chartAccel : _chartTorque;
                 var ls = EnsureLiveSeries(target, liveItem.Item1, isAccel);
                 ls.Points.AddXY(liveItem.Item2.ToOADate(), liveItem.Item3);
+                if (liveItem.Item2 > latestTime) latestTime = liveItem.Item2;
             }
+
+            if (latestTime == DateTime.MinValue) latestTime = DateTime.Now;
+            double xMax = latestTime.AddSeconds(10).ToOADate();
+            double xMin = latestTime.AddMinutes(-5).ToOADate();
+
             foreach (Chart ch in new[] { _chartAccel, _chartTorque })
             {
                 if (ch == null || ch.IsDisposed || ch.ChartAreas.Count == 0) continue;
                 foreach (Series s in ch.Series)
-                {
-                    if (s.Name == "_sk_") continue;
                     while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
-                }
-                ch.ChartAreas[0].RecalculateAxesScale();
+
+                var area = ch.ChartAreas[0];
+                area.AxisX.Minimum = xMin;   // 롤링 윈도우: 최신 기준 5분
+                area.AxisX.Maximum = xMax;
+                area.AxisY.Minimum = 0;
+                area.AxisY.Maximum = double.NaN;  // Y만 자동
             }
         }
 
