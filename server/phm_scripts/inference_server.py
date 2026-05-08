@@ -391,18 +391,24 @@ def _preprocess_window(
         aug = _augment_mixed(raw, meta) if do_augment else raw
         proc_arr = aug[np.newaxis, :, :].astype(np.float32)
     else:
-        # standard: per-window z-score → 증강
-        norm_raw = _zscore_ch(raw)
-        aug      = _augment_standard(norm_raw, meta) if do_augment else norm_raw
-        proc_arr = aug[np.newaxis, :, :].astype(np.float32)
-        # global norm (메타에 통계 있으면 덮어쓰기)
+        # standard 모드 — global norm 유무에 따라 경로 분기
         nm = meta.get("norm_mean")
         ns = meta.get("norm_std")
         if nm is not None and ns is not None:
+            # ── AE 모드: raw → augment → global_norm (학습과 동일 순서) ──────
+            # 학습 시: load_windows(normalize=False) → augment(raw) → global_norm
+            # 주의: z-score를 먼저 적용하면 raw 스케일 기준 nm/ns가 맞지 않아
+            #       재구성 오차가 수십 배 폭증함 (이중 정규화 오류)
+            aug = _augment_standard(raw, meta) if do_augment else raw
             m = np.array(nm, dtype=np.float32).reshape(1, 1, -1)
-            s = np.where(np.array(ns, dtype=np.float32).reshape(1, 1, -1) < 1e-8, 1.0,
-                         np.array(ns, dtype=np.float32).reshape(1, 1, -1))
+            s = np.where(np.array(ns, dtype=np.float32).reshape(1, 1, -1) < 1e-8,
+                         1.0, np.array(ns, dtype=np.float32).reshape(1, 1, -1))
             proc_arr = ((aug[np.newaxis] - m) / s).astype(np.float32)
+        else:
+            # ── CLS 모드: per-window z-score → augment ────────────────────────
+            norm_raw = _zscore_ch(raw)
+            aug      = _augment_standard(norm_raw, meta) if do_augment else norm_raw
+            proc_arr = aug[np.newaxis, :, :].astype(np.float32)
 
     return raw_arr, proc_arr
 
