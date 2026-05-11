@@ -141,6 +141,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private Button   _aflBtnTrigger, _aflBtnStatus;
         private Label    _aflStatusLbl;
         private ComboBox _aflTrainMode;   // 학습 모드: 전체 / accel / torque / combined
+        private TextBox  _aflProfile;     // 저장 프로파일명 (예: default, v2026-05-11)
+        private TextBox  _aflProfileLabel;// 프로파일 표시 이름 (선택)
         private string   _aflLastRunId;
 
         public AIForm()
@@ -2027,15 +2029,18 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.FromArgb(0, 140, 220),
             };
 
-            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 9, RowCount = 1 };
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));   // "URL:"
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));    // URL textbox
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));   // "DAG:"
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));  // DAG ID textbox
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));  // 학습 모드 ComboBox
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // Trigger button
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));   // Status button
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));    // Status label
+            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 11, RowCount = 1 };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));   // col0  "URL:"
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));    // col1  URL textbox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));   // col2  "DAG:"
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // col3  DAG ID textbox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 115));  // col4  학습 모드 ComboBox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));   // col5  "프로파일:" label
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));  // col6  프로파일 TextBox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));   // col7  "라벨:" label
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));    // col8  라벨 TextBox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // col9  Trigger button
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));   // col10 Status button
 
             var lblUrl = new Label { Text = "URL:", AutoSize = false, Dock = DockStyle.Fill,
                 TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText };
@@ -2062,6 +2067,34 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflTrainMode.SelectedIndex = 0; // 기본값: 전체
             _aflTrainMode.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
 
+            // 프로파일 컨트롤
+            var lblProfile = new Label
+            {
+                Text = "프로파일:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText,
+            };
+            _aflProfile = new TextBox
+            {
+                Dock = DockStyle.Fill, Text = "default",
+                ForeColor = Color.FromArgb(40, 40, 40),
+            };
+            // 워터마크: 빈 칸이면 연회색으로 "default" 힌트
+            _aflProfile.Enter += (s, e) => { if (_aflProfile.Text == "default") { _aflProfile.SelectAll(); } };
+
+            var lblProfileLbl = new Label
+            {
+                Text = "라벨:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText,
+            };
+            _aflProfileLabel = new TextBox
+            {
+                Dock = DockStyle.Fill, Text = "",
+                ForeColor = Color.FromArgb(100, 100, 100),
+            };
+            var tipProfile = new System.Windows.Forms.ToolTip();
+            tipProfile.SetToolTip(_aflProfile,      "모델 저장 디렉토리 이름\n예: default, accel_only, v2026-05-11");
+            tipProfile.SetToolTip(_aflProfileLabel, "프로파일 표시 이름 (선택)\n예: 5월 재학습");
+
             _aflBtnTrigger = new Button
             {
                 Text = "▶ 지금 트리거", Height = 24,
@@ -2084,14 +2117,26 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8.5f),
             };
 
-            tl.Controls.Add(lblUrl,          0, 0);
-            tl.Controls.Add(_aflUrl,          1, 0);
-            tl.Controls.Add(lblDag,          2, 0);
-            tl.Controls.Add(_aflDagId,        3, 0);
-            tl.Controls.Add(_aflTrainMode,    4, 0);
-            tl.Controls.Add(_aflBtnTrigger,   5, 0);
-            tl.Controls.Add(_aflBtnStatus,    6, 0);
-            tl.Controls.Add(_aflStatusLbl,    7, 0);
+            // 상태 레이블은 2행으로 분리 (1행이 꽉 참)
+            tl.RowCount = 2;
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+
+            tl.Controls.Add(lblUrl,           0, 0);
+            tl.Controls.Add(_aflUrl,           1, 0);
+            tl.Controls.Add(lblDag,            2, 0);
+            tl.Controls.Add(_aflDagId,         3, 0);
+            tl.Controls.Add(_aflTrainMode,     4, 0);
+            tl.Controls.Add(lblProfile,        5, 0);
+            tl.Controls.Add(_aflProfile,       6, 0);
+            tl.Controls.Add(lblProfileLbl,     7, 0);
+            tl.Controls.Add(_aflProfileLabel,  8, 0);
+            tl.Controls.Add(_aflBtnTrigger,    9, 0);
+            tl.Controls.Add(_aflBtnStatus,    10, 0);
+
+            // 상태 레이블: 2행 전체 span
+            tl.SetColumnSpan(_aflStatusLbl, 11);
+            tl.Controls.Add(_aflStatusLbl, 0, 1);
 
             grp.Controls.Add(tl);
             return grp;
@@ -2204,6 +2249,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // Airflow DAG 태스크는 session을 내부 고정값 사용 → conf의 session 제거
             paramsObj.Remove("session");
 
+            // ── 프로파일 설정 ────────────────────────────────────────────────
+            string profileName = _aflProfile?.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(profileName)) profileName = "default";
+            paramsObj["profile"] = profileName;
+
+            string profileLabel = _aflProfileLabel?.Text?.Trim();
+            if (!string.IsNullOrWhiteSpace(profileLabel))
+                paramsObj["profile_label"] = profileLabel;
+
             _aflBtnTrigger.Enabled = false;
             _aflStatusLbl.ForeColor = Color.DodgerBlue;
             _aflStatusLbl.Text = "트리거 중…";
@@ -2214,10 +2268,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 var trigResult = await client.TriggerDagAsync(dagId, paramsObj);
                 if (trigResult.Ok)
                 {
+                    string prof = paramsObj.TryGetValue("profile", out var pv) ? pv?.ToString() : "default";
                     _aflLastRunId           = trigResult.RunId;
-                    _aflStatusLbl.Text      = $"queued — {trigResult.RunId}";
+                    _aflStatusLbl.Text      = $"queued — {trigResult.RunId}  [프로파일: {prof}]";
                     _aflStatusLbl.ForeColor = Color.LightGreen;
-                    AppendDlLog($"[Airflow] DAG 트리거 성공: {trigResult.RunId}", Color.LightGreen);
+                    AppendDlLog($"[Airflow] DAG 트리거 성공: {trigResult.RunId}  프로파일={prof}", Color.LightGreen);
                 }
                 else
                 {
