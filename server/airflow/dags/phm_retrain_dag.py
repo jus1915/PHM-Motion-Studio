@@ -252,6 +252,30 @@ def _is_mode_enabled(conf: dict, mode: str) -> bool:
     return mode in [str(m).lower() for m in modes]
 
 
+def _get_profile_dir(conf: dict) -> Path:
+    """conf['profile'] 에 지정된 프로파일 디렉토리를 반환합니다.
+
+    디렉토리가 없으면 자동 생성합니다.
+    profile 미지정 시 "default" 사용.
+    profile_info.json 이 없으면 기본 정보로 생성합니다.
+    """
+    profile = str(conf.get("profile", "default"))
+    profile_dir = Path(_MODELS_ROOT) / profile
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    info_path = profile_dir / "profile_info.json"
+    if not info_path.exists():
+        info = {
+            "label":       conf.get("profile_label", profile),
+            "description": conf.get("profile_desc",  ""),
+            "created":     datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        info_path.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print(f"[PHM] 프로파일 디렉토리: {profile_dir}", flush=True)
+    return profile_dir
+
+
 # ── 태스크 함수 ───────────────────────────────────────────────────────────────
 
 def run_training_accel(**context) -> None:
@@ -275,6 +299,7 @@ def run_training_accel(**context) -> None:
 
     axis_count = _get_axis_count(conf)
     run_id     = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
 
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 가속도 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
@@ -285,7 +310,7 @@ def run_training_accel(**context) -> None:
         params["augment_mode"]     = "standard"
         params["normalize"]        = True
         params["session"]          = "CLS"   # conf 값 무시, 항상 CLS 고정
-        params["output"] = str(Path(_MODELS_ROOT) / f"cls_accel_ax{ax}.onnx")
+        params["output"] = str(profile_dir / f"cls_accel_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_accel_ax{ax}")
 
@@ -313,6 +338,7 @@ def run_training_torque(**context) -> None:
 
     axis_count = _get_axis_count(conf)
     run_id     = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
 
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 토크 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
@@ -323,7 +349,7 @@ def run_training_torque(**context) -> None:
         params["augment_mode"]     = "mixed"
         params["normalize"]        = False
         params["session"]          = "CLS"   # conf 값 무시, 항상 CLS 고정
-        params["output"] = str(Path(_MODELS_ROOT) / f"cls_torque_ax{ax}.onnx")
+        params["output"] = str(profile_dir / f"cls_torque_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_torque_ax{ax}")
 
@@ -350,6 +376,7 @@ def run_training_combined(**context) -> None:
 
     axis_count = _get_axis_count(conf)
     run_id     = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
 
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ 결합 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
@@ -360,7 +387,7 @@ def run_training_combined(**context) -> None:
         params["augment_mode"]     = "mixed"
         params["normalize"]        = False
         params["session"]          = "CLS"   # conf 값 무시, 항상 CLS 고정
-        params["output"] = str(Path(_MODELS_ROOT) / f"cls_combined_ax{ax}.onnx")
+        params["output"] = str(profile_dir / f"cls_combined_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_combined_ax{ax}")
 
@@ -392,7 +419,8 @@ def run_training_ae_accel(**context) -> None:
     params["augment_mode"]      = "standard"
     params["normalize"]         = True
     # 단일 모델: 축 suffix 없음
-    params["output"] = str(Path(_MODELS_ROOT) / "ae_accel.onnx")
+    profile_dir = _get_profile_dir(conf)
+    params["output"] = str(profile_dir / "ae_accel.onnx")
     print(f"[PHM] AE 가속도 단일 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_accel")
     print("[PHM] AE 가속도 학습 완료", flush=True)
@@ -416,6 +444,7 @@ def run_training_ae_torque(**context) -> None:
 
     axis_count = _get_axis_count(conf)
     run_id     = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
 
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ AE 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
@@ -428,7 +457,7 @@ def run_training_ae_torque(**context) -> None:
         params["filter_op_column"]  = f"Op_Ax{ax}"
         params["augment_mode"]      = "mixed"
         params["normalize"]         = False
-        params["output"] = str(Path(_MODELS_ROOT) / f"ae_torque_ax{ax}.onnx")
+        params["output"] = str(profile_dir / f"ae_torque_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
 

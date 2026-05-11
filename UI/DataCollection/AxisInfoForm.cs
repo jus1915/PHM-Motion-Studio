@@ -582,8 +582,10 @@ namespace PHM_Project_DockPanel.Windows
 
             if (result.IsError)
             {
-                _lblDaqStatus.Text      = $"[{sensorType}] 추론 오류";
-                _lblDaqStatus.ForeColor = System.Drawing.Color.Gray;
+                // 오류 원인을 그대로 표시 (디버깅용)
+                _lblDaqStatus.Text      = $"[{sensorType}] 오류: {result.Error}";
+                _lblDaqStatus.ForeColor = System.Drawing.Color.OrangeRed;
+                AppEvents.RaiseLog($"[추론 오류] sensorType={sensorType}  {result.Error}");
                 return;
             }
 

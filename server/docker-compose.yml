@@ -102,7 +102,7 @@ services:
       bash -c "pip install --quiet fastapi 'uvicorn[standard]' onnxruntime numpy pydantic &&
                python /opt/phm/scripts/inference_server.py"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

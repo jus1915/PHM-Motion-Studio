@@ -5,6 +5,8 @@ POST /predict         : 신호 윈도우 → 이상탐지(AE) 결과 반환
 POST /predict/combined: 이상탐지(AE) + 결함진단(CLS) 동시 반환
 GET  /health          : 로드된 모델 목록 반환
 GET  /models/reload   : 모델 캐시 재로드
+GET  /profiles         : 사용 가능한 프로파일 목록 + 현재 활성 프로파일
+POST /profiles/activate: 활성 프로파일 전환 (모델 캐시 자동 클리어)
 
 모델 구조:
   accel (가속도, 단일 센서):
@@ -19,7 +21,7 @@ GET  /models/reload   : 모델 캐시 재로드
   accel 은 물리적으로 단일 센서이므로 axis 없이 항상 axis=None 으로 요청합니다.
 
 환경변수:
-  PHM_MODELS_ROOT : ONNX 모델 루트 경로 (기본 /opt/phm/models)
+  PHM__models_root() : ONNX 모델 루트 경로 (기본 /opt/phm/models)
 
 의존성 (자동 설치):
   fastapi uvicorn onnxruntime numpy pydantic
@@ -57,7 +59,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
-MODELS_ROOT = Path(os.getenv("PHM_MODELS_ROOT", "/opt/phm/models"))
+_MODELS_BASE    = Path(os.getenv("PHM__models_root()", "/opt/phm/models"))
+_active_profile: str = "default"
+
+def _models_root() -> Path:
+    """현재 활성 프로파일의 모델 디렉토리.
+    profile 서브디렉토리가 있으면 그것을, 없으면 베이스 경로 반환 (하위호환)."""
+    p = _MODELS_BASE / _active_profile
+    return p if p.is_dir() else _MODELS_BASE
 
 app = FastAPI(title="PHM Inference Server", version="2.0.0")
 
@@ -141,15 +150,15 @@ def _load_model(sensor_type: str, axis: Optional[int] = None):
         candidates = list(_FALLBACK_CANDIDATES.get(sensor_type, []))
         for _ax in range(_MAX_AXIS_SCAN):
             for _fname in _per_axis_candidates(sensor_type, _ax):
-                if (MODELS_ROOT / _fname).exists():
+                if (_models_root() / _fname).exists():
                     candidates.append(_fname)
                     break   # 해당 축의 최우선 모델 1개만 추가
 
     for fname in candidates:
-        model_path = MODELS_ROOT / fname
+        model_path = _models_root() / fname
         if not model_path.exists():
             continue
-        meta_path = MODELS_ROOT / (fname.replace(".onnx", "_meta.json"))
+        meta_path = _models_root() / (fname.replace(".onnx", "_meta.json"))
         try:
             sess = ort.InferenceSession(
                 str(model_path), providers=["CPUExecutionProvider"]
@@ -186,15 +195,15 @@ def _load_cls_model(sensor_type: str, axis: Optional[int] = None):
         candidates = list(_CLS_CANDIDATES.get(sensor_type, []))
         for _ax in range(_MAX_AXIS_SCAN):
             for _fname in _per_axis_cls_candidates(sensor_type, _ax):
-                if (MODELS_ROOT / _fname).exists():
+                if (_models_root() / _fname).exists():
                     candidates.append(_fname)
                     break
 
     for fname in candidates:
-        model_path = MODELS_ROOT / fname
+        model_path = _models_root() / fname
         if not model_path.exists():
             continue
-        meta_path = MODELS_ROOT / (fname.replace(".onnx", "_meta.json"))
+        meta_path = _models_root() / (fname.replace(".onnx", "_meta.json"))
         try:
             sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
             meta: dict = {}
@@ -433,11 +442,11 @@ def health():
         files = []
         for ax in range(_MAX_AXIS_SCAN):
             for fname in _per_axis_candidates(st, ax):
-                if (MODELS_ROOT / fname).exists():
+                if (_models_root() / fname).exists():
                     files.append(fname)
                     break
         for fname in fallbacks:
-            if (MODELS_ROOT / fname).exists():
+            if (_models_root() / fname).exists():
                 files.append(fname)
         available_ae[st] = files
 
@@ -448,21 +457,22 @@ def health():
         files = []
         for ax in range(_MAX_AXIS_SCAN):
             for fname in _per_axis_cls_candidates(st, ax):
-                if (MODELS_ROOT / fname).exists():
+                if (_models_root() / fname).exists():
                     files.append(fname)
                     break
         for fname in fallbacks:
-            if (MODELS_ROOT / fname).exists() and fname not in files:
+            if (_models_root() / fname).exists() and fname not in files:
                 files.append(fname)
         if files:
             available_cls[st] = files
 
     return {
         "status":               "ok",
+        "active_profile":       _active_profile,
         "loaded_models":        loaded,
         "available_ae_models":  available_ae,
         "available_cls_models": available_cls,
-        "models_root":          str(MODELS_ROOT),
+        "models_root":          str(_models_root()),
     }
 
 
@@ -470,6 +480,95 @@ def health():
 def reload_models():
     _sessions.clear()
     return {"status": "reloaded", "message": "다음 /predict 호출 시 재로드됩니다."}
+
+
+# ── 프로파일 관리 ────────────────────────────────────────────────────────────
+
+class ProfileActivateRequest(BaseModel):
+    profile: str
+
+
+@app.get("/profiles")
+def list_profiles():
+    """사용 가능한 프로파일 목록을 반환합니다.
+
+    프로파일 = _MODELS_BASE 하위 디렉토리.
+    각 디렉토리에 profile_info.json 이 있으면 name/description 표시.
+    없으면 디렉토리명 그대로 사용.
+    """
+    profiles = []
+
+    # 베이스 경로 자체 (플랫 구조 레거시) 도 "default" 로 포함
+    # onnx 파일이 1개 이상이거나 profile_info.json 이 있는 디렉토리만 프로파일로 인식
+    subdirs = sorted(
+        [d for d in _MODELS_BASE.iterdir()
+         if d.is_dir()
+         and not d.name.startswith(".")
+         and (len(list(d.glob("*.onnx"))) > 0 or (d / "profile_info.json").exists())]
+    ) if _MODELS_BASE.is_dir() else []
+
+    # 서브디렉토리가 없으면 베이스 자체를 "default" 프로파일로 취급
+    if not subdirs:
+        onnx_count = len(list(_MODELS_BASE.glob("*.onnx"))) if _MODELS_BASE.is_dir() else 0
+        profiles.append({
+            "name": "default",
+            "label": "default",
+            "description": "기본 모델 (플랫 구조)",
+            "model_count": onnx_count,
+        })
+    else:
+        for d in subdirs:
+            info_path = d / "profile_info.json"
+            if info_path.exists():
+                try:
+                    info = json.loads(info_path.read_text(encoding="utf-8"))
+                except Exception:
+                    info = {}
+            else:
+                info = {}
+            onnx_count = len(list(d.glob("*.onnx")))
+            profiles.append({
+                "name":        d.name,
+                "label":       info.get("label",       d.name),
+                "description": info.get("description", ""),
+                "model_count": onnx_count,
+                "created":     info.get("created",     ""),
+            })
+
+    return {"profiles": profiles, "active": _active_profile}
+
+
+@app.post("/profiles/activate")
+def activate_profile(req: ProfileActivateRequest):
+    """활성 프로파일을 전환하고 모델 캐시를 클리어합니다.
+
+    profile = "default" 는 항상 허용 (서브디렉토리 없어도 OK → 플랫 폴백 사용).
+    그 외는 _MODELS_BASE/{profile} 디렉토리가 존재해야 합니다.
+    """
+    global _active_profile
+
+    if req.profile != "default":
+        target = _MODELS_BASE / req.profile
+        if not target.is_dir():
+            raise HTTPException(
+                status_code=404,
+                detail=f"프로파일 없음: '{req.profile}'. "
+                       f"사용 가능: {[d.name for d in _MODELS_BASE.iterdir() if d.is_dir()]}",
+            )
+
+    old_profile     = _active_profile
+    _active_profile = req.profile
+    _sessions.clear()   # 캐시 클리어 → 다음 /predict 시 새 경로에서 로드
+
+    print(f"[inference] 프로파일 전환: {old_profile!r} → {_active_profile!r}  "
+          f"모델 경로: {_models_root()}", flush=True)
+
+    return {
+        "status":          "ok",
+        "previous_profile": old_profile,
+        "active_profile":  _active_profile,
+        "models_root":     str(_models_root()),
+    }
 
 
 @app.post("/predict", response_model=PredictResponse)
@@ -480,10 +579,10 @@ def predict(req: PredictRequest):
         avail: List[str] = []
         if req.axis is not None:
             for fname in _per_axis_candidates(req.sensor_type, req.axis):
-                if (MODELS_ROOT / fname).exists():
+                if (_models_root() / fname).exists():
                     avail.append(fname)
         for fname in _FALLBACK_CANDIDATES.get(req.sensor_type, []):
-            if (MODELS_ROOT / fname).exists():
+            if (_models_root() / fname).exists():
                 avail.append(fname)
         raise HTTPException(
             status_code=404,
@@ -685,10 +784,10 @@ def predict_combined(req: CombinedPredictRequest):
             avail: List[str] = []
             if req.axis is not None:
                 for fn in _per_axis_cls_candidates(req.sensor_type, req.axis):
-                    if (MODELS_ROOT / fn).exists():
+                    if (_models_root() / fn).exists():
                         avail.append(fn)
             for fn in _CLS_CANDIDATES.get(req.sensor_type, []):
-                if (MODELS_ROOT / fn).exists():
+                if (_models_root() / fn).exists():
                     avail.append(fn)
             raise HTTPException(
                 status_code=404,
@@ -750,10 +849,10 @@ def predict_combined(req: CombinedPredictRequest):
         avail: List[str] = []
         if req.axis is not None:
             for fn in _per_axis_candidates(req.sensor_type, req.axis):
-                if (MODELS_ROOT / fn).exists():
+                if (_models_root() / fn).exists():
                     avail.append(fn)
         for fn in _FALLBACK_CANDIDATES.get(req.sensor_type, []):
-            if (MODELS_ROOT / fn).exists():
+            if (_models_root() / fn).exists():
                 avail.append(fn)
         raise HTTPException(
             status_code=404,
@@ -843,5 +942,5 @@ def predict_combined(req: CombinedPredictRequest):
 # ── 엔트리포인트 ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    print(f"[inference] 모델 루트: {MODELS_ROOT}", flush=True)
+    print(f"[inference] 모델 루트: {_models_root()}  (프로파일: {_active_profile!r})", flush=True)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

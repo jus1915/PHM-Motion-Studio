@@ -461,6 +461,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _chartEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
         private const double ChartEmaAlpha = 0.3;
 
+        // 프로파일 관리
+        private ComboBox _cmbProfile;
+        private Button   _btnProfileApply, _btnProfileRefresh;
+        private PHM_Project_DockPanel.Services.Core.InferenceServerClient _profileClient;
+
         // DB 모드 UI 컨트롤
         private RadioButton rbtnCsvMode, rbtnDbMode;
         private Panel pnlCsvSource, pnlDbSource;
@@ -639,6 +644,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             AppEvents.InferenceResultReceived    += OnLiveInferenceResult;
             AppEvents.ClsInferenceResultReceived += OnLiveClsInferenceResult;
             AppEvents.LoopCompleted              += OnLoopCompleted;
+
+            // 프로파일 클라이언트 초기화 + 목록 로드
+            string inferUrl = PHM_Project_DockPanel.Services.Core.ServerSettings.Current.InferenceServerUrl;
+            if (!string.IsNullOrWhiteSpace(inferUrl))
+            {
+                _profileClient = new PHM_Project_DockPanel.Services.Core.InferenceServerClient(inferUrl);
+                // 비동기 로드 (UI 스레드 블로킹 없이)
+                _ = RefreshProfilesAsync();
+            }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -649,7 +663,95 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             SaveAxisThresholds();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
+            try { _profileClient?.Dispose(); } catch { }
             base.OnFormClosing(e);
+        }
+
+        // ── 프로파일 관리 ─────────────────────────────────────────────────────
+        private async System.Threading.Tasks.Task RefreshProfilesAsync()
+        {
+            if (_profileClient == null) return;
+            var result = await _profileClient.GetProfilesAsync().ConfigureAwait(false);
+            if (result == null) return;
+
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                string prevSelected = _cmbProfile.SelectedItem?.ToString();
+                _cmbProfile.Items.Clear();
+                foreach (var p in result.Profiles)
+                {
+                    string display = string.IsNullOrEmpty(p.Label) || p.Label == p.Name
+                        ? p.Name
+                        : $"{p.Label} ({p.Name})";
+                    _cmbProfile.Items.Add(new ProfileComboItem(p.Name, display, p.ModelCount));
+                }
+
+                // 현재 활성 프로파일 선택
+                string active = result.Active ?? "default";
+                int idx = -1;
+                for (int i = 0; i < _cmbProfile.Items.Count; i++)
+                {
+                    if (_cmbProfile.Items[i] is ProfileComboItem pi && pi.Name == active)
+                    { idx = i; break; }
+                }
+                if (idx >= 0) _cmbProfile.SelectedIndex = idx;
+                else if (_cmbProfile.Items.Count > 0) _cmbProfile.SelectedIndex = 0;
+            }));
+        }
+
+        private async System.Threading.Tasks.Task ApplyProfileAsync()
+        {
+            if (_profileClient == null || _cmbProfile.SelectedItem == null) return;
+            if (!(_cmbProfile.SelectedItem is ProfileComboItem item)) return;
+
+            _btnProfileApply.Enabled = false;
+            _btnProfileApply.Text    = "...";
+            try
+            {
+                bool ok = await _profileClient.ActivateProfileAsync(item.Name).ConfigureAwait(false);
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    if (ok)
+                    {
+                        AppEvents.RaiseLog($"[프로파일] 전환 완료: {item.Name}  ({item.ModelCount}개 모델)");
+                        // 칩/EMA/차트 상태 리셋
+                        _chartEma.Clear();
+                        _scoreBaseline.Clear();
+                        _seenAccelModels.Clear();
+                        _seenTorqueModels.Clear();
+                        if (_lblAccelModelInfo != null) _lblAccelModelInfo.Text = "모델: 수신 대기 중...";
+                        if (_lblTorqueModelInfo != null) _lblTorqueModelInfo.Text = "모델: 수신 대기 중...";
+                    }
+                    else
+                    {
+                        AppEvents.RaiseLog($"[프로파일] 전환 실패: {item.Name}");
+                        MessageBox.Show($"프로파일 '{item.Name}' 전환에 실패했습니다.\n서버 로그를 확인하세요.",
+                            "프로파일 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }));
+            }
+            finally
+            {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke(new Action(() =>
+                    {
+                        _btnProfileApply.Enabled = true;
+                        _btnProfileApply.Text    = "적용";
+                    }));
+            }
+        }
+
+        /// <summary>ComboBox 아이템 — 프로파일 이름과 표시 텍스트를 분리합니다.</summary>
+        private sealed class ProfileComboItem
+        {
+            public string Name       { get; }
+            public int    ModelCount { get; }
+            private readonly string _display;
+            public ProfileComboItem(string name, string display, int modelCount)
+            { Name = name; _display = display; ModelCount = modelCount; }
+            public override string ToString() => _display;
         }
 
         private static void DownsampleMinMax(IList<double> xs, IList<double> ys, int maxPoints,
@@ -817,6 +919,31 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             btnStart.Click += (s, e) => StartWatch();
             btnStop.Click  += (s, e) => StopWatch();
 
+            // ── 프로파일 선택 컨트롤 ─────────────────────────────────────────
+            _cmbProfile = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 160, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Font = new Font("Segoe UI", 8.5f),
+            };
+            _btnProfileRefresh = new Button
+            {
+                Text = "↺", Width = 26, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f),
+                ForeColor = Color.FromArgb(60, 60, 60),
+            };
+            _btnProfileApply = new Button
+            {
+                Text = "적용", Width = 46, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White,
+            };
+            _btnProfileRefresh.Click += async (s, e) => await RefreshProfilesAsync();
+            _btnProfileApply.Click   += async (s, e) => await ApplyProfileAsync();
+
             // 왼쪽 소스 Flow
             var toolbarLeft = new FlowLayoutPanel
             {
@@ -827,6 +954,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             toolbar.Controls.Add(btnStop);
             toolbar.Controls.Add(btnStart);
+            toolbar.Controls.Add(_btnProfileApply);
+            toolbar.Controls.Add(_btnProfileRefresh);
+            toolbar.Controls.Add(_cmbProfile);
             toolbar.Controls.Add(lblStatus);
             toolbar.Controls.Add(toolbarLeft);
 
@@ -837,8 +967,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 btnStop.Top  = btnStart.Top  = cy;
                 btnStop.Left  = right - btnStop.Width;
                 btnStart.Left = btnStop.Left - btnStart.Width - 4;
+
+                // 프로파일 컨트롤: 진단 시작 버튼 왼쪽
+                _btnProfileApply.Top   = cy;
+                _btnProfileApply.Left  = btnStart.Left - _btnProfileApply.Width - 6;
+                _btnProfileRefresh.Top  = cy;
+                _btnProfileRefresh.Left = _btnProfileApply.Left - _btnProfileRefresh.Width - 2;
+                _cmbProfile.Top  = cy;
+                _cmbProfile.Left = _btnProfileRefresh.Left - _cmbProfile.Width - 4;
+
                 lblStatus.Top  = cy + 2;
-                lblStatus.Left = btnStart.Left - lblStatus.PreferredWidth - 8;
+                lblStatus.Left = _cmbProfile.Left - lblStatus.PreferredWidth - 8;
             };
 
             // ── 모드 전환 시 소스 패널 교체 ──────────────────────────────────
@@ -4578,6 +4717,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             if (result == null) return;
             if (!_IsSensorEnabled(sensorType)) return;
+
+            // 서버 오류 응답: 칩에 오류 상태 표시 후 즉시 반환
+            if (result.IsError)
+            {
+                // key 복원: axis 정보가 없으므로 sensorType만 사용
+                string errKey = sensorType;
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    if (_statusChips.TryGetValue(errKey, out Panel chip) && chip != null)
+                        chip.BackColor = Color.FromArgb(254, 240, 200); // 연노랑 = 오류
+                    if (_liveStatusLabels.TryGetValue(errKey, out Label lblErr) && lblErr != null)
+                    {
+                        lblErr.Text     = "⚠ 오류";
+                        lblErr.ForeColor = Color.FromArgb(160, 80, 0);
+                    }
+                    if (_liveScoreLabels.TryGetValue(errKey, out Label lblScoreErr) && lblScoreErr != null)
+                        lblScoreErr.Text = "---";
+                }));
+                return;
+            }
 
             bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
             // 키: "accel_ax0", "torque_ax2" 등 (axis 없으면 "accel", "torque")

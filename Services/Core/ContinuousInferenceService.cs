@@ -229,6 +229,12 @@ namespace PHM_Project_DockPanel.Services.Core
 
             InferenceResult result = await _client.PredictAsync(
                 window, WindowSize, nCh, sensorType, axis, ct);
+
+            if (result.IsError)
+                AppEvents.RaiseLog(
+                    $"[AE 추론 오류] sensorType={sensorType} axis={axis?.ToString() ?? "null"}" +
+                    $"  nCh={nCh}  windowLen={window.Length}  →  {result.Error}");
+
             AppEvents.RaiseInferenceResult(sensorType, result);
         }
 
@@ -246,7 +252,13 @@ namespace PHM_Project_DockPanel.Services.Core
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
                 window, WindowSize, nCh, sensorType, axis, ct);
 
-            if (combined.IsError) return;   // CLS 모델 없음 → 조용히 무시
+            if (combined.IsError)
+            {
+                AppEvents.RaiseLog(
+                    $"[CLS 추론 오류] sensorType={sensorType} axis={axis?.ToString() ?? "null"}" +
+                    $"  nCh={nCh}  windowLen={window.Length}  →  {combined.Error}");
+                return;
+            }
 
             // CLS 결과만 발행 (AE는 RunAeInference에서 별도 발행)
             AppEvents.RaiseClsInferenceResult(sensorType, combined);

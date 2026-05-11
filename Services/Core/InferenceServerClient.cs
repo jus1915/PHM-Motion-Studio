@@ -172,6 +172,33 @@ namespace PHM_Project_DockPanel.Services.Core
             }
         }
 
+        // ── 프로파일 관리 ────────────────────────────────────────────────────
+        /// <summary>사용 가능한 프로파일 목록과 현재 활성 프로파일을 반환합니다.</summary>
+        public async Task<ProfileListResult> GetProfilesAsync()
+        {
+            try
+            {
+                var resp = await _http.GetAsync("profiles").ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return null;
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonConvert.DeserializeObject<ProfileListResult>(body);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>활성 프로파일을 전환합니다. 성공 시 true 반환.</summary>
+        public async Task<bool> ActivateProfileAsync(string profile)
+        {
+            try
+            {
+                string json    = JsonConvert.SerializeObject(new { profile });
+                var    content = new StringContent(json, Encoding.UTF8, "application/json");
+                var    resp    = await _http.PostAsync("profiles/activate", content).ConfigureAwait(false);
+                return resp.IsSuccessStatusCode;
+            }
+            catch { return false; }
+        }
+
         public void Dispose() => _http.Dispose();
     }
 
@@ -253,5 +280,23 @@ namespace PHM_Project_DockPanel.Services.Core
 
         public static CombinedInferenceResult Fail(string error) =>
             new CombinedInferenceResult { Error = error };
+    }
+
+    // =========================================================================
+    //  ProfileInfo / ProfileListResult — /profiles 응답 DTO
+    // =========================================================================
+    public sealed class ProfileInfo
+    {
+        [JsonProperty("name")]        public string Name        { get; set; } = "";
+        [JsonProperty("label")]       public string Label       { get; set; } = "";
+        [JsonProperty("description")] public string Description { get; set; } = "";
+        [JsonProperty("model_count")] public int    ModelCount  { get; set; }
+        [JsonProperty("created")]     public string Created     { get; set; } = "";
+    }
+
+    public sealed class ProfileListResult
+    {
+        [JsonProperty("profiles")] public ProfileInfo[] Profiles { get; set; } = new ProfileInfo[0];
+        [JsonProperty("active")]   public string        Active   { get; set; } = "";
     }
 }
