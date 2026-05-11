@@ -646,7 +646,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             AppEvents.LoopCompleted              += OnLoopCompleted;
 
             // 프로파일 클라이언트 초기화 + 목록 로드
-            string inferUrl = PHM_Project_DockPanel.Services.Core.ServerSettings.Current.InferenceServerUrl;
+            string inferUrl = PHM_Project_DockPanel.Services.ServerSettings.Current.InferenceServerUrl;
             if (!string.IsNullOrWhiteSpace(inferUrl))
             {
                 _profileClient = new PHM_Project_DockPanel.Services.Core.InferenceServerClient(inferUrl);

@@ -1439,6 +1439,7 @@ def save_meta(
     add_derivative_channels: bool = False,
     add_abs_channels: bool = False,
     n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
+    augment_mode: Optional[str] = None,         # 전처리 증강 모드 ("standard"|"mixed"|None)
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
@@ -1469,6 +1470,7 @@ def save_meta(
         "add_fft_channels": add_fft_channels,
         "add_derivative_channels": add_derivative_channels,
         "add_abs_channels": add_abs_channels,
+        "augment_mode": augment_mode if augment_mode is not None else params.get("augment_mode"),
         "epochs_trained": epochs_trained,
     }
 
@@ -1982,6 +1984,7 @@ def main() -> None:
             add_derivative_channels=add_derivative,
             add_abs_channels=add_abs,
             n_channels_override=n_channels,
+            augment_mode=params.get("augment_mode"),
         )
 
         _try_end_mlflow(
@@ -2088,6 +2091,7 @@ def main() -> None:
         n_channels_override=n_channels,
         norm_mean=norm_mean_cls if global_normalize else None,
         norm_std=norm_std_cls  if global_normalize else None,
+        augment_mode=params.get("augment_mode"),
     )
 
     # ── MLflow 종료 ───────────────────────────────────────────────────────────

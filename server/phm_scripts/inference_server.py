@@ -393,8 +393,16 @@ def _preprocess_window(
     raw     = np.array(window_flat, dtype=np.float32).reshape(window_size, n_channels)
     raw_arr = raw[np.newaxis, :, :].astype(np.float32)
 
-    augment_mode = str(meta.get("augment_mode", "standard")).lower()
-    do_augment   = bool(meta.get("add_augmented_channels", True))
+    # augment_mode: meta에 저장된 값 사용 (None이면 "standard" 기본)
+    # None은 str() 시 "none"이 되므로 명시적으로 처리
+    _aug_raw     = meta.get("augment_mode")
+    augment_mode = str(_aug_raw).lower() if _aug_raw is not None else "standard"
+    # do_augment: 개별 채널 플래그로 결정 (add_augmented_channels는 미사용)
+    do_augment   = bool(
+        meta.get("add_fft_channels",        False) or
+        meta.get("add_derivative_channels", False) or
+        meta.get("add_abs_channels",        False)
+    )
 
     if augment_mode == "mixed":
         aug = _augment_mixed(raw, meta) if do_augment else raw
@@ -724,17 +732,17 @@ def _ae_score(
     recon  = sess.run(None, {input_name: proc_arr})[0]
     thr    = float(meta.get("threshold", 0.1))
 
-    # ── 재구성 오차: 평균(MAE) + 95th percentile 혼합 ─────────────────────────
-    # 순간 충격/외력은 전체 윈도우 중 일부 샘플에서만 오차가 크게 나타남.
-    # 평균만 쓰면 나머지 정상 샘플에 희석되어 탐지 불가 → peak 성분 추가.
+    # ── 재구성 오차: 학습 임계값 캘리브레이션과 동일한 공식 사용 ────────────────
+    # 학습 시: per_sample_mae = abs(model(x)-x).mean(dim=(1,2)) = 전체 (T,C) 평균
+    # 추론 시: 동일하게 전체 (T,C) 평균 → 임계값 비교가 일관성 유지됨
+    # (peak 혼합 공식은 임계값보다 체계적으로 높게 나와 정상 상태에서 false positive 유발)
     err_per_step = np.abs(proc_arr - recon).mean(axis=-1)[0]  # (T,) 시간축 오차
     mae_mean = float(err_per_step.mean())
-    mae_peak = float(np.percentile(err_per_step, 95))         # 상위 5% 오차 대표값
-    mae      = mae_mean * 0.5 + mae_peak * 0.5                # 평균+피크 혼합
+    mae      = mae_mean   # 학습 임계값 = per_sample MAE mean → 추론도 동일
 
-    rms      = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
-    rms_thr  = float(meta.get("rms_thr",  float("inf")))
-    rms_mean = float(meta.get("rms_mean", 0.0))
+    rms       = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
+    rms_thr   = float(meta.get("rms_thr",  float("inf")))
+    rms_mean  = float(meta.get("rms_mean", 0.0))
     rms_std_m = meta.get("rms_std")
     if rms_thr < 1e30:
         denom    = float(rms_std_m) if rms_std_m else max(rms_thr - rms_mean, 1e-8)
