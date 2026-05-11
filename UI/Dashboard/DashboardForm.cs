@@ -395,6 +395,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private bool  _liveChartFirstData = true;   // 첫 실데이터 수신 시 스켈레톤 제거 플래그
         private Label _lblAccelModelInfo;           // 가속도 차트 모델 정보 라벨
         private Label _lblTorqueModelInfo;          // 토크 차트 모델 정보 라벨
+        private TableLayoutPanel _dualChartPanel;   // 이상 스코어 차트 컨테이너 (동적 열 너비 조정용)
+        private Panel _accelChartWrap;              // 가속도 차트 래퍼 패널
+        private Panel _torqueChartWrap;             // 토크 차트 래퍼 패널
         private readonly System.Collections.Generic.HashSet<string> _seenAccelModels  = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly System.Collections.Generic.HashSet<string> _seenTorqueModels = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
@@ -1027,18 +1030,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _statusFlow.PerformLayout();
             };
             // ── 센서 표시 필터 체크박스 (상태 바 오른쪽) ──────────────────────
-            _chkShowAccel    = new CheckBox { Text = "가속도", Checked = true, AutoSize = true,
+            _chkShowAccel    = new CheckBox { Text = "가속도", Checked = true,  AutoSize = true,
                 Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(30, 100, 200),
                 Padding = new Padding(0, 0, 4, 0) };
-            _chkShowTorque   = new CheckBox { Text = "토크",   Checked = true, AutoSize = true,
+            _chkShowTorque   = new CheckBox { Text = "토크",   Checked = false, AutoSize = true,
                 Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(160, 80, 0),
                 Padding = new Padding(0, 0, 4, 0) };
-            _chkShowCombined = new CheckBox { Text = "결합",   Checked = true, AutoSize = true,
+            _chkShowCombined = new CheckBox { Text = "결합",   Checked = false, AutoSize = true,
                 Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(60, 140, 60),
                 Padding = new Padding(0, 0, 4, 0) };
-            _chkShowAccel.CheckedChanged    += (s, e) => ApplySensorVisibility("accel",    _chkShowAccel.Checked);
-            _chkShowTorque.CheckedChanged   += (s, e) => ApplySensorVisibility("torque",   _chkShowTorque.Checked);
-            _chkShowCombined.CheckedChanged += (s, e) => ApplySensorVisibility("combined", _chkShowCombined.Checked);
+            // 체크박스 변경 시 차트 레이아웃 + 상태 칩/컨트롤 동시 갱신
+            _chkShowAccel.CheckedChanged    += (s, e) => { ApplySensorVisibility("accel",    _chkShowAccel.Checked);    _UpdateChartLayout(); };
+            _chkShowTorque.CheckedChanged   += (s, e) => { ApplySensorVisibility("torque",   _chkShowTorque.Checked);   _UpdateChartLayout(); };
+            _chkShowCombined.CheckedChanged += (s, e) => { ApplySensorVisibility("combined", _chkShowCombined.Checked); /* combined 차트 없음 */ };
 
             var lblFilter = new Label { Text = "표시:", AutoSize = true,
                 Font = new Font("Segoe UI", 8f, FontStyle.Bold),
@@ -1164,22 +1168,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var classMatrixPanel = BuildClassMatrixPanel();
 
             // ── (0,1) 하단-좌: 이상 스코어 차트 ─────────────────────────────
-            var dualChartPanel = new TableLayoutPanel
+            _dualChartPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
                 Padding = new Padding(0, 4, 4, 0), Margin = Padding.Empty,
                 BackColor = Color.FromArgb(245, 247, 250)
             };
-            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            dualChartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _dualChartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             _chartAccel  = BuildLiveInferenceChart(isAccel: true);
             _chartTorque = BuildLiveInferenceChart(isAccel: false);
-            dualChartPanel.SuspendLayout();
-            dualChartPanel.Controls.Add(WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166),  out _lblAccelModelInfo),  0, 0);
-            dualChartPanel.Controls.Add(WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15), out _lblTorqueModelInfo), 1, 0);
-            dualChartPanel.ResumeLayout(false);
+            _dualChartPanel.SuspendLayout();
+            _accelChartWrap  = WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166),  out _lblAccelModelInfo);
+            _torqueChartWrap = WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15), out _lblTorqueModelInfo);
+            _dualChartPanel.Controls.Add(_accelChartWrap,  0, 0);
+            _dualChartPanel.Controls.Add(_torqueChartWrap, 1, 0);
+            _dualChartPanel.ResumeLayout(false);
 
             // ── (1,1) 하단-우: 발생 이벤트 ───────────────────────────────────
             var rightColPanel = new TableLayoutPanel
@@ -1234,7 +1240,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             mainPanel.SuspendLayout();
             mainPanel.Controls.Add(leftTopPanel,    0, 0);
             mainPanel.Controls.Add(classMatrixPanel, 1, 0);
-            mainPanel.Controls.Add(dualChartPanel,  0, 1);
+            mainPanel.Controls.Add(_dualChartPanel, 0, 1);
             mainPanel.Controls.Add(rightColPanel,   1, 1);
             mainPanel.ResumeLayout(false);
 
@@ -1245,6 +1251,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             contentPanel.ResumeLayout(false);
 
             Controls.Add(contentPanel);
+
+            // ── 초기 센서 visibility 적용 (기본: 토크/결합 숨김) ─────────────
+            _UpdateChartLayout();
+            ApplySensorVisibility("torque",   false);
+            ApplySensorVisibility("combined", false);
 
             // ── 타이머 ────────────────────────────────────────────────────────
             var timer = new System.Windows.Forms.Timer { Interval = 300 };
@@ -4989,6 +5000,48 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 case "combined": return _chkShowCombined == null || _chkShowCombined.Checked;
                 default:         return true;
             }
+        }
+
+        /// <summary>
+        /// 체크박스 상태에 따라 _dualChartPanel 의 열 너비와 차트 래퍼 패널 Visible 을 조정합니다.
+        /// 가속도만 표시: 가속도 100% / 토크 열 0px
+        /// 토크만 표시:   가속도 열 0px / 토크 100%
+        /// 둘 다 표시:    각 50%
+        /// 둘 다 숨김:    두 래퍼 모두 Visible=false
+        /// </summary>
+        private void _UpdateChartLayout()
+        {
+            if (_dualChartPanel == null) return;
+            bool showA = _chkShowAccel?.Checked  ?? true;
+            bool showT = _chkShowTorque?.Checked ?? false;
+
+            if (_accelChartWrap  != null) _accelChartWrap.Visible  = showA;
+            if (_torqueChartWrap != null) _torqueChartWrap.Visible = showT;
+
+            _dualChartPanel.SuspendLayout();
+            _dualChartPanel.ColumnStyles.Clear();
+            if (showA && showT)
+            {
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            }
+            else if (showA)
+            {
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
+            }
+            else if (showT)
+            {
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            }
+            else
+            {
+                // 둘 다 꺼진 경우 — 래퍼가 Visible=false이므로 비율은 무관
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            }
+            _dualChartPanel.ResumeLayout(true);
         }
 
         /// <summary>
