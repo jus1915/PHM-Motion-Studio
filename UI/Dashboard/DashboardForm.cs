@@ -4967,6 +4967,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     bool shouldLog = !wasAnomaly || cooldownOk;
                     if (shouldLog)
                     {
+                        // ── KPI 카드 업데이트 ─────────────────────────────────
+                        if (isDanger) Interlocked.Increment(ref cntDanger);
+                        else          Interlocked.Increment(ref cntWarning);
+                        cardDanger.ValueText  = cntDanger  + " 건";
+                        cardWarning.ValueText = cntWarning + " 건";
+                        if (isDanger) ShowToast(AlarmLevel.Danger, result.Axis ?? 0, displayScore);
+
                         AppendEventLog(
                             $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
                             $"score={displayScore:F3}  thr={clientThr:F3}{cls}{spikeInfo}");
