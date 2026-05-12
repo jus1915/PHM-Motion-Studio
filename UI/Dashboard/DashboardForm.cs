@@ -459,10 +459,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
         // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
         // 이상 판정(threshAnomaly/spikeAnomaly)은 raw score 기반으로 유지.
-        // alpha=0.3: 약 4~5 윈도우(~500ms) 내에 새 값으로 수렴
+        // alpha=0.15: 약 12샘플(~1.5초) 수렴, 차트 노이즈 감소
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
             _chartEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
-        private const double ChartEmaAlpha = 0.15;  // 0.3→0.15: 약 12샘플(~1.5초) 수렴, 차트 노이즈 감소
+        private const double ChartEmaAlpha = 0.15;
+
+        // ── 이동평균선 (MA선) ──────────────────────────────────────────────────
+        // alpha=0.05: 약 40샘플(~10초) 수렴 — 단기 노이즈 제거, 추세 확인용
+        private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveMaQueue
+            = new ConcurrentQueue<Tuple<string, DateTime, double>>();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
+            _chartMaEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        private const double ChartMaAlpha = 0.05;
 
         // ── 이상 이벤트 로그 중복 방지 ──────────────────────────────────────
         // 상태 전환(정상→이상) 시 즉시, 이상 지속 시 쿨다운마다 1회씩만 로그
@@ -733,6 +741,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         AppEvents.RaiseLog($"[프로파일] 전환 완료: {item.Name}  ({item.ModelCount}개 모델)");
                         // 칩/EMA/차트 상태 리셋
                         _chartEma.Clear();
+                        _chartMaEma.Clear();
                         _scoreBaseline.Clear();
                         _consecutiveAnomalyCount.Clear();
                         _seenAccelModels.Clear();
@@ -4499,7 +4508,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             if (latestTime == DateTime.MinValue) latestTime = DateTime.Now;
             double xMax = latestTime.AddSeconds(10).ToOADate();
-            double xMin = latestTime.AddMinutes(-10).ToOADate();  // 5분→10분 롤링 창
+            double xMin = latestTime.AddMinutes(-10).ToOADate();
 
             foreach (Chart ch in new[] { _chartAccel, _chartTorque })
             {
@@ -4508,10 +4517,28 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
 
                 var area = ch.ChartAreas[0];
-                area.AxisX.Minimum = xMin;   // 롤링 윈도우: 최신 기준 5분
+                area.AxisX.Minimum = xMin;
                 area.AxisX.Maximum = xMax;
                 area.AxisY.Minimum = 0;
-                area.AxisY.Maximum = double.NaN;  // Y만 자동
+                area.AxisY.Maximum = double.NaN;
+            }
+
+            // ── MA 이평선 업데이트 ────────────────────────────────────────────
+            Tuple<string, DateTime, double> maItem;
+            while (_liveMaQueue.TryDequeue(out maItem))
+            {
+                bool isAccelMa = maItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
+                Chart tgtMa = isAccelMa ? _chartAccel : _chartTorque;
+                if (tgtMa == null || tgtMa.IsDisposed) continue;
+                var mas = EnsureLiveMaSeries(tgtMa, maItem.Item1, isAccelMa);
+                mas.Points.AddXY(maItem.Item2.ToOADate(), maItem.Item3);
+            }
+            foreach (Chart ch in new[] { _chartAccel, _chartTorque })
+            {
+                if (ch == null || ch.IsDisposed) continue;
+                foreach (Series s in ch.Series)
+                    if (s.Name.StartsWith("ma-"))
+                        while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
             }
         }
 
@@ -4568,6 +4595,35 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 스켈레톤 제거 (첫 실제 시리즈 추가 시)
             var sk = chart.Series.FindByName("_sk_");
             if (sk != null) chart.Series.Remove(sk);
+            chart.Series.Add(s);
+            return s;
+        }
+
+        /// <summary>MA(이동평균)선 시리즈를 chart 에서 찾거나 생성합니다.</summary>
+        private Series EnsureLiveMaSeries(Chart chart, string key, bool isAccel)
+        {
+            string seriesName = "ma-" + key;
+            var s = chart.Series.FindByName(seriesName);
+            if (s != null) return s;
+
+            int axIdx = 0;
+            int ux = key.LastIndexOf("_ax", StringComparison.OrdinalIgnoreCase);
+            if (ux >= 0) int.TryParse(key.Substring(ux + 3), out axIdx);
+
+            // raw선보다 밝고 굵게 — 추세선임을 시각적으로 구분
+            Color[] accelMa  = { Color.FromArgb(0, 170, 255),  Color.FromArgb(80, 210, 255), Color.FromArgb(120, 180, 255), Color.FromArgb(160, 200, 255) };
+            Color[] torqueMa = { Color.FromArgb(255, 100, 50), Color.FromArgb(255, 150, 70), Color.FromArgb(255, 190, 30),  Color.FromArgb(240, 120, 100) };
+            Color c = isAccel ? accelMa[axIdx % accelMa.Length]
+                               : torqueMa[axIdx % torqueMa.Length];
+
+            s = new Series(seriesName)
+            {
+                ChartType   = SeriesChartType.FastLine,
+                XValueType  = ChartValueType.DateTime,
+                BorderWidth = 3,
+                LegendText  = isAccel ? "가속도 이평" : "토크 이평",
+                Color       = c,
+            };
             chart.Series.Add(s);
             return s;
         }
@@ -4778,15 +4834,28 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             double normScore  = axThr > 0 ? (double)result.AnomalyScore / axThr : (double)result.AnomalyScore;
 
             // EMA 평활화 적용 (차트 노이즈 감소 — 이상 판정은 rawScore 기반으로 별도 수행)
+            // ── 단기 EMA (차트 raw선) ─────────────────────────────────────────
             double prevEma    = _chartEma.GetOrAdd(key, normScore);
             double smoothed   = ChartEmaAlpha * normScore + (1.0 - ChartEmaAlpha) * prevEma;
             _chartEma[key]    = smoothed;
 
             _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, smoothed));
-            while (_liveScoreQueue.Count > 6000)  // 10분 × 7.8 pt/s ≈ 4700, 여유 포함
+            while (_liveScoreQueue.Count > 6000)
             {
                 Tuple<string, DateTime, double> _discard;
                 _liveScoreQueue.TryDequeue(out _discard);
+            }
+
+            // ── 장기 EMA (MA 이평선) ──────────────────────────────────────────
+            double prevMa  = _chartMaEma.GetOrAdd(key, normScore);
+            double maScore = ChartMaAlpha * normScore + (1.0 - ChartMaAlpha) * prevMa;
+            _chartMaEma[key] = maScore;
+
+            _liveMaQueue.Enqueue(Tuple.Create(key, DateTime.Now, maScore));
+            while (_liveMaQueue.Count > 6000)
+            {
+                Tuple<string, DateTime, double> _discardMa;
+                _liveMaQueue.TryDequeue(out _discardMa);
             }
 
             // UI 컨트롤 업데이트는 UI 스레드에서

@@ -1028,7 +1028,7 @@ def train_ae(
     windows: List[Tuple[np.ndarray, int]],
     n_channels: int,
     mlflow_run=None,
-    ae_threshold_percentile: int = 99,
+    ae_threshold_percentile: float = 99,
 ) -> Tuple["AE1DCNN", float, int, float, float, float, float, np.ndarray, np.ndarray]:
     """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std)를 반환합니다.
 
@@ -1797,7 +1797,7 @@ def main() -> None:
     add_abs:        bool = bool(params.get("add_abs_channels", False))
     global_normalize: bool = bool(params.get("global_normalize", False))
     label_smoothing: float = float(params.get("label_smoothing", 0.0))
-    ae_threshold_percentile: int = int(params.get("ae_threshold_percentile", 99))
+    ae_threshold_percentile: float = float(params.get("ae_threshold_percentile", 99))
 
     session_raw = params.get("session", "CLS").upper()
     # 구버전 호환: AD → AE, FD → CLS
