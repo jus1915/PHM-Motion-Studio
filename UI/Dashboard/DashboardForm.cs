@@ -464,6 +464,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _chartEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
         private const double ChartEmaAlpha = 0.3;
 
+        // ── 이상 이벤트 로그 중복 방지 ──────────────────────────────────────
+        // 상태 전환(정상→이상) 시 즉시, 이상 지속 시 쿨다운마다 1회씩만 로그
+        private readonly Dictionary<string, bool>     _prevAnomalyState   = new Dictionary<string, bool>();
+        private readonly Dictionary<string, DateTime> _lastAnomalyLogTime = new Dictionary<string, DateTime>();
+        private static readonly TimeSpan AnomalyLogCooldown = TimeSpan.FromSeconds(30);
+
         // 프로파일 관리
         private ComboBox _cmbProfile;
         private Button   _btnProfileApply, _btnProfileRefresh;
@@ -2612,11 +2618,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         #region KPI/이벤트
         private class EventRow
         {
-            public string TimeLine { get; set; }
-            public int Axis { get; set; }
+            public string TimeLine    { get; set; }
+            public string Sensor      { get; set; }   // "가속도", "토크 Ax0" 등
             public double AnomalyScore { get; set; }
-            public double Threshold { get; set; }
-            public string Alarm { get; set; }
+            public double Threshold   { get; set; }
+            public string Alarm       { get; set; }
         }
 
         private enum AlarmLevel { Normal, Warning, Danger }
@@ -3868,7 +3874,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 rows.Add(new EventRow
                 {
                     TimeLine     = timestamp.ToLocalTime().ToString("yyyy.MM.dd HH:mm:ss"),
-                    Axis         = axis,
+                    Sensor       = $"Ax{axis}",
                     AnomalyScore = Math.Round(score, 4),
                     Threshold    = Math.Round(thr, 4),
                     Alarm        = level == AlarmLevel.Danger ? "위험" : "경고"
@@ -4027,11 +4033,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                             ShowToast(level, axis, scoreAe);
                             rows.Add(new EventRow
                             {
-                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
-                                Axis = axis,
+                                TimeLine     = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Sensor       = $"가속도 Ax{axis}",
                                 AnomalyScore = Math.Round(scoreAe, 4),
-                                Threshold = Math.Round(thrAe, 4),
-                                Alarm = (level == AlarmLevel.Danger) ? "위험" : "경고"
+                                Threshold    = Math.Round(thrAe, 4),
+                                Alarm        = (level == AlarmLevel.Danger) ? "위험" : "경고"
                             });
                             if (grid.Rows.Count > 0)
                                 try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
@@ -4148,11 +4154,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         {
                             rows.Add(new EventRow
                             {
-                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
-                                Axis = axis,
+                                TimeLine     = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Sensor       = $"분류 Ax{axis}",
                                 AnomalyScore = Math.Round(score, 1),
-                                Threshold = Math.Round(thr, 1),
-                                Alarm = (level == AlarmLevel.Danger) ? "위험" : "경고"
+                                Threshold    = Math.Round(thr, 1),
+                                Alarm        = (level == AlarmLevel.Danger) ? "위험" : "경고"
                             });
 
                             if (grid.Rows.Count > 0)
@@ -4247,11 +4253,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                             ShowToast(level, axis, rawScore);
                             rows.Add(new EventRow
                             {
-                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
-                                Axis = axis,
+                                TimeLine     = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Sensor       = $"SKL Ax{axis}",
                                 AnomalyScore = Math.Round(rawScore, 4),
-                                Threshold = Math.Round(useScoreThreshold ? thr : skl.Threshold, 4),
-                                Alarm = level == AlarmLevel.Danger ? "위험" : "경고"
+                                Threshold    = Math.Round(useScoreThreshold ? thr : skl.Threshold, 4),
+                                Alarm        = level == AlarmLevel.Danger ? "위험" : "경고"
                             });
                             if (grid.Rows.Count > 0)
                                 try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
@@ -4861,33 +4867,45 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 }
 
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
-                // 가속도(전역 단일 모델)는 차트로만 표시 → 이벤트 로그/그리드 제외
-                bool accelGlobal = isAccel && !result.Axis.HasValue;
+                // ── 이상/정상 이벤트 로그 (상태 전환 + 30초 쿨다운으로 홍수 방지) ──
+                bool wasAnomaly  = _prevAnomalyState.TryGetValue(key, out bool _pw) && _pw;
+                bool cooldownOk  = !_lastAnomalyLogTime.TryGetValue(key, out DateTime _lt)
+                                   || (DateTime.Now - _lt) >= AnomalyLogCooldown;
+
                 if (anomaly)
                 {
-                    bool isDanger = normScore >= DangerMultiplier;
+                    bool isDanger  = normScore >= DangerMultiplier;
                     string spikeInfo = spikeAnomaly && !threshAnomaly
                         ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
-                    string levelTag = isDanger ? "🔴 위험" : "🟡 경고";
+                    string levelTag  = isDanger ? "🔴 위험" : "🟡 경고";
 
-                    // AE(이상탐지)는 KPI 카운트에 포함하지 않음 — CLS(결함진단)에서만 집계
-                    // 가속도 전역 이상은 로그·그리드에도 남기지 않음
-                    if (!accelGlobal)
+                    // 상태 전환(정상→이상) 또는 쿨다운 경과 시만 기록 — AE(이상탐지) 전 센서 대상
+                    bool shouldLog = !wasAnomaly || cooldownOk;
+                    if (shouldLog)
                     {
                         AppendEventLog(
                             $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
-                            $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}{cls}{spikeInfo}");
+                            $"score={displayScore:F3}  thr={clientThr:F3}{cls}{spikeInfo}");
+                        _lastAnomalyLogTime[key] = DateTime.Now;
+
                         rows.Add(new EventRow
                         {
                             TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
-                            Axis         = result.Axis ?? -2,
-                            AnomalyScore = Math.Round(result.AnomalyScore, 4),
-                            Threshold    = Math.Round(result.Threshold, 4),
+                            Sensor       = displayName,
+                            AnomalyScore = Math.Round(displayScore, 4),
+                            Threshold    = Math.Round(clientThr,    4),
                             Alarm        = levelTag + " " + displayName + " 이상" + spikeTag + cls
                         });
                         if (rows.Count > 500) rows.RemoveAt(0);
                     }
                 }
+                else if (wasAnomaly)
+                {
+                    // 이상→정상 복귀 시 1회 기록
+                    AppendEventLog(
+                        $"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 {displayName}  score={displayScore:F3}");
+                }
+                _prevAnomalyState[key] = anomaly;
             }));
         }
 
