@@ -172,6 +172,29 @@ namespace PHM_Project_DockPanel.Services.Core
             }
         }
 
+        // ── 모델 윈도우 크기 조회 ─────────────────────────────────────────────
+        /// <summary>
+        /// /model_info 를 호출해 sensor_type → window_size 매핑을 반환합니다.
+        /// 실패 시 null 반환 (호출 측에서 기본값 사용).
+        /// </summary>
+        public async Task<System.Collections.Generic.Dictionary<string, int>> GetModelInfoAsync()
+        {
+            try
+            {
+                var resp = await _http.GetAsync("model_info").ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return null;
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var raw = JsonConvert.DeserializeObject<
+                    System.Collections.Generic.Dictionary<string, ModelWindowInfo>>(body);
+                if (raw == null) return null;
+                var result = new System.Collections.Generic.Dictionary<string, int>();
+                foreach (var kv in raw)
+                    result[kv.Key] = kv.Value.WindowSize;
+                return result;
+            }
+            catch { return null; }
+        }
+
         // ── 프로파일 관리 ────────────────────────────────────────────────────
         /// <summary>사용 가능한 프로파일 목록과 현재 활성 프로파일을 반환합니다.</summary>
         public async Task<ProfileListResult> GetProfilesAsync()
@@ -280,6 +303,15 @@ namespace PHM_Project_DockPanel.Services.Core
 
         public static CombinedInferenceResult Fail(string error) =>
             new CombinedInferenceResult { Error = error };
+    }
+
+    // =========================================================================
+    //  ModelWindowInfo — /model_info 응답 DTO (sensor_type별 윈도우 크기)
+    // =========================================================================
+    public sealed class ModelWindowInfo
+    {
+        [JsonProperty("window_size")] public int    WindowSize { get; set; } = 512;
+        [JsonProperty("source")]      public string Source     { get; set; } = "";
     }
 
     // =========================================================================

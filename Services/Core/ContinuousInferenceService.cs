@@ -23,8 +23,19 @@ namespace PHM_Project_DockPanel.Services.Core
         private CancellationTokenSource _cts;
         private Task _loopTask;
 
-        private const int IntervalMs = 128;   // stride(128) / sampleRate(1000Hz) × 1000
-        private const int WindowSize = 256;   // 학습 window_size와 동일
+        // ── 윈도우 크기: Start() 후 서버 /model_info 로 자동 설정 ────────────
+        private const int DefaultWindowSize = 512;  // 서버 쿼리 실패 시 폴백
+        private const int DefaultIntervalMs = 256;  // DefaultWindowSize / 2
+        private readonly System.Collections.Generic.Dictionary<string, int> _windowSizes
+            = new System.Collections.Generic.Dictionary<string, int>();
+        private int _intervalMs = DefaultIntervalMs;
+
+        /// <summary>sensor_type별 window_size 반환. 서버 쿼리 전이거나 없으면 기본값.</summary>
+        private int GetWindowSize(string sensorType)
+        {
+            int ws;
+            return _windowSizes.TryGetValue(sensorType, out ws) ? ws : DefaultWindowSize;
+        }
 
         private int? _lastMovingAxis = null;
 
@@ -94,11 +105,40 @@ namespace PHM_Project_DockPanel.Services.Core
             _cts?.Cancel();
         }
 
+        /// <summary>서버 /model_info 를 조회해 _windowSizes, _intervalMs 를 갱신합니다.</summary>
+        private async Task RefreshWindowSizesAsync(CancellationToken ct)
+        {
+            try
+            {
+                var info = await _client.GetModelInfoAsync().ConfigureAwait(false);
+                if (info == null || info.Count == 0) return;
+
+                foreach (var kv in info)
+                    _windowSizes[kv.Key] = kv.Value;
+
+                // IntervalMs = 가장 작은 window_size / 2 (stride 50%)
+                int minWs = int.MaxValue;
+                foreach (var ws in _windowSizes.Values)
+                    if (ws < minWs) minWs = ws;
+                _intervalMs = minWs / 2;
+
+                AppEvents.RaiseLog(
+                    "[추론] 윈도우 크기 동기화: " +
+                    string.Join(", ", System.Linq.Enumerable.Select(
+                        _windowSizes, kv => $"{kv.Key}={kv.Value}")) +
+                    $"  intervalMs={_intervalMs}");
+            }
+            catch { /* 실패 시 기본값 유지 */ }
+        }
+
         private async Task LoopAsync(CancellationToken ct)
         {
+            // 루프 시작 전 서버에서 window_size 동기화 (재학습 후 자동 반영)
+            await RefreshWindowSizesAsync(ct);
+
             while (!ct.IsCancellationRequested)
             {
-                try { await Task.Delay(IntervalMs, ct); }
+                try { await Task.Delay(_intervalMs, ct); }
                 catch { break; }
 
                 // ── (1) AE 추론: Idle/Pos 무관하게 항상 실행 ──────────────────
@@ -226,12 +266,13 @@ namespace PHM_Project_DockPanel.Services.Core
             // accel: 정지/운동 전부 포함 (Op 필터 없음)
             // torque/combined: Pos 행만 사용
             bool filterOp = sensorType != "accel";
-            float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh,
+            int ws = GetWindowSize(sensorType);
+            float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
                 filterOp: filterOp);
             if (window == null) return;
 
             InferenceResult result = await _client.PredictAsync(
-                window, WindowSize, nCh, sensorType, axis, ct);
+                window, ws, nCh, sensorType, axis, ct);
 
             if (result.IsError)
                 AppEvents.RaiseLog(
@@ -251,12 +292,13 @@ namespace PHM_Project_DockPanel.Services.Core
             // accel: 정지/운동 전부 포함 (Op 필터 없음)
             // torque/combined: Pos 행만 사용
             bool filterOp = sensorType != "accel";
-            float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh,
+            int ws = GetWindowSize(sensorType);
+            float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
                 filterOp: filterOp);
             if (window == null) return;
 
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
-                window, WindowSize, nCh, sensorType, axis, ct);
+                window, ws, nCh, sensorType, axis, ct);
 
             if (combined.IsError)
             {

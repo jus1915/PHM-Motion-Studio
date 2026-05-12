@@ -58,7 +58,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         #region 상수/필드
         private const bool WatchSubdirectories = true;
-        private const int ChartKeepPoints = 300;
+        private const int ChartKeepPoints = 3000;  // ~6분 분량 (7.8 pt/s × 360s)
         private double MotionEps { get; set; } = 0.010;  // 움직임 판정(Δpos) 기본값
         private double DefaultThreshold { get; set; } = 1.000; // 기본 임계값(필요 시)
         private const string DefaultLogsPath = @"C:\Data\PHM_Logs";
@@ -462,7 +462,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // alpha=0.3: 약 4~5 윈도우(~500ms) 내에 새 값으로 수렴
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
             _chartEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
-        private const double ChartEmaAlpha = 0.3;
+        private const double ChartEmaAlpha = 0.15;  // 0.3→0.15: 약 12샘플(~1.5초) 수렴, 차트 노이즈 감소
 
         // ── 이상 이벤트 로그 중복 방지 ──────────────────────────────────────
         // 상태 전환(정상→이상) 시 즉시, 이상 지속 시 쿨다운마다 1회씩만 로그
@@ -3884,7 +3884,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
 
             scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, score));
-            while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+            while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
         }
 
         private static string AlarmText(AlarmLevel l)
@@ -4045,7 +4045,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                         // 라인 차트에 AE 점수 반영
                         scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, scoreAe));
-                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (AE axis {axis}, {Path.GetFileName(path)})";
                     }));
 
@@ -4169,7 +4169,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                         // 라인차트 큐
                         scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, score));
-                        while (scoreSeries.Count > 600)
+                        while (scoreSeries.Count > 3000)
                         {
                             Tuple<int, DateTime, double> dump;
                             scoreSeries.TryDequeue(out dump);
@@ -4264,7 +4264,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         }
 
                         scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, rawScore));
-                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (SKL axis {axis}, {Path.GetFileName(path)})";
                     }));
                 }
@@ -4312,7 +4312,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                         AppendEventLog($"[G-KNN] axis {captAxis}  score={captScore:F2}  thr={captThr:F2}  => {alarmText}  ({Path.GetFileName(path)})");
                                         if (captLevel != AlarmLevel.Normal) ShowToast(captLevel, captAxis, captScore);
                                         scoreSeries.Enqueue(Tuple.Create(captAxis, DateTime.Now, captScore));
-                                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (G-KNN axis {captAxis}, {Path.GetFileName(path)})";
                                     }));
                                 }
@@ -4344,7 +4344,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                         AppendEventLog($"[G-AE] axis {captAxis}  mae={captScore:F4}  thr={captThr:F4}  => {alarmText}  ({Path.GetFileName(path)})");
                                         if (captLevel != AlarmLevel.Normal) ShowToast(captLevel, captAxis, captScore);
                                         scoreSeries.Enqueue(Tuple.Create(captAxis, DateTime.Now, captScore));
-                                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (G-AE axis {captAxis}, {Path.GetFileName(path)})";
                                     }));
                                 }
@@ -4492,7 +4492,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             if (latestTime == DateTime.MinValue) latestTime = DateTime.Now;
             double xMax = latestTime.AddSeconds(10).ToOADate();
-            double xMin = latestTime.AddMinutes(-5).ToOADate();
+            double xMin = latestTime.AddMinutes(-10).ToOADate();  // 5분→10분 롤링 창
 
             foreach (Chart ch in new[] { _chartAccel, _chartTorque })
             {
@@ -4776,7 +4776,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _chartEma[key]    = smoothed;
 
             _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, smoothed));
-            while (_liveScoreQueue.Count > 1200)
+            while (_liveScoreQueue.Count > 6000)  // 10분 × 7.8 pt/s ≈ 4700, 여유 포함
             {
                 Tuple<string, DateTime, double> _discard;
                 _liveScoreQueue.TryDequeue(out _discard);
