@@ -547,6 +547,13 @@ namespace PHM_Project_DockPanel.Services
                         try
                         {
                             _accelLogger.SuppressCsvWrite = false;
+                            // ★ Start() 전에 Op 컬럼 설정 — 헤더에 반영되도록
+                            // (Start() 내부에서 헤더를 즉시 작성하므로, 이후에 설정하면 헤더/데이터 컬럼 수 불일치)
+                            _accelLogger.GetAxisOperation = controllerConnected ? (Func<int, string>)GetAxisOperation : null;
+                            int _axCntAccel = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
+                            _accelLogger.LoggedAxes = controllerConnected
+                                ? System.Linq.Enumerable.Range(0, _axCntAccel).ToArray()
+                                : null;
                             Directory.CreateDirectory(accelDir);
                             bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);
                             if (ok)
@@ -598,12 +605,15 @@ namespace PHM_Project_DockPanel.Services
                 _inferenceService?.Dispose();
                 if (_accelLogger != null)
                 {
-                    // 제어기 연결 시만 Op_Ax 컬럼 기록 (단독 가속도 CSV에도 동일 정책)
-                    _accelLogger.GetAxisOperation = controllerConnected ? (Func<int, string>)GetAxisOperation : null;
-                    int _axCnt = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
-                    _accelLogger.LoggedAxes = controllerConnected
-                        ? System.Linq.Enumerable.Range(0, _axCnt).ToArray()
-                        : null;
+                    // 단독 모드에서는 이미 Start() 전에 설정됨.
+                    // 통합(combined) 모드에서는 SuppressCsvWrite=true이므로 CSV 헤더 불일치 없음.
+                    // 여기서는 추론 서비스가 참조하는 콜백/축 목록만 최신 상태로 동기화.
+                    if (_accelLogger.LoggedAxes == null && controllerConnected)
+                    {
+                        _accelLogger.GetAxisOperation = (Func<int, string>)GetAxisOperation;
+                        int _axCnt = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
+                        _accelLogger.LoggedAxes = System.Linq.Enumerable.Range(0, _axCnt).ToArray();
+                    }
                 }
                 if (_ajinLogger != null)
                     _ajinLogger.GetAxisOperation = controllerConnected ? (Func<int, string>)GetAxisOperation : null;
