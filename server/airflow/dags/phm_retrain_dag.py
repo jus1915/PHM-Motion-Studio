@@ -74,7 +74,9 @@ _DEFAULT_CONF: dict = {
     # 기본 학습 모드: accel / torque / combined 모두 실행
     # CLS 분류: accel / torque / combined
     # AE 이상탐지: ae_accel (단일 전역) / ae_torque (축별)
-    "train_modes":      ["accel", "torque", "combined", "ae_accel", "ae_torque"],
+    "train_modes":              ["accel", "torque", "combined", "ae_accel", "ae_torque"],
+    # AE threshold: 99th pct → 99.5th pct (정상 동작 중 false alarm 감소)
+    "ae_threshold_percentile":  99.5,
 }
 
 # Windows 드라이브 패턴 (예: C:\, D:\)

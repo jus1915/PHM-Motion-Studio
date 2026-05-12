@@ -1699,8 +1699,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ["mlflow_experiment"]   = "PHM-DL",
                 ["session"]             = isAe ? "AE" : "CLS",
             };
-            // AE: 어떤 폴더를 "정상"으로 볼지 명시
-            if (isAe) p["normal_classes"] = classNames.ToArray();
+            // AE: 어떤 폴더를 "정상"으로 볼지 명시 + threshold percentile 상향
+            if (isAe)
+            {
+                p["normal_classes"]         = classNames.ToArray();
+                p["ae_threshold_percentile"] = 99.5;  // 99→99.5: 정상 동작 중 false alarm 감소
+            }
             return p;
         }
 

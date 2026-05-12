@@ -470,6 +470,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Dictionary<string, DateTime> _lastAnomalyLogTime = new Dictionary<string, DateTime>();
         private static readonly TimeSpan AnomalyLogCooldown = TimeSpan.FromSeconds(30);
 
+        // ── 연속 이상 카운터 (N회 연속 threshold 초과 시 경보 확정) ──────────
+        // 256ms 간격 × 5회 = 약 1.3초 연속 초과 시 확정 → 단발성 노이즈 무시
+        private const int AnomalyConfirmCount = 5;
+        private readonly Dictionary<string, int> _consecutiveAnomalyCount
+            = new Dictionary<string, int>();
+
         // 프로파일 관리
         private ComboBox _cmbProfile;
         private Button   _btnProfileApply, _btnProfileRefresh;
@@ -728,6 +734,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         // 칩/EMA/차트 상태 리셋
                         _chartEma.Clear();
                         _scoreBaseline.Clear();
+                        _consecutiveAnomalyCount.Clear();
                         _seenAccelModels.Clear();
                         _seenTorqueModels.Clear();
                         if (_lblAccelModelInfo != null) _lblAccelModelInfo.Text = "모델: 수신 대기 중...";
@@ -4805,7 +4812,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 double rawScore  = (double)result.AnomalyScore;
                 bool   threshAnomaly = rawScore >= clientThr;
 
-                // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상) ─────────────
+                // ── 연속 카운터: N회 연속 초과 시 확정 (단발 노이즈 제거) ──────────
+                int prevConsec;
+                _consecutiveAnomalyCount.TryGetValue(key, out prevConsec);
+                int newConsec = threshAnomaly ? prevConsec + 1 : 0;
+                _consecutiveAnomalyCount[key] = newConsec;
+                bool confirmedThreshAnomaly = newConsec >= AnomalyConfirmCount;
+
+                // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상 — 즉시 반응) ──
                 var baseline = _scoreBaseline.GetOrAdd(key, (rawScore, 0));
                 double ema   = baseline.ema;
                 int    cnt   = baseline.count;
@@ -4814,7 +4828,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 double newEma = ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
                 _scoreBaseline[key] = (newEma, cnt + 1);
 
-                bool   anomaly    = threshAnomaly || spikeAnomaly;
+                // 최종 이상 판정: 연속 N회 초과(확정) 또는 급증 스파이크(즉시)
+                bool   anomaly    = confirmedThreshAnomaly || spikeAnomaly;
                 string spikeTag   = (spikeAnomaly && !threshAnomaly) ? " ↑급증" : "";
                 string stateText  = anomaly ? "⚠ 이상" : "✓ 정상";
                 Color  stateClr   = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
