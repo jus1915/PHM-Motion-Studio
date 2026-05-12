@@ -2620,16 +2620,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         private void ShowToast(AlarmLevel level, int axis, double score)
+            => ShowToast(level, $"Ax{axis}", score);
+
+        /// <summary>센서 표시명(예: "가속도", "Ax0 토크")으로 토스트를 띄웁니다.</summary>
+        private void ShowToast(AlarmLevel level, string sensorLabel, double score)
         {
             if (_notifier == null) return;
-            if (level != AlarmLevel.Danger) return; // ⚠️ 위험일 때만 풍선 표시
+            if (level != AlarmLevel.Danger) return;
 
-            string title = "위험 감지";
-            string text = $"Axis {axis} · Score {Math.Round(score, 1)}";
-
-            _notifier.BalloonTipTitle = title;
-            _notifier.BalloonTipText = text;
-            _notifier.ShowBalloonTip(1000); // 1초 (원래 주석엔 3초였음)
+            _notifier.BalloonTipTitle = "⚠ 위험 감지";
+            _notifier.BalloonTipText  = $"{sensorLabel}  {DateTime.Now:HH:mm:ss}  Score {score:F2}";
+            _notifier.ShowBalloonTip(3000);
         }
         #region KPI/이벤트
         private class EventRow
@@ -4508,7 +4509,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             if (latestTime == DateTime.MinValue) latestTime = DateTime.Now;
             double xMax = latestTime.AddSeconds(10).ToOADate();
-            double xMin = latestTime.AddMinutes(-10).ToOADate();
+
+            // X 최솟값: 실제 데이터 첫 포인트와 10분 롤링 창 중 더 최근 값 사용
+            // → 막 시작했을 때는 데이터 시작점에 맞게 좁히고, 10분 이상 쌓이면 롤링 창으로 전환
+            double xMinRolling = latestTime.AddMinutes(-10).ToOADate();
+            double xMinData    = double.MaxValue;
+            foreach (Chart _ch in new[] { _chartAccel, _chartTorque })
+            {
+                if (_ch == null || _ch.IsDisposed) continue;
+                foreach (Series _s in _ch.Series)
+                    if (!_s.Name.StartsWith("_") && _s.Points.Count > 0
+                        && _s.Points[0].XValue < xMinData)
+                        xMinData = _s.Points[0].XValue;
+            }
+            const double PadOA = 10.0 / 86400.0;  // 10초 여백 (OADate 단위)
+            double xMin = (xMinData < double.MaxValue && xMinData > xMinRolling)
+                ? xMinData - PadOA   // 데이터 시작 10초 전 (짧은 구간)
+                : xMinRolling;       // 10분 롤링 창 (긴 구간)
 
             foreach (Chart ch in new[] { _chartAccel, _chartTorque })
             {
@@ -4972,7 +4989,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         else          Interlocked.Increment(ref cntWarning);
                         cardDanger.ValueText  = cntDanger  + " 건";
                         cardWarning.ValueText = cntWarning + " 건";
-                        if (isDanger) ShowToast(AlarmLevel.Danger, result.Axis ?? 0, displayScore);
+                        if (isDanger) ShowToast(AlarmLevel.Danger, displayName, displayScore);
 
                         AppendEventLog(
                             $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
