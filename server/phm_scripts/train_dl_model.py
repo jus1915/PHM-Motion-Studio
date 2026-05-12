@@ -307,11 +307,14 @@ def _read_signal_csv(
     channels: List[str],
     label_column: str,
     filter_op_column: Optional[str] = None,
+    use_op_filter: bool = True,
 ) -> Tuple[List[np.ndarray], Optional[str]]:
-    """단일 CSV 파일에서 연속 Pos 구간별로 분리된 신호 세그먼트와 레이블을 반환합니다.
+    """단일 CSV 파일에서 연속 구간별로 분리된 신호 세그먼트와 레이블을 반환합니다.
 
-    Op 컬럼이 Idle로 바뀌는 시점에 구간을 끊어, 서로 다른 동작 구간이
-    하나의 연속 신호로 이어붙여지는 경계 오염을 방지합니다.
+    use_op_filter=True (기본): Op 컬럼이 Idle로 바뀌는 시점에 구간을 끊어
+    서로 다른 동작 구간이 이어붙여지는 경계 오염을 방지합니다.
+    use_op_filter=False: Op 컬럼을 무시하고 전체 행을 단일 구간으로 수집합니다
+    (가속도처럼 정지/운동 전부를 학습에 포함해야 하는 경우).
 
     Args:
         path           : CSV 파일 경로
@@ -319,6 +322,7 @@ def _read_signal_csv(
         label_column   : 레이블 컬럼명
         filter_op_column: 특정 Op 컬럼 명시 시 해당 컬럼만 Idle 판별에 사용.
                           None 이면 Op_Ax* / Op 컬럼 자동 감지 → 모두 Idle일 때 구간 끊기.
+        use_op_filter  : False 이면 Op 컬럼을 완전히 무시 (accel 전용).
 
     Returns:
         (segments, label_str_or_None)
@@ -340,7 +344,9 @@ def _read_signal_csv(
         has_label = label_column in (reader.fieldnames or [])
         fieldnames_lower = [f.strip().lower() for f in (reader.fieldnames or [])]
 
-        if filter_op_column:
+        if not use_op_filter:
+            _op_cols = []   # Op 필터 비활성화 — 전 행 포함 (accel 정책)
+        elif filter_op_column:
             _foc_lower = filter_op_column.strip().lower()
             _op_cols = [reader.fieldnames[i] for i, f in enumerate(fieldnames_lower)
                         if f == _foc_lower]
@@ -403,6 +409,7 @@ def load_windows_from_dir(
     add_fft: bool = False,
     add_derivative: bool = False,
     add_abs: bool = False,
+    use_op_filter: bool = True,
 ) -> Tuple[List[Tuple[np.ndarray, int]], List[int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
@@ -468,7 +475,8 @@ def load_windows_from_dir(
 
     for csv_path in csv_files:
         segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
-                                               filter_op_column=filter_op_column)
+                                               filter_op_column=filter_op_column,
+                                               use_op_filter=use_op_filter)
 
         # 레이블 결정: CSV 컬럼 → 경로 컴포넌트 → 부모 폴더명
         if label_str is None:
@@ -550,6 +558,7 @@ def load_windows_from_file_list(
     add_fft: bool = False,
     add_derivative: bool = False,
     add_abs: bool = False,
+    use_op_filter: bool = True,
 ) -> Tuple[List[Tuple[np.ndarray, int]], List[int]]:
     """명시적 파일 목록에서 윈도우를 추출합니다.
 
@@ -580,7 +589,8 @@ def load_windows_from_file_list(
             continue
 
         segments, csv_label = _read_signal_csv(path, channels, label_column,
-                                              filter_op_column=filter_op_column)
+                                              filter_op_column=filter_op_column,
+                                              use_op_filter=use_op_filter)
 
         # 레이블 우선순위: entry["label"] > CSV 내 label_column
         label_str = forced_label if forced_label else (csv_label or "")
@@ -633,6 +643,7 @@ def load_segments_from_file_list(
     class_names: List[str],
     window_size: int,
     filter_op_column: Optional[str] = None,
+    use_op_filter: bool = True,
 ) -> List[Tuple[np.ndarray, int]]:
     """명시적 파일 목록에서 구간(segment) 목록을 반환합니다.
 
@@ -656,7 +667,8 @@ def load_segments_from_file_list(
             continue
 
         segments, csv_label = _read_signal_csv(path, channels, label_column,
-                                               filter_op_column=filter_op_column)
+                                               filter_op_column=filter_op_column,
+                                               use_op_filter=use_op_filter)
         label_str = forced_label if forced_label else (csv_label or "")
         label_int = name_to_id.get(label_str.lower())
         if label_int is None:
@@ -690,6 +702,7 @@ def load_segments_from_dir(
     window_size: int,
     sensor_type: str = "",
     filter_op_column: Optional[str] = None,
+    use_op_filter: bool = True,
 ) -> List[Tuple[np.ndarray, int]]:
     """디렉터리를 재귀 탐색해 구간(segment) 목록을 반환합니다.
 
@@ -724,7 +737,8 @@ def load_segments_from_dir(
 
     for csv_path in csv_files:
         segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
-                                               filter_op_column=filter_op_column)
+                                               filter_op_column=filter_op_column,
+                                               use_op_filter=use_op_filter)
         if label_str is None:
             for part in csv_path.parts:
                 if part.lower() in name_to_id:
@@ -1771,6 +1785,10 @@ def main() -> None:
     )
     label_column: str = params.get("label_column", "Label")
     filter_op_column: Optional[str] = params.get("filter_op_column", None)
+    # 가속도는 정지/운동 전부 학습 — Op 컬럼이 있어도 필터링 안 함
+    # 토크/결합은 Pos 구간만 학습 (정지 중 토크≈0 이 패턴을 희석하지 않도록)
+    _sensor_type_for_op = params.get("sensor_type", "accel")
+    use_op_filter: bool = (_sensor_type_for_op != "accel")
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
@@ -1824,6 +1842,7 @@ def main() -> None:
                 window_size=window_size, stride=stride, normalize=False,
                 filter_op_column=filter_op_column,
                 add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+                use_op_filter=use_op_filter,
             )
         elif "data_dir" in params and params["data_dir"]:
             windows, seg_ids = load_windows_from_dir(
@@ -1833,6 +1852,7 @@ def main() -> None:
                 sensor_type=params.get("sensor_type", ""), normalize=False,
                 filter_op_column=filter_op_column,
                 add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
+                use_op_filter=use_op_filter,
             )
         else:
             print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
@@ -1856,6 +1876,7 @@ def main() -> None:
                 csv_files=params["csv_files"], channels=channels,
                 label_column=label_column, class_names=load_class_names,
                 window_size=window_size, filter_op_column=filter_op_column,
+                use_op_filter=use_op_filter,
             )
         elif "data_dir" in params and params["data_dir"]:
             all_segments = load_segments_from_dir(
@@ -1863,6 +1884,7 @@ def main() -> None:
                 label_column=label_column, class_names=load_class_names,
                 window_size=window_size, sensor_type=params.get("sensor_type", ""),
                 filter_op_column=filter_op_column,
+                use_op_filter=use_op_filter,
             )
         else:
             print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))

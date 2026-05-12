@@ -223,8 +223,11 @@ namespace PHM_Project_DockPanel.Services.Core
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
+            // accel: 정지/운동 전부 포함 (Op 필터 없음)
+            // torque/combined: Pos 행만 사용
+            bool filterOp = sensorType != "accel";
             float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh,
-                filterOp: false);   // Idle/Pos 무관하게 전체 행 사용
+                filterOp: filterOp);
             if (window == null) return;
 
             InferenceResult result = await _client.PredictAsync(
@@ -245,8 +248,11 @@ namespace PHM_Project_DockPanel.Services.Core
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
+            // accel: 정지/운동 전부 포함 (Op 필터 없음)
+            // torque/combined: Pos 행만 사용
+            bool filterOp = sensorType != "accel";
             float[] window = ReadLastWindow(csvPath, sensorType, WindowSize, axis, out nCh,
-                filterOp: true);    // Pos 행만 사용
+                filterOp: filterOp);
             if (window == null) return;
 
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
