@@ -109,6 +109,10 @@ services:
 
   # --------------------------------------------------------------------------
   # MLflow tracking server
+  #   --serve-artifacts : 아티팩트 프록시 모드 활성화
+  #     - 클라이언트(Airflow)는 HTTP PUT으로 MLflow 서버에 업로드
+  #     - MLflow 서버가 --artifacts-destination 경로에 직접 저장
+  #     - Airflow 컨테이너가 파일시스템에 직접 쓸 필요 없음 → Permission denied 해결
   # --------------------------------------------------------------------------
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.14.3
@@ -118,14 +122,16 @@ services:
       - "5000:5000"
     volumes:
       - ./mlflow:/mlflow
-      - ./phm_models:/opt/phm/models   # Airflow 컨테이너와 동일 경로 → 아티팩트 권한 공유
     command:
       - mlflow
       - server
       - --backend-store-uri
       - sqlite:///mlflow/mlflow.db
       - --default-artifact-root
-      - /opt/phm/models/mlflow_artifacts  # phm_models 볼륨 → Airflow도 쓰기 가능
+      - mlflow-artifacts:/            # 프록시 URI — 새 experiment는 이 scheme 사용
+      - --serve-artifacts             # 아티팩트 HTTP 프록시 활성화
+      - --artifacts-destination
+      - /mlflow/artifacts             # 서버가 실제로 저장하는 경로 (./mlflow/ 볼륨)
       - --host
       - "0.0.0.0"
       - --port
@@ -172,7 +178,6 @@ services:
       - ./phm_scripts:/opt/phm/scripts
       - ./phm_data:/opt/phm/data
       - ./phm_models:/opt/phm/models
-      - ./mlflow:/mlflow                  # 아티팩트 로컬 경로 공유 (Permission denied 해결)
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
@@ -188,6 +193,8 @@ services:
       _PIP_ADDITIONAL_REQUIREMENTS: "mlflow==2.14.3 scikit-learn skl2onnx onnx torch torchvision"
       # Git 없는 환경에서 GitPython 경고 억제
       GIT_PYTHON_REFRESH: quiet
+      # MLflow 추적 서버 URI — 클라이언트가 HTTP를 통해 아티팩트 업로드
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     depends_on:
       - airflow-init
 
@@ -205,7 +212,6 @@ services:
       - ./phm_scripts:/opt/phm/scripts
       - ./phm_data:/opt/phm/data
       - ./phm_models:/opt/phm/models
-      - ./mlflow:/mlflow                  # 아티팩트 로컬 경로 공유 (Permission denied 해결)
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://devuser:devpass@postgres:5432/airflow
@@ -217,6 +223,7 @@ services:
       PHM_MODELS_ROOT: /opt/phm/models
       _PIP_ADDITIONAL_REQUIREMENTS: "mlflow==2.14.3 scikit-learn skl2onnx onnx torch torchvision"
       GIT_PYTHON_REFRESH: quiet
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     depends_on:
       - airflow-init
 

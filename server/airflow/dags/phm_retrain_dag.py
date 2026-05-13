@@ -73,10 +73,24 @@ _DEFAULT_CONF: dict = {
     "session":          "CLS",
     # 기본 학습 모드: accel / torque / combined 모두 실행
     # CLS 분류: accel / torque / combined
-    # AE 이상탐지: ae_accel (단일 전역) / ae_torque (축별)
-    "train_modes":              ["accel", "torque", "combined", "ae_accel", "ae_torque"],
+    # AE 이상탐지:
+    #   ae_accel         — 가속도 전역 (단일 모델)
+    #   ae_torque_global — 토크 전역   (전 축 토크 채널 통합, 단일 모델)
+    #   ae_torque        — 토크 축별   (Ax{n} 독립 모델)
+    #   ae_combined_global — 가속도+토크 전역 (단일 모델)
+    #   ae_combined      — 가속도+토크 축별 (Ax{n} 독립 모델)
+    "train_modes": [
+        "accel", "torque", "combined",
+        "ae_accel",
+        "ae_torque_global", "ae_torque",
+        "ae_combined_global", "ae_combined",
+    ],
     # AE threshold: 99th pct → 99.5th pct (정상 동작 중 false alarm 감소)
     "ae_threshold_percentile":  99.5,
+    # MLflow 추적 서버 — 컨테이너 내부 서비스명 사용 (--serve-artifacts 프록시 모드)
+    # MLFLOW_TRACKING_URI env var 로도 설정됨 (docker-compose); 여기선 명시적 override
+    "mlflow_tracking_uri":      "http://mlflow:5000",
+    "mlflow_experiment":        "PHM-DL",
 }
 
 # Windows 드라이브 패턴 (예: C:\, D:\)
@@ -466,6 +480,108 @@ def run_training_ae_torque(**context) -> None:
     print(f"\n[PHM] AE 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
 
 
+def run_training_ae_torque_global(**context) -> None:
+    """
+    AE 이상탐지 — 토크 전역 모델 학습 (전 축 토크 채널 통합, 축 구분 없음).
+
+    · channels          = ["Ax0_Trq(%)", "Ax1_Trq(%)", ...]  (axis_count 자동 감지)
+    · filter_op_column  = None  (전체 행 학습 — 어느 축이든 움직이는 순간 모두 포함)
+    · augment_mode      = "mixed"
+    · normalize         = False
+    · 출력: ae_torque_global.onnx  (단일, 축 suffix 없음)
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    if not _is_mode_enabled(conf, "ae_torque_global"):
+        print("[PHM] train_modes 에 'ae_torque_global' 없음 → AE 토크 전역 학습 건너뜀", flush=True)
+        return
+
+    axis_count  = _get_axis_count(conf)
+    run_id      = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
+
+    params = {**_DEFAULT_CONF, **conf}
+    params["session"]          = "AE"
+    params["sensor_type"]      = "torque"
+    params["channels"]         = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
+    params["filter_op_column"] = None   # 전체 행 — 어느 축이 동작 중이어도 학습
+    params["augment_mode"]     = "mixed"
+    params["normalize"]        = False
+    params["output"] = str(profile_dir / "ae_torque_global.onnx")
+    print(f"[PHM] AE 토크 전역 모델 출력: {params['output']}", flush=True)
+    _execute_training(params, f"{run_id}_ae_torque_global")
+    print("[PHM] AE 토크 전역 학습 완료", flush=True)
+
+
+def run_training_ae_combined_global(**context) -> None:
+    """
+    AE 이상탐지 — 가속도+토크 전역 모델 학습 (전 축 통합, 축 구분 없음).
+
+    · channels          = ["x","y","z","Ax0_Trq(%)","Ax1_Trq(%)", ...]
+    · filter_op_column  = None
+    · augment_mode      = "standard"  (채널 간 스케일 차이를 z-score 로 흡수)
+    · normalize         = True
+    · 출력: ae_combined_global.onnx  (단일, 축 suffix 없음)
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    if not _is_mode_enabled(conf, "ae_combined_global"):
+        print("[PHM] train_modes 에 'ae_combined_global' 없음 → AE 결합 전역 학습 건너뜀", flush=True)
+        return
+
+    axis_count  = _get_axis_count(conf)
+    run_id      = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
+
+    params = {**_DEFAULT_CONF, **conf}
+    params["session"]          = "AE"
+    params["sensor_type"]      = "combined"
+    params["channels"]         = ["x", "y", "z"] + [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
+    params["filter_op_column"] = None
+    params["augment_mode"]     = "standard"
+    params["normalize"]        = True
+    params["output"] = str(profile_dir / "ae_combined_global.onnx")
+    print(f"[PHM] AE 결합 전역 모델 출력: {params['output']}", flush=True)
+    _execute_training(params, f"{run_id}_ae_combined_global")
+    print("[PHM] AE 결합 전역 학습 완료", flush=True)
+
+
+def run_training_ae_combined(**context) -> None:
+    """
+    AE 이상탐지 — 가속도+토크 축별 모델 학습.
+
+    · channels          = ["x","y","z","Ax{n}_Trq(%)"]
+    · filter_op_column  = f"Op_Ax{n}"  (해당 축 동작 구간만 학습)
+    · augment_mode      = "standard"
+    · normalize         = True
+    · 출력: ae_combined_ax0.onnx, ae_combined_ax1.onnx, ...
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    if not _is_mode_enabled(conf, "ae_combined"):
+        print("[PHM] train_modes 에 'ae_combined' 없음 → AE 결합 축별 학습 건너뜀", flush=True)
+        return
+
+    axis_count  = _get_axis_count(conf)
+    run_id      = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
+
+    for ax in range(axis_count):
+        print(f"\n[PHM] ━━━ AE 결합 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+        params = {**_DEFAULT_CONF, **conf}
+        params["session"]          = "AE"
+        params["sensor_type"]      = "combined"
+        params["channels"]         = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
+        params["filter_op_column"] = f"Op_Ax{ax}"   # 해당 축 동작 구간만
+        params["augment_mode"]     = "standard"
+        params["normalize"]        = True
+        params["output"] = str(profile_dir / f"ae_combined_ax{ax}.onnx")
+        print(f"[PHM] 출력 파일: {params['output']}", flush=True)
+        _execute_training(params, f"{run_id}_ae_combined_ax{ax}")
+
+    print(f"\n[PHM] AE 결합 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+
+
 def reload_inference_cache(**context) -> None:
     """
     학습 완료 후 추론 서버의 모델 캐시를 재로드합니다.
@@ -539,7 +655,34 @@ with DAG(
         python_callable=run_training_ae_torque,
         doc_md=(
             "토크 AE 이상탐지 모델 학습 (축별). "
-            "augment_mode=mixed, filter_op=None. 출력: ae_torque_ax{n}.onnx"
+            "augment_mode=mixed, filter_op=Op_Ax{n}. 출력: ae_torque_ax{n}.onnx"
+        ),
+    )
+
+    t_ae_torque_global = PythonOperator(
+        task_id="train_ae_torque_global",
+        python_callable=run_training_ae_torque_global,
+        doc_md=(
+            "토크 AE 이상탐지 모델 학습 (전역, 전 축 토크 채널 통합). "
+            "augment_mode=mixed, filter_op=None. 출력: ae_torque_global.onnx"
+        ),
+    )
+
+    t_ae_combined_global = PythonOperator(
+        task_id="train_ae_combined_global",
+        python_callable=run_training_ae_combined_global,
+        doc_md=(
+            "가속도+토크 AE 이상탐지 모델 학습 (전역, 전 축 통합). "
+            "augment_mode=standard, normalize=True, filter_op=None. 출력: ae_combined_global.onnx"
+        ),
+    )
+
+    t_ae_combined = PythonOperator(
+        task_id="train_ae_combined",
+        python_callable=run_training_ae_combined,
+        doc_md=(
+            "가속도+토크 AE 이상탐지 모델 학습 (축별). "
+            "augment_mode=standard, normalize=True, filter_op=Op_Ax{n}. 출력: ae_combined_ax{n}.onnx"
         ),
     )
 
@@ -549,5 +692,10 @@ with DAG(
         doc_md="학습 완료 후 추론 서버(phm-inference:8000)의 모델 캐시를 재로드.",
     )
 
-    # CLS(accel/torque/combined) + AE(ae_accel/ae_torque) 병렬 학습 → 완료 후 캐시 재로드
-    [t_accel, t_torque, t_combined, t_ae_accel, t_ae_torque] >> t_reload
+    # 모든 학습 태스크 병렬 실행 → 완료 후 캐시 재로드
+    [
+        t_accel, t_torque, t_combined,
+        t_ae_accel,
+        t_ae_torque_global, t_ae_torque,
+        t_ae_combined_global, t_ae_combined,
+    ] >> t_reload

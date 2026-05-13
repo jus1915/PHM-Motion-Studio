@@ -1570,8 +1570,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             var modeFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
             _dlRdoCls = new RadioButton { Text = "분류(CLS)", Checked = true, AutoSize = true };
             _dlRdoAe  = new RadioButton { Text = "AE(이상탐지)", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
-            _dlRdoCls.CheckedChanged += (s, e) => { if (_dlRdoCls.Checked) { UpdateDlModeUi(); UpdateTriggerButtonText(); } };
-            _dlRdoAe.CheckedChanged  += (s, e) => { if (_dlRdoAe.Checked)  { UpdateDlModeUi(); UpdateTriggerButtonText(); } };
+            _dlRdoCls.CheckedChanged += (s, e) => { if (_dlRdoCls.Checked) { UpdateDlModeUi(); UpdateAflTrainModeItems(); UpdateTriggerButtonText(); } };
+            _dlRdoAe.CheckedChanged  += (s, e) => { if (_dlRdoAe.Checked)  { UpdateDlModeUi(); UpdateAflTrainModeItems(); UpdateTriggerButtonText(); } };
             modeFlow.Controls.AddRange(new Control[] { _dlRdoCls, _dlRdoAe });
             tl.Controls.Add(modeFlow, 1, row++);
 
@@ -2061,14 +2061,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
                 Margin = new Padding(2, 4, 2, 4),
             };
-            _aflTrainMode.Items.AddRange(new object[]
-            {
-                "전체 (all)",
-                "가속도 (accel)",
-                "토크 (torque)",
-                "결합 (combined)",
-            });
-            _aflTrainMode.SelectedIndex = 0; // 기본값: 전체
+            // 항목은 UpdateAflTrainModeItems() 에서 AE/CLS 세션에 맞게 채움
+            _aflTrainMode.SelectedIndex = 0;
             _aflTrainMode.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
 
             // 프로파일 컨트롤
@@ -2142,8 +2136,47 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tl.SetColumnSpan(_aflStatusLbl, 11);
             tl.Controls.Add(_aflStatusLbl, 0, 1);
 
+            // 초기 세션(CLS)에 맞는 항목 채우기
+            UpdateAflTrainModeItems();
+
             grp.Controls.Add(tl);
             return grp;
+        }
+
+        /// <summary>AE/CLS 세션에 따라 _aflTrainMode 콤보박스 항목을 갱신합니다.</summary>
+        private void UpdateAflTrainModeItems()
+        {
+            if (_aflTrainMode == null) return;
+            if (this.InvokeRequired) { this.BeginInvoke(new Action(UpdateAflTrainModeItems)); return; }
+
+            bool isAe = (_dlRdoAe?.Checked == true);
+            int prevIdx = _aflTrainMode.SelectedIndex;
+
+            _aflTrainMode.BeginUpdate();
+            _aflTrainMode.Items.Clear();
+
+            if (isAe)
+            {
+                // AE 세션: 전역/축별 구분 명시
+                _aflTrainMode.Items.Add("전체 (all)");           // 0 → 5개 ae_* 모두
+                _aflTrainMode.Items.Add("가속도 전역");           // 1 → ae_accel
+                _aflTrainMode.Items.Add("토크 전역");             // 2 → ae_torque_global
+                _aflTrainMode.Items.Add("토크 축별");             // 3 → ae_torque
+                _aflTrainMode.Items.Add("결합 전역");             // 4 → ae_combined_global
+                _aflTrainMode.Items.Add("결합 축별");             // 5 → ae_combined
+            }
+            else
+            {
+                // CLS 세션
+                _aflTrainMode.Items.Add("전체 (all)");           // 0 → accel + torque + combined
+                _aflTrainMode.Items.Add("가속도 (accel)");        // 1 → accel
+                _aflTrainMode.Items.Add("토크 (torque)");         // 2 → torque
+                _aflTrainMode.Items.Add("결합 (combined)");       // 3 → combined
+            }
+
+            _aflTrainMode.EndUpdate();
+            // 이전 인덱스가 새 항목 범위를 벗어나면 0으로 리셋
+            _aflTrainMode.SelectedIndex = (prevIdx < _aflTrainMode.Items.Count) ? prevIdx : 0;
         }
 
         /// <summary>
@@ -2153,30 +2186,36 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void UpdateTriggerButtonText()
         {
             if (_aflBtnTrigger == null) return;
-            bool isAe    = (_dlRdoAe?.Checked == true);   // DL 탭 라디오 버튼 기준
+            bool isAe    = (_dlRdoAe?.Checked == true);
             int  modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
 
-            bool wantAccel    = (modeIdx == 0 || modeIdx == 1);
-            bool wantTorque   = (modeIdx == 0 || modeIdx == 2);
-            bool wantCombined = (modeIdx == 0 || modeIdx == 3);
-
             var tasks = new System.Collections.Generic.List<string>();
-            if (isAe)                               // AE 세션: ae_* 태스크만
+            if (isAe)
             {
-                if (wantAccel)  tasks.Add("AE-Accel");
-                if (wantTorque) tasks.Add("AE-Torque");
+                // AE: 0=전체, 1=가속도전역, 2=토크전역, 3=토크축별, 4=결합전역, 5=결합축별
+                switch (modeIdx)
+                {
+                    case 0: tasks.AddRange(new[] { "AE-Accel(전역)", "AE-Torque(전역)", "AE-Torque(축별)", "AE-Combined(전역)", "AE-Combined(축별)" }); break;
+                    case 1: tasks.Add("AE-Accel(전역)");      break;
+                    case 2: tasks.Add("AE-Torque(전역)");     break;
+                    case 3: tasks.Add("AE-Torque(축별)");     break;
+                    case 4: tasks.Add("AE-Combined(전역)");   break;
+                    case 5: tasks.Add("AE-Combined(축별)");   break;
+                }
             }
-            else                                    // CLS 세션: accel/torque/combined만
+            else
             {
-                if (wantAccel)    tasks.Add("CLS-Accel");
-                if (wantTorque)   tasks.Add("CLS-Torque");
-                if (wantCombined) tasks.Add("CLS-Combined");
+                // CLS: 0=전체, 1=가속도, 2=토크, 3=결합
+                switch (modeIdx)
+                {
+                    case 0: tasks.AddRange(new[] { "CLS-Accel", "CLS-Torque", "CLS-Combined" }); break;
+                    case 1: tasks.Add("CLS-Accel");    break;
+                    case 2: tasks.Add("CLS-Torque");   break;
+                    case 3: tasks.Add("CLS-Combined"); break;
+                }
             }
 
-            string preview = tasks.Count > 0
-                ? string.Join(", ", tasks)
-                : "없음";
-            // 버튼 툴팁 업데이트 (ToolTip 컴포넌트는 Form 수준에서 공유)
+            string preview = tasks.Count > 0 ? string.Join(", ", tasks) : "없음";
             string tipText = $"실행될 태스크: {preview}";
             _aflBtnTrigger.Text = $"▶ 트리거 [{(isAe ? "AE" : "CLS")}]";
             if (_aflBtnTrigger.Tag is System.Windows.Forms.ToolTip tt)
@@ -2212,39 +2251,46 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 return;
             }
 
-            // ── train_modes 결정: 세션(AE/CLS) × 센서 타입 선택기 ─────────────────
-            // AE  태스크: train_ae_accel (단일 전역) / train_ae_torque (축별)
-            // CLS 태스크: train_accel    (축별)       / train_torque    (축별) / train_combined (축별)
-            // 결합(combined)은 CLS 전용 — AE combined 모델 없음
-            bool isAeSession  = (_dlRdoAe?.Checked == true);   // DL 탭 라디오 버튼 기준
-            bool isCls        = !isAeSession;
-            int  modeIdx      = _aflTrainMode?.SelectedIndex ?? 0;
-            // modeIdx: 0=전체, 1=가속도, 2=토크, 3=결합
-
-            // modeIdx: 센서 타입 선택 (0=전체, 1=가속도, 2=토크, 3=결합)
-            // 세션 분기는 라디오버튼(isAeSession)만 결정 — modeIdx는 센서 타입 필터만
-            bool wantAccelSensor    = (modeIdx == 0 || modeIdx == 1);
-            bool wantTorqueSensor   = (modeIdx == 0 || modeIdx == 2);
-            bool wantCombinedSensor = (modeIdx == 0 || modeIdx == 3);
+            // ── train_modes 결정: 세션(AE/CLS) × 콤보박스 선택 ─────────────────────
+            // AE  콤보 인덱스: 0=전체, 1=가속도전역, 2=토크전역, 3=토크축별, 4=결합전역, 5=결합축별
+            // CLS 콤보 인덱스: 0=전체, 1=가속도,     2=토크,     3=결합
+            bool isAeSession = (_dlRdoAe?.Checked == true);
+            int  modeIdx     = _aflTrainMode?.SelectedIndex ?? 0;
 
             var modeList = new System.Collections.Generic.List<string>();
-            if (isAeSession)                        // AE 세션: ae_* 태스크만
+            if (isAeSession)
             {
-                if (wantAccelSensor)  modeList.Add("ae_accel");
-                if (wantTorqueSensor) modeList.Add("ae_torque");
+                switch (modeIdx)
+                {
+                    case 0:
+                        modeList.AddRange(new[] {
+                            "ae_accel",
+                            "ae_torque_global", "ae_torque",
+                            "ae_combined_global", "ae_combined"
+                        });
+                        break;
+                    case 1: modeList.Add("ae_accel");           break;
+                    case 2: modeList.Add("ae_torque_global");   break;
+                    case 3: modeList.Add("ae_torque");          break;
+                    case 4: modeList.Add("ae_combined_global"); break;
+                    case 5: modeList.Add("ae_combined");        break;
+                }
             }
-            else                                    // CLS 세션: accel/torque/combined 태스크만
+            else
             {
-                if (wantAccelSensor)    modeList.Add("accel");
-                if (wantTorqueSensor)   modeList.Add("torque");
-                if (wantCombinedSensor) modeList.Add("combined");
+                switch (modeIdx)
+                {
+                    case 0: modeList.AddRange(new[] { "accel", "torque", "combined" }); break;
+                    case 1: modeList.Add("accel");    break;
+                    case 2: modeList.Add("torque");   break;
+                    case 3: modeList.Add("combined"); break;
+                }
             }
             string[] trainModes = modeList.ToArray();
 
             if (trainModes.Length == 0)
             {
-                MessageBox.Show("선택된 세션과 센서 조합에 해당하는 학습 모드가 없습니다.\n"
-                              + "(결합 센서는 CLS 전용입니다)",
+                MessageBox.Show("선택된 학습 모드가 없습니다.",
                                 "학습 모드 없음", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
