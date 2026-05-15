@@ -193,6 +193,13 @@ namespace PHM_Project_DockPanel.Services.Core
                         await RunAeInference(cp, "torque", ax, ct);
                 else
                     await RunAeInference(cp, "torque", null, ct);
+
+                // 결합 AE: 축별 (ae_combined_ax{n}.onnx — accel+torque 통합 모델)
+                if (_axes != null)
+                    foreach (int ax in _axes)
+                        await RunAeInference(cp, "combined", ax, ct);
+                else
+                    await RunAeInference(cp, "combined", null, ct);
             }
             else
             {
@@ -301,11 +308,10 @@ namespace PHM_Project_DockPanel.Services.Core
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            // accel: 전역 단일 모델 — 전체 행 사용 (Op 필터 없음)
-            // torque: 학습 시 filter_op_column="Op_Ax{n}" (Pos 구간만 학습)
-            //         → 정지 상태 near-zero 토크를 입력하면 재구성 오차 폭증 → false alarm
-            //         → 학습과 동일하게 Pos 행만 사용해야 함
-            bool filterOp = sensorType != "accel";
+            // AE 추론: 모든 센서 타입 filterOp=false (전체 행 사용)
+            // torque/combined 재학습 시 filter_op_column=None 적용 예정 → 학습과 일치
+            // 현재 모델(Pos 학습)이라도 일단 데이터를 보여주는 것이 평가에 필요
+            bool filterOp = false;
             int ws = GetWindowSize(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
                 filterOp: filterOp);
