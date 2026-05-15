@@ -140,10 +140,19 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private TextBox  _aflUrl, _aflDagId;
         private Button   _aflBtnTrigger, _aflBtnStatus;
         private Label    _aflStatusLbl;
-        private ComboBox _aflTrainMode;   // 학습 모드: 전체 / accel / torque / combined
         private TextBox  _aflProfile;     // 저장 프로파일명 (예: default, v2026-05-11)
         private TextBox  _aflProfileLabel;// 프로파일 표시 이름 (선택)
         private string   _aflLastRunId;
+
+        // ── Airflow 모델 선택 체크박스 ────────────────────────────────────────
+        private FlowLayoutPanel _aflModelFlow;
+        private CheckBox _aflChkAll;                                      // 전체 선택
+        private CheckBox _aflChkAeAccelG, _aflChkAeTorqueG,              // AE 전역
+                         _aflChkAeTorqueAx,                              // AE 토크 축별
+                         _aflChkAeCombG,   _aflChkAeCombAx;             // AE 결합
+        private CheckBox _aflChkClsAccel,  _aflChkClsTorque,            // CLS
+                         _aflChkClsComb;
+        private bool     _aflUpdatingAll;
 
         public AIForm()
         {
@@ -2033,18 +2042,17 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.FromArgb(0, 140, 220),
             };
 
-            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 11, RowCount = 1 };
+            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 10, RowCount = 1 };
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));   // col0  "URL:"
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));    // col1  URL textbox
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));   // col2  "DAG:"
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // col3  DAG ID textbox
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 115));  // col4  학습 모드 ComboBox
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));   // col5  "프로파일:" label
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));  // col6  프로파일 TextBox
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));   // col7  "라벨:" label
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));    // col8  라벨 TextBox
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // col9  Trigger button
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));   // col10 Status button
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));   // col4  "프로파일:" label
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));  // col5  프로파일 TextBox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));   // col6  "라벨:" label
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));    // col7  라벨 TextBox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // col8  Trigger button
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));   // col9  Status button
 
             var lblUrl = new Label { Text = "URL:", AutoSize = false, Dock = DockStyle.Fill,
                 TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText };
@@ -2056,13 +2064,47 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflDagId = new TextBox { Dock = DockStyle.Fill,
                 Text = Services.ServerSettings.Current.AirflowDagId ?? "phm_retrain" };
 
-            _aflTrainMode = new ComboBox
+            // ── 모델 선택 체크박스 패널 ────────────────────────────────────────
+            Action onModelChk = () => { if (!_aflUpdatingAll) UpdateTriggerButtonText(); };
+
+            _aflChkAll = AflMakeChk("▣ 전체", true);
+            _aflChkAll.Font = new Font(_aflChkAll.Font, FontStyle.Bold);
+            _aflChkAll.CheckedChanged += (s, e) =>
             {
-                Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
-                Margin = new Padding(2, 4, 2, 4),
+                if (_aflUpdatingAll) return;
+                _aflUpdatingAll = true;
+                bool chk = _aflChkAll.Checked;
+                foreach (Control c in _aflModelFlow.Controls)
+                    if (c is CheckBox cb && cb != _aflChkAll && cb.Visible) cb.Checked = chk;
+                _aflUpdatingAll = false;
+                UpdateTriggerButtonText();
             };
-            // 항목은 아래 UpdateAflTrainModeItems() 호출에서 채워짐 (SelectedIndex도 거기서 설정)
-            _aflTrainMode.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
+
+            // AE 체크박스
+            _aflChkAeAccelG   = AflMakeChk("Accel 전역",   true); _aflChkAeAccelG.CheckedChanged   += (s, e) => onModelChk();
+            _aflChkAeTorqueG  = AflMakeChk("Torque 전역",  true); _aflChkAeTorqueG.CheckedChanged  += (s, e) => onModelChk();
+            _aflChkAeTorqueAx = AflMakeChk("Torque 축별",  true); _aflChkAeTorqueAx.CheckedChanged += (s, e) => onModelChk();
+            _aflChkAeCombG    = AflMakeChk("Comb 전역",    true); _aflChkAeCombG.CheckedChanged    += (s, e) => onModelChk();
+            _aflChkAeCombAx   = AflMakeChk("Comb 축별",    true); _aflChkAeCombAx.CheckedChanged   += (s, e) => onModelChk();
+
+            // CLS 체크박스
+            _aflChkClsAccel  = AflMakeChk("Accel",    true); _aflChkClsAccel.CheckedChanged  += (s, e) => onModelChk();
+            _aflChkClsTorque = AflMakeChk("Torque",   true); _aflChkClsTorque.CheckedChanged += (s, e) => onModelChk();
+            _aflChkClsComb   = AflMakeChk("Combined", true); _aflChkClsComb.CheckedChanged   += (s, e) => onModelChk();
+
+            _aflModelFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill, AutoSize = false,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Padding = new Padding(0), Margin = new Padding(0),
+            };
+            _aflModelFlow.Controls.AddRange(new Control[]
+            {
+                _aflChkAll,
+                _aflChkAeAccelG, _aflChkAeTorqueG, _aflChkAeTorqueAx,
+                _aflChkAeCombG,  _aflChkAeCombAx,
+                _aflChkClsAccel, _aflChkClsTorque, _aflChkClsComb,
+            });
 
             // 프로파일 컨트롤
             var lblProfile = new Label
@@ -2114,26 +2156,30 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8.5f),
             };
 
-            // 상태 레이블은 2행으로 분리 (1행이 꽉 참)
-            tl.RowCount = 2;
+            // row0: 컨트롤 / row1: 모델 체크박스 / row2: 상태 레이블
+            tl.RowCount = 3;
             tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
 
-            tl.Controls.Add(lblUrl,           0, 0);
-            tl.Controls.Add(_aflUrl,           1, 0);
-            tl.Controls.Add(lblDag,            2, 0);
-            tl.Controls.Add(_aflDagId,         3, 0);
-            tl.Controls.Add(_aflTrainMode,     4, 0);
-            tl.Controls.Add(lblProfile,        5, 0);
-            tl.Controls.Add(_aflProfile,       6, 0);
-            tl.Controls.Add(lblProfileLbl,     7, 0);
-            tl.Controls.Add(_aflProfileLabel,  8, 0);
-            tl.Controls.Add(_aflBtnTrigger,    9, 0);
-            tl.Controls.Add(_aflBtnStatus,    10, 0);
+            tl.Controls.Add(lblUrl,          0, 0);
+            tl.Controls.Add(_aflUrl,          1, 0);
+            tl.Controls.Add(lblDag,           2, 0);
+            tl.Controls.Add(_aflDagId,        3, 0);
+            tl.Controls.Add(lblProfile,       4, 0);
+            tl.Controls.Add(_aflProfile,      5, 0);
+            tl.Controls.Add(lblProfileLbl,    6, 0);
+            tl.Controls.Add(_aflProfileLabel, 7, 0);
+            tl.Controls.Add(_aflBtnTrigger,   8, 0);
+            tl.Controls.Add(_aflBtnStatus,    9, 0);
 
-            // 상태 레이블: 2행 전체 span
-            tl.SetColumnSpan(_aflStatusLbl, 11);
-            tl.Controls.Add(_aflStatusLbl, 0, 1);
+            // row1: 모델 선택 체크박스 (전체 span)
+            tl.SetColumnSpan(_aflModelFlow, 10);
+            tl.Controls.Add(_aflModelFlow, 0, 1);
+
+            // row2: 상태 레이블 (전체 span)
+            tl.SetColumnSpan(_aflStatusLbl, 10);
+            tl.Controls.Add(_aflStatusLbl, 0, 2);
 
             // 초기 세션(CLS)에 맞는 항목 채우기
             UpdateAflTrainModeItems();
@@ -2142,40 +2188,41 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             return grp;
         }
 
-        /// <summary>AE/CLS 세션에 따라 _aflTrainMode 콤보박스 항목을 갱신합니다.</summary>
+        /// <summary>체크박스 생성 헬퍼.</summary>
+        private static CheckBox AflMakeChk(string text, bool isChecked) => new CheckBox
+        {
+            Text = text, Checked = isChecked, AutoSize = true,
+            Margin = new Padding(0, 4, 10, 0),
+        };
+
+        /// <summary>AE/CLS 세션에 따라 모델 선택 체크박스를 표시/숨깁니다.</summary>
         private void UpdateAflTrainModeItems()
         {
-            if (_aflTrainMode == null) return;
+            if (_aflModelFlow == null) return;
             if (this.InvokeRequired) { this.BeginInvoke(new Action(UpdateAflTrainModeItems)); return; }
 
             bool isAe = (_dlRdoAe?.Checked == true);
-            int prevIdx = _aflTrainMode.SelectedIndex;
 
-            _aflTrainMode.BeginUpdate();
-            _aflTrainMode.Items.Clear();
+            // AE 체크박스
+            _aflChkAeAccelG.Visible   = isAe;
+            _aflChkAeTorqueG.Visible  = isAe;
+            _aflChkAeTorqueAx.Visible = isAe;
+            _aflChkAeCombG.Visible    = isAe;
+            _aflChkAeCombAx.Visible   = isAe;
 
-            if (isAe)
-            {
-                // AE 세션: 전역/축별 구분 명시
-                _aflTrainMode.Items.Add("전체 (all)");           // 0 → 5개 ae_* 모두
-                _aflTrainMode.Items.Add("가속도 전역");           // 1 → ae_accel
-                _aflTrainMode.Items.Add("토크 전역");             // 2 → ae_torque_global
-                _aflTrainMode.Items.Add("토크 축별");             // 3 → ae_torque
-                _aflTrainMode.Items.Add("결합 전역");             // 4 → ae_combined_global
-                _aflTrainMode.Items.Add("결합 축별");             // 5 → ae_combined
-            }
-            else
-            {
-                // CLS 세션
-                _aflTrainMode.Items.Add("전체 (all)");           // 0 → accel + torque + combined
-                _aflTrainMode.Items.Add("가속도 (accel)");        // 1 → accel
-                _aflTrainMode.Items.Add("토크 (torque)");         // 2 → torque
-                _aflTrainMode.Items.Add("결합 (combined)");       // 3 → combined
-            }
+            // CLS 체크박스
+            _aflChkClsAccel.Visible  = !isAe;
+            _aflChkClsTorque.Visible = !isAe;
+            _aflChkClsComb.Visible   = !isAe;
 
-            _aflTrainMode.EndUpdate();
-            // 이전 인덱스가 새 항목 범위를 벗어나면 0으로 리셋
-            _aflTrainMode.SelectedIndex = (prevIdx < _aflTrainMode.Items.Count) ? prevIdx : 0;
+            // 세션 전환 시 전체 선택 상태 리셋
+            _aflUpdatingAll = true;
+            _aflChkAll.Checked = true;
+            foreach (Control c in _aflModelFlow.Controls)
+                if (c is CheckBox cb && cb != _aflChkAll) cb.Checked = true;
+            _aflUpdatingAll = false;
+
+            UpdateTriggerButtonText();
         }
 
         /// <summary>
@@ -2185,38 +2232,31 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void UpdateTriggerButtonText()
         {
             if (_aflBtnTrigger == null) return;
-            bool isAe    = (_dlRdoAe?.Checked == true);
-            int  modeIdx = _aflTrainMode?.SelectedIndex ?? 0;
+            bool isAe = (_dlRdoAe?.Checked == true);
 
             var tasks = new System.Collections.Generic.List<string>();
             if (isAe)
             {
-                // AE: 0=전체, 1=가속도전역, 2=토크전역, 3=토크축별, 4=결합전역, 5=결합축별
-                switch (modeIdx)
-                {
-                    case 0: tasks.AddRange(new[] { "AE-Accel(전역)", "AE-Torque(전역)", "AE-Torque(축별)", "AE-Combined(전역)", "AE-Combined(축별)" }); break;
-                    case 1: tasks.Add("AE-Accel(전역)");      break;
-                    case 2: tasks.Add("AE-Torque(전역)");     break;
-                    case 3: tasks.Add("AE-Torque(축별)");     break;
-                    case 4: tasks.Add("AE-Combined(전역)");   break;
-                    case 5: tasks.Add("AE-Combined(축별)");   break;
-                }
+                if (_aflChkAeAccelG?.Checked   == true) tasks.Add("Accel 전역");
+                if (_aflChkAeTorqueG?.Checked  == true) tasks.Add("Torque 전역");
+                if (_aflChkAeTorqueAx?.Checked == true) tasks.Add("Torque 축별");
+                if (_aflChkAeCombG?.Checked    == true) tasks.Add("Comb 전역");
+                if (_aflChkAeCombAx?.Checked   == true) tasks.Add("Comb 축별");
             }
             else
             {
-                // CLS: 0=전체, 1=가속도, 2=토크, 3=결합
-                switch (modeIdx)
-                {
-                    case 0: tasks.AddRange(new[] { "CLS-Accel", "CLS-Torque", "CLS-Combined" }); break;
-                    case 1: tasks.Add("CLS-Accel");    break;
-                    case 2: tasks.Add("CLS-Torque");   break;
-                    case 3: tasks.Add("CLS-Combined"); break;
-                }
+                if (_aflChkClsAccel?.Checked  == true) tasks.Add("Accel");
+                if (_aflChkClsTorque?.Checked == true) tasks.Add("Torque");
+                if (_aflChkClsComb?.Checked   == true) tasks.Add("Combined");
             }
 
-            string preview = tasks.Count > 0 ? string.Join(", ", tasks) : "없음";
-            string tipText = $"실행될 태스크: {preview}";
-            _aflBtnTrigger.Text = $"▶ 트리거 [{(isAe ? "AE" : "CLS")}]";
+            string label   = isAe ? "AE" : "CLS";
+            string preview = tasks.Count > 0
+                ? string.Join(" + ", tasks)
+                : "⚠ 없음 (1개 이상 선택 필요)";
+            string tipText = $"[{label}] 실행 태스크: {preview}";
+
+            _aflBtnTrigger.Text = $"▶ 트리거 [{label}]";
             if (_aflBtnTrigger.Tag is System.Windows.Forms.ToolTip tt)
                 tt.SetToolTip(_aflBtnTrigger, tipText);
             else
@@ -2250,47 +2290,30 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 return;
             }
 
-            // ── train_modes 결정: 세션(AE/CLS) × 콤보박스 선택 ─────────────────────
-            // AE  콤보 인덱스: 0=전체, 1=가속도전역, 2=토크전역, 3=토크축별, 4=결합전역, 5=결합축별
-            // CLS 콤보 인덱스: 0=전체, 1=가속도,     2=토크,     3=결합
+            // ── train_modes 결정: 체크박스 상태 읽기 ─────────────────────────────
             bool isAeSession = (_dlRdoAe?.Checked == true);
-            int  modeIdx     = _aflTrainMode?.SelectedIndex ?? 0;
 
             var modeList = new System.Collections.Generic.List<string>();
             if (isAeSession)
             {
-                switch (modeIdx)
-                {
-                    case 0:
-                        modeList.AddRange(new[] {
-                            "ae_accel",
-                            "ae_torque_global", "ae_torque",
-                            "ae_combined_global", "ae_combined"
-                        });
-                        break;
-                    case 1: modeList.Add("ae_accel");           break;
-                    case 2: modeList.Add("ae_torque_global");   break;
-                    case 3: modeList.Add("ae_torque");          break;
-                    case 4: modeList.Add("ae_combined_global"); break;
-                    case 5: modeList.Add("ae_combined");        break;
-                }
+                if (_aflChkAeAccelG?.Checked   == true) modeList.Add("ae_accel");
+                if (_aflChkAeTorqueG?.Checked  == true) modeList.Add("ae_torque_global");
+                if (_aflChkAeTorqueAx?.Checked == true) modeList.Add("ae_torque");
+                if (_aflChkAeCombG?.Checked    == true) modeList.Add("ae_combined_global");
+                if (_aflChkAeCombAx?.Checked   == true) modeList.Add("ae_combined");
             }
             else
             {
-                switch (modeIdx)
-                {
-                    case 0: modeList.AddRange(new[] { "accel", "torque", "combined" }); break;
-                    case 1: modeList.Add("accel");    break;
-                    case 2: modeList.Add("torque");   break;
-                    case 3: modeList.Add("combined"); break;
-                }
+                if (_aflChkClsAccel?.Checked  == true) modeList.Add("accel");
+                if (_aflChkClsTorque?.Checked == true) modeList.Add("torque");
+                if (_aflChkClsComb?.Checked   == true) modeList.Add("combined");
             }
             string[] trainModes = modeList.ToArray();
 
             if (trainModes.Length == 0)
             {
-                MessageBox.Show("선택된 학습 모드가 없습니다.",
-                                "학습 모드 없음", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("학습할 모델을 1개 이상 선택하세요.",
+                                "모델 미선택", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
