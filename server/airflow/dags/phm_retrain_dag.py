@@ -468,9 +468,10 @@ def run_training_ae_torque(**context) -> None:
         params["session"]           = "AE"
         params["sensor_type"]       = "torque"
         params["channels"]          = [f"Ax{ax}_Trq(%)"]
-        # Ax{n} 토크 AE는 해당 축이 실제로 움직이는(Pos) 구간만 학습해야
-        # 다른 축만 이동 중일 때의 near-zero 토크가 "정상"으로 오염되지 않음
-        params["filter_op_column"]  = f"Op_Ax{ax}"
+        # filter_op_column = None → idle + Pos 전체 구간 학습
+        # AE가 idle(near-zero 토크)도 "정상"으로 학습 → 정지 상태 추론 시 false alarm 없음
+        # (Pos 필터를 걸면 idle 데이터를 모델이 본 적 없어 → 정지 상태 추론 시 오차 폭증)
+        params["filter_op_column"]  = None
         params["augment_mode"]      = "mixed"
         params["normalize"]         = False
         params["output"] = str(profile_dir / f"ae_torque_ax{ax}.onnx")
@@ -572,7 +573,8 @@ def run_training_ae_combined(**context) -> None:
         params["session"]          = "AE"
         params["sensor_type"]      = "combined"
         params["channels"]         = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"] = f"Op_Ax{ax}"   # 해당 축 동작 구간만
+        # filter_op_column = None → idle + Pos 전체 구간 학습 (torque AE와 동일 방침)
+        params["filter_op_column"] = None
         params["augment_mode"]     = "standard"
         params["normalize"]        = True
         params["output"] = str(profile_dir / f"ae_combined_ax{ax}.onnx")

@@ -267,17 +267,19 @@ namespace PHM_Project_DockPanel.Services.Core
             string cp = _combinedLogger.OutputPath;
             if (string.IsNullOrEmpty(cp) || !File.Exists(cp)) return;
 
-            // 마지막으로 움직인 축 기준 (없으면 null — 전역 모델)
+            // combined CLS 모델은 Pos(모션) 구간 데이터로만 학습됨
+            // → filterOp 기본값(sensorType != "accel" = true) 그대로 사용: Pos 행만 입력
+            // → 정지 상태에서는 Pos 행 없음 → window=null → 추론 스킵 (false alarm 방지)
             int? axis = _lastMovingAxis;
 
             if (_axes != null)
             {
                 foreach (int ax in _axes)
-                    await RunClsInference(cp, "combined", ax, ct, filterOp: false);
+                    await RunClsInference(cp, "combined", ax, ct);
             }
             else
             {
-                await RunClsInference(cp, "combined", axis, ct, filterOp: false);
+                await RunClsInference(cp, "combined", axis, ct);
             }
         }
 
@@ -292,10 +294,14 @@ namespace PHM_Project_DockPanel.Services.Core
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            // AE 추론: Idle/Pos 무관하게 전체 행 사용 (filterOp=false)
+            // accel: 전역 단일 모델 — 전체 행 사용 (Op 필터 없음)
+            // torque: 학습 시 filter_op_column="Op_Ax{n}" (Pos 구간만 학습)
+            //         → 정지 상태 near-zero 토크를 입력하면 재구성 오차 폭증 → false alarm
+            //         → 학습과 동일하게 Pos 행만 사용해야 함
+            bool filterOp = sensorType != "accel";
             int ws = GetWindowSize(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: false);
+                filterOp: filterOp);
             if (window == null) return;
 
             InferenceResult result = await _client.PredictAsync(
