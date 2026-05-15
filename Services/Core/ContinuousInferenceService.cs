@@ -146,10 +146,13 @@ namespace PHM_Project_DockPanel.Services.Core
                 //   • 토크:   축별     → axis = n,    Op 필터 없음
                 await RunAeInferenceAll(ct);
 
-                // ── (2) CLS 추론: Pos 상태일 때만 실행 ────────────────────────
+                // ── (2) 결합 CLS: Idle/Pos 무관하게 항상 실행 ────────────────
+                //   filterOp=false — 전체 행 사용, AE 스코어 항상 갱신
+                await RunCombinedClsAll(ct);
+
+                // ── (3) 가속도/토크 CLS: Pos 상태일 때만 실행 ────────────────
                 //   • 가속도: 단일 센서 → axis = null, Op 필터 있음 (Pos 행만)
                 //   • 토크:   축별     → axis = n,    Op 필터 있음
-                //   • 결합:   축별     → axis = n,    Op 필터 있음
                 string op = GetCurrentOp();
                 if (op == "Pos")
                 {
@@ -226,11 +229,10 @@ namespace PHM_Project_DockPanel.Services.Core
                 if (string.IsNullOrEmpty(cp) || !File.Exists(cp)) return;
 
                 // 가속도 CLS: 단일 센서 → axis = null
-                await RunClsInference(cp, "accel",    null, ct);
+                await RunClsInference(cp, "accel",  null, ct);
                 // 토크 CLS: 축별
-                await RunClsInference(cp, "torque",   axis, ct);
-                // 결합 CLS: 축별
-                await RunClsInference(cp, "combined", axis, ct);
+                await RunClsInference(cp, "torque", axis, ct);
+                // 결합 CLS: RunCombinedClsAll에서 처리 (항상 실행, 여기서는 제외)
             }
             else
             {
@@ -251,6 +253,31 @@ namespace PHM_Project_DockPanel.Services.Core
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
                         await RunClsInference(p, "torque", axis, ct);
                 }
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────────
+        //  결합 CLS 추론 (항상 실행 — AE 스코어 갱신, Op 필터 없음)
+        // ──────────────────────────────────────────────────────────────────────
+
+        private async Task RunCombinedClsAll(CancellationToken ct)
+        {
+            // 결합 CSV가 없으면 스킵 (단독 가속도/토크 로거만 있을 때)
+            if (_combinedLogger == null || !_combinedLogger.IsLogging) return;
+            string cp = _combinedLogger.OutputPath;
+            if (string.IsNullOrEmpty(cp) || !File.Exists(cp)) return;
+
+            // 마지막으로 움직인 축 기준 (없으면 null — 전역 모델)
+            int? axis = _lastMovingAxis;
+
+            if (_axes != null)
+            {
+                foreach (int ax in _axes)
+                    await RunClsInference(cp, "combined", ax, ct, filterOp: false);
+            }
+            else
+            {
+                await RunClsInference(cp, "combined", axis, ct, filterOp: false);
             }
         }
 
@@ -286,15 +313,15 @@ namespace PHM_Project_DockPanel.Services.Core
         /// CLS 결함진단 추론 — filterOp=true (Pos 행만), /predict/combined 엔드포인트 사용.
         /// </summary>
         private async Task RunClsInference(
-            string csvPath, string sensorType, int? axis, CancellationToken ct)
+            string csvPath, string sensorType, int? axis, CancellationToken ct,
+            bool? filterOp = null)
         {
             int nCh;
-            // accel: 정지/운동 전부 포함 (Op 필터 없음)
-            // torque/combined: Pos 행만 사용
-            bool filterOp = sensorType != "accel";
+            // filterOp 명시 없으면: accel=false(전체), torque=true(Pos행만), combined=true(Pos행만)
+            bool useFilterOp = filterOp ?? (sensorType != "accel");
             int ws = GetWindowSize(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: filterOp);
+                filterOp: useFilterOp);
             if (window == null) return;
 
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
