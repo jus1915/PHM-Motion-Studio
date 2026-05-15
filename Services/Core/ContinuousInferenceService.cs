@@ -265,12 +265,10 @@ namespace PHM_Project_DockPanel.Services.Core
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            // accel: 정지/운동 전부 포함 (Op 필터 없음)
-            // torque/combined: Pos 행만 사용
-            bool filterOp = sensorType != "accel";
+            // AE 추론: Idle/Pos 무관하게 전체 행 사용 (filterOp=false)
             int ws = GetWindowSize(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: filterOp);
+                filterOp: false);
             if (window == null) return;
 
             InferenceResult result = await _client.PredictAsync(
