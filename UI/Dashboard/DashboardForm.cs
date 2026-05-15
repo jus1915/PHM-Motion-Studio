@@ -5049,13 +5049,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         /// </summary>
         private void OnLiveClsInferenceResult(string sensorType, CombinedInferenceResult combined)
         {
-            if (combined == null || combined.IsError || !combined.Axis.HasValue) return;
+            if (combined == null || combined.IsError) return;
             if (!_IsSensorEnabled(sensorType)) return;
 
             bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
 
             // ── combined AE 스코어를 차트 큐에 추가 (RunAeInference가 combined에 대해 호출되지 않으므로
-            //    여기서 직접 처리한다. ConcurrentDictionary/Queue이므로 UI 스레드 불필요) ──────────────
+            //    여기서 직접 처리한다. axis=null(전역 모델)인 경우도 포함.
+            //    ConcurrentDictionary/Queue이므로 UI 스레드 불필요) ────────────────────────────────────
             if (combined.AnomalyScore >= 0)
             {
                 string chartKey = combined.Axis.HasValue
@@ -5081,6 +5082,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
+                // axis 없는 결과(전역 단일 모델)는 DGV 매트릭스 갱신 스킵 — 차트 큐는 이미 위에서 추가됨
+                if (!combined.Axis.HasValue)
+                {
+                    // 모델 정보 라벨만 갱신
+                    bool isCombinedSensorOnly = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
+                    if (!string.IsNullOrEmpty(combined.AeModelFile) || !string.IsNullOrEmpty(combined.ClsModelFile))
+                        UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile, isCombinedSensorOnly);
+                    return;
+                }
+
                 string clsName;
                 object confVal;
                 if (!combined.ClsAvailable)

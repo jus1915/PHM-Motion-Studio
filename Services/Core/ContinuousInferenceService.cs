@@ -177,10 +177,12 @@ namespace PHM_Project_DockPanel.Services.Core
                 // 가속도 AE: 단일 센서 → axis = null
                 await RunAeInference(cp, "accel", null, ct);
 
-                // 토크 AE: 축별
+                // 토크 AE: 축별 (제어기 미연결 시 axis=null로 단일 추론)
                 if (_axes != null)
                     foreach (int ax in _axes)
                         await RunAeInference(cp, "torque", ax, ct);
+                else
+                    await RunAeInference(cp, "torque", null, ct);
             }
             else
             {
