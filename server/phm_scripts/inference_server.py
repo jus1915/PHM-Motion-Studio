@@ -777,10 +777,9 @@ def _ae_score(
     # ── 재구성 오차: 학습 임계값 캘리브레이션과 동일한 공식 사용 ────────────────
     # 학습 시: per_sample_mae = abs(model(x)-x).mean(dim=(1,2)) = 전체 (T,C) 평균
     # 추론 시: 동일하게 전체 (T,C) 평균 → 임계값 비교가 일관성 유지됨
-    # (peak 혼합 공식은 임계값보다 체계적으로 높게 나와 정상 상태에서 false positive 유발)
     err_per_step = np.abs(proc_arr - recon).mean(axis=-1)[0]  # (T,) 시간축 오차
     mae_mean = float(err_per_step.mean())
-    mae      = mae_mean   # 학습 임계값 = per_sample MAE mean → 추론도 동일
+    mae      = mae_mean
 
     rms       = float(np.sqrt(np.mean(raw_arr.astype(np.float64) ** 2)))
     rms_thr   = float(meta.get("rms_thr",  float("inf")))
@@ -792,13 +791,30 @@ def _ae_score(
     else:
         rms_norm = 0.0
 
-    if sensor_type == "accel":
-        TH_SCALE = 1.0; RMS_WEIGHT = 0.3; ANOMALY_THRESHOLD = 1.0
-    else:
-        TH_SCALE = 1.0; RMS_WEIGHT = 0.3; ANOMALY_THRESHOLD = 1.0
+    # ── log₂(1 + ratio) 스코어 ───────────────────────────────────────────────
+    # 선형 mae/thr 은 normalize=False 모델(토크 등)에서 mae_thr 이 매우 작아지면
+    # 이상 시 수백~수천까지 폭증하여 시각화/비교가 불가능해짐.
+    #
+    # log₂(1 + ratio) 변환:
+    #   ratio = mae / thr
+    #   ratio = 0.0  → score_mae = 0.000  (완전 정상)
+    #   ratio = 1.0  → score_mae = 1.000  ← 임계값 그대로 보존
+    #   ratio = 10   → score_mae = 3.459
+    #   ratio = 100  → score_mae = 6.658
+    #   ratio = 1000 → score_mae = 9.967
+    #
+    # is_anomaly 판정은 변환 후 score_normed >= 1.0 (동일 기준 유지).
+    import math
+    ratio     = mae / max(thr, 1e-8)
+    score_mae = math.log2(1.0 + ratio)
 
-    mae_norm     = mae / max(thr * TH_SCALE, 1e-8)
-    score_normed = mae_norm + RMS_WEIGHT * rms_norm
+    # rms 기여도도 동일 스케일로 압축
+    score_rms = math.log2(1.0 + rms_norm) if rms_norm > 0.0 else 0.0
+
+    RMS_WEIGHT        = 0.3
+    ANOMALY_THRESHOLD = 1.0
+
+    score_normed = score_mae + RMS_WEIGHT * score_rms
     is_anomaly   = score_normed >= ANOMALY_THRESHOLD
     return is_anomaly, score_normed, mae, thr
 
