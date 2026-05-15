@@ -1,0 +1,29 @@
+# PHM Airflow Scheduler — CPU / GPU 선택 빌드
+# ================================================
+# 베이스: apache/airflow:2.9.2 (Python 3.12)
+#
+# 빌드 인수 TORCH_DEVICE:
+#   cpu    → CPU 전용 PyTorch (~300 MB)   ← 기본값
+#   cu121  → CUDA 12.1  (드라이버 ≥ 525, ~2.5 GB)
+#   cu118  → CUDA 11.8  (드라이버 ≥ 450, ~2.5 GB)
+#
+# 사용 예:
+#   docker compose build                              # CPU (기본)
+#   TORCH_DEVICE=cu121 docker compose build          # GPU CUDA 12.1
+#   docker compose build --build-arg TORCH_DEVICE=cu118  # GPU CUDA 11.8
+
+FROM apache/airflow:2.9.2
+
+ARG TORCH_DEVICE=cpu
+
+# PyTorch 설치 (TORCH_DEVICE 에 따라 index-url 결정)
+RUN pip install --no-cache-dir \
+        torch torchvision \
+        --index-url "https://download.pytorch.org/whl/${TORCH_DEVICE}"
+
+# PHM 학습 의존 패키지
+RUN pip install --no-cache-dir \
+        mlflow==2.14.3 \
+        scikit-learn \
+        skl2onnx \
+        onnx
