@@ -196,7 +196,28 @@ services:
       # MLflow 추적 서버 URI — 클라이언트가 HTTP를 통해 아티팩트 업로드
       MLFLOW_TRACKING_URI: http://mlflow:5000
     depends_on:
-      - airflow-init
+      airflow-init:
+        condition: service_completed_successfully
+
+  # --------------------------------------------------------------------------
+  # 볼륨 권한 초기화 (one-shot)
+  #   airflow 사용자(UID 50000)가 bind-mount 디렉토리에 쓸 수 있도록
+  #   root 로 실행하여 chmod 777 적용 후 즉시 종료.
+  # --------------------------------------------------------------------------
+  phm-fix-perms:
+    image: alpine:3.19
+    user: root
+    restart: "no"
+    volumes:
+      - ./phm_models:/opt/phm/models
+      - ./phm_data:/opt/phm/data
+    command: >
+      sh -c "
+        mkdir -p /opt/phm/models/default &&
+        mkdir -p /opt/phm/data &&
+        chmod -R 777 /opt/phm/models /opt/phm/data &&
+        echo '[phm-fix-perms] 권한 설정 완료'
+      "
 
   # --------------------------------------------------------------------------
   # Airflow scheduler  ★ GPU 학습 전용 이미지 (Dockerfile.airflow-gpu)
@@ -242,7 +263,10 @@ services:
               count: 1
               capabilities: [gpu]
     depends_on:
-      - airflow-init
+      airflow-init:
+        condition: service_completed_successfully
+      phm-fix-perms:
+        condition: service_completed_successfully
 
 # ----------------------------------------------------------------------------
 # Named volumes
