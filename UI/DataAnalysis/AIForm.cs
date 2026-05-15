@@ -1976,7 +1976,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private void RunSetupVenv()
         {
             // ── 선택 다이얼로그 ────────────────────────────────────────
-            using var dlg = new Form
+            string choice;
+            using (var dlg = new Form
             {
                 Text            = "환경 설치",
                 Width           = 360,
@@ -1985,36 +1986,37 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 StartPosition   = FormStartPosition.CenterParent,
                 MaximizeBox     = false,
                 MinimizeBox     = false,
-            };
-            var lbl = new Label
+            })
             {
-                Text     = "설치 항목을 선택하세요:",
-                Left     = 16, Top = 16, Width = 320, Height = 20,
-            };
-            var btnLocal = new Button
-            {
-                Text   = "🐍  로컬 가상환경 설치",
-                Left   = 16, Top = 48, Width = 150, Height = 36,
-            };
-            var btnServer = new Button
-            {
-                Text   = "🚀  서버 GPU Docker 빌드",
-                Left   = 178, Top = 48, Width = 155, Height = 36,
-            };
-            var btnCancel = new Button
-            {
-                Text         = "취소",
-                Left         = 254, Top = 92, Width = 79, Height = 26,
-                DialogResult = DialogResult.Cancel,
-            };
-            dlg.Controls.AddRange(new Control[] { lbl, btnLocal, btnServer, btnCancel });
-            dlg.CancelButton = btnCancel;
-            btnLocal.Click  += (s, e) => { dlg.Tag = "local";  dlg.Close(); };
-            btnServer.Click += (s, e) => { dlg.Tag = "server"; dlg.Close(); };
+                var lbl = new Label
+                {
+                    Text   = "설치 항목을 선택하세요:",
+                    Left   = 16, Top = 16, Width = 320, Height = 20,
+                };
+                var btnLocal = new Button
+                {
+                    Text = "🐍  로컬 가상환경 설치",
+                    Left = 16, Top = 48, Width = 150, Height = 36,
+                };
+                var btnServer = new Button
+                {
+                    Text = "🚀  서버 GPU Docker 빌드",
+                    Left = 178, Top = 48, Width = 155, Height = 36,
+                };
+                var btnCancel = new Button
+                {
+                    Text         = "취소",
+                    Left         = 254, Top = 92, Width = 79, Height = 26,
+                    DialogResult = DialogResult.Cancel,
+                };
+                dlg.Controls.AddRange(new Control[] { lbl, btnLocal, btnServer, btnCancel });
+                dlg.CancelButton = btnCancel;
+                btnLocal.Click  += (s, e) => { dlg.Tag = "local";  dlg.Close(); };
+                btnServer.Click += (s, e) => { dlg.Tag = "server"; dlg.Close(); };
 
-            dlg.ShowDialog(this);
-
-            string? choice = dlg.Tag as string;
+                dlg.ShowDialog(this);
+                choice = dlg.Tag as string;
+            }
             if (choice == null) return;
 
             // ── 공통 helpers ───────────────────────────────────────────
