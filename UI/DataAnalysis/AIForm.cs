@@ -1975,30 +1975,85 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void RunSetupVenv()
         {
+            // ── 선택 다이얼로그 ────────────────────────────────────────
+            using var dlg = new Form
+            {
+                Text            = "환경 설치",
+                Width           = 360,
+                Height          = 160,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition   = FormStartPosition.CenterParent,
+                MaximizeBox     = false,
+                MinimizeBox     = false,
+            };
+            var lbl = new Label
+            {
+                Text     = "설치 항목을 선택하세요:",
+                Left     = 16, Top = 16, Width = 320, Height = 20,
+            };
+            var btnLocal = new Button
+            {
+                Text   = "🐍  로컬 가상환경 설치",
+                Left   = 16, Top = 48, Width = 150, Height = 36,
+            };
+            var btnServer = new Button
+            {
+                Text   = "🚀  서버 GPU Docker 빌드",
+                Left   = 178, Top = 48, Width = 155, Height = 36,
+            };
+            var btnCancel = new Button
+            {
+                Text         = "취소",
+                Left         = 254, Top = 92, Width = 79, Height = 26,
+                DialogResult = DialogResult.Cancel,
+            };
+            dlg.Controls.AddRange(new Control[] { lbl, btnLocal, btnServer, btnCancel });
+            dlg.CancelButton = btnCancel;
+            btnLocal.Click  += (s, e) => { dlg.Tag = "local";  dlg.Close(); };
+            btnServer.Click += (s, e) => { dlg.Tag = "server"; dlg.Close(); };
+
+            dlg.ShowDialog(this);
+
+            string? choice = dlg.Tag as string;
+            if (choice == null) return;
+
+            // ── 공통 helpers ───────────────────────────────────────────
             string scriptsDir = System.IO.Path.Combine(
                 System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
-            string batPath = System.IO.Path.Combine(scriptsDir, "setup_venv.bat");
-            if (!System.IO.File.Exists(batPath))
+
+            void RunBat(string fileName, string logMsg)
             {
-                MessageBox.Show("setup_venv.bat 를 찾을 수 없습니다:\n" + batPath,
-                    "파일 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                string batPath = System.IO.Path.Combine(scriptsDir, fileName);
+                if (!System.IO.File.Exists(batPath))
                 {
-                    FileName         = batPath,
-                    WorkingDirectory = scriptsDir,
-                    UseShellExecute  = true,
-                });
-                AppendDlLog("[가상환경] setup_venv.bat 실행 중 — 완료 후 학습 시작 가능합니다.", Color.Cyan);
+                    MessageBox.Show($"{fileName} 를 찾을 수 없습니다:\n{batPath}",
+                        "파일 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName         = batPath,
+                        WorkingDirectory = scriptsDir,
+                        UseShellExecute  = true,
+                    });
+                    AppendDlLog(logMsg, Color.Cyan);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"{fileName} 실행 실패:\n{ex.Message}",
+                        "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show("setup_venv.bat 실행 실패:\n" + ex.Message,
-                    "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+
+            // ── 선택 분기 ──────────────────────────────────────────────
+            if (choice == "local")
+                RunBat("setup_venv.bat",
+                    "[가상환경] setup_venv.bat 실행 중 — 완료 후 학습 시작 가능합니다.");
+            else
+                RunBat("setup_docker_gpu.bat",
+                    "[서버 GPU] setup_docker_gpu.bat 실행 중 — SSH로 서버에 접속합니다.");
         }
 
         private void StopDlTraining()

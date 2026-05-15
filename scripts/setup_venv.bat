@@ -89,11 +89,39 @@ echo [4/5] 패키지 설치: numpy scikit-learn skl2onnx onnx onnxscript...
     onnxscript
 if errorlevel 1 ( echo [오류] 패키지 설치 실패 & pause & exit /b 1 )
 
-REM ── [5/5] PyTorch CPU ───────────────────────────────────────────
-echo [5/5] PyTorch CPU 설치 중 (수 분 소요)...
-.venv\Scripts\pip.exe install --quiet torch ^
-    --index-url https://download.pytorch.org/whl/cpu
+REM ── [5/5] PyTorch (GPU / CPU 선택) ─────────────────────────────
+echo [5/5] PyTorch 설치 방식을 선택하세요.
+echo.
+echo   [1] CPU 전용  — 로컬 학습용, 빠른 설치 (~300 MB)
+echo   [2] CUDA 12.1 — NVIDIA GPU (드라이버 ^>= 525),  (~2.5 GB)
+echo   [3] CUDA 11.8 — NVIDIA GPU 구형 드라이버 ^>= 450, (~2.5 GB)
+echo.
+set /p TORCH_OPT="선택 (1/2/3, 기본 1): "
+if "!TORCH_OPT!"=="" set TORCH_OPT=1
+
+if "!TORCH_OPT!"=="2" (
+    echo [5/5] PyTorch CUDA 12.1 설치 중 (수 분 소요)...
+    .venv\Scripts\pip.exe install --quiet torch torchvision ^
+        --index-url https://download.pytorch.org/whl/cu121
+) else if "!TORCH_OPT!"=="3" (
+    echo [5/5] PyTorch CUDA 11.8 설치 중 (수 분 소요)...
+    .venv\Scripts\pip.exe install --quiet torch torchvision ^
+        --index-url https://download.pytorch.org/whl/cu118
+) else (
+    echo [5/5] PyTorch CPU 설치 중...
+    .venv\Scripts\pip.exe install --quiet torch torchvision ^
+        --index-url https://download.pytorch.org/whl/cpu
+)
 if errorlevel 1 ( echo [오류] PyTorch 설치 실패 & pause & exit /b 1 )
+
+REM ── GPU 동작 확인 (GPU 선택 시) ─────────────────────────────────
+if not "!TORCH_OPT!"=="1" (
+    echo.
+    echo [확인] CUDA 사용 가능 여부...
+    .venv\Scripts\python.exe -c ^
+        "import torch; print('CUDA 사용 가능:', torch.cuda.is_available()); ^
+         print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else '없음')"
+)
 
 REM ── 선택: MLflow ────────────────────────────────────────────────
 set /p INSTALL_MLFLOW="MLflow도 설치할까요? (y/N): "
