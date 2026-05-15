@@ -1107,8 +1107,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Padding = new Padding(6, 4, 6, 6), Margin = Padding.Empty,
                 BackColor = Color.FromArgb(245, 247, 250)
             };
-            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44));
-            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 56));
+            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 57));
+            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 43));
             mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 38));   // 상단 행 (KPI + 분류 현황)
             mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 62));   // 하단 행 (차트 + 이벤트)
 
@@ -1199,7 +1199,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _dualChartPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1,
-                Padding = new Padding(0, 4, 4, 0), Margin = Padding.Empty,
+                Padding = new Padding(0, 2, 2, 0), Margin = Padding.Empty,
                 BackColor = Color.FromArgb(245, 247, 250)
             };
             _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
@@ -1356,6 +1356,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White, MinimumSize = new Size(1, 1) };
             var ca = new ChartArea("a") { BackColor = Color.White };
+            // 플롯 영역 내부 여백 최소화 (우측 공백 축소)
+            ca.Position          = new ElementPosition(0, 0, 100, 100);
+            ca.InnerPlotPosition = new ElementPosition(7, 4, 91, 88);
             ca.AxisX.LabelStyle.Format   = "HH:mm:ss";
             ca.AxisX.IntervalAutoMode    = IntervalAutoMode.VariableCount;
             ca.AxisX.MajorGrid.Enabled   = true;
@@ -1403,7 +1406,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var panel = new Panel
             {
                 Dock = DockStyle.Fill, BackColor = Color.White,
-                Margin = new Padding(3), Padding = Padding.Empty,
+                Margin = new Padding(2), Padding = Padding.Empty,
                 MinimumSize = new Size(1, 10)
             };
             panel.Paint += (s, e) =>
@@ -5051,6 +5054,30 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
 
+            // ── combined AE 스코어를 차트 큐에 추가 (RunAeInference가 combined에 대해 호출되지 않으므로
+            //    여기서 직접 처리한다. ConcurrentDictionary/Queue이므로 UI 스레드 불필요) ──────────────
+            if (combined.AnomalyScore >= 0)
+            {
+                string chartKey = combined.Axis.HasValue
+                    ? $"{sensorType}_ax{combined.Axis.Value}"
+                    : sensorType;
+                if (combined.Threshold > 0)
+                    _axisThresholds.TryAdd(chartKey, (double)combined.Threshold);
+                double axThr2   = _axisThresholds.TryGetValue(chartKey, out double tv) ? tv : 1.0;
+                double norm2    = axThr2 > 0 ? (double)combined.AnomalyScore / axThr2 : (double)combined.AnomalyScore;
+                double prevEma2 = _chartEma.GetOrAdd(chartKey, norm2);
+                double smooth2  = ChartEmaAlpha * norm2 + (1.0 - ChartEmaAlpha) * prevEma2;
+                _chartEma[chartKey] = smooth2;
+                _liveScoreQueue.Enqueue(Tuple.Create(chartKey, DateTime.Now, smooth2));
+                while (_liveScoreQueue.Count > 6000)
+                { Tuple<string, DateTime, double> _d; _liveScoreQueue.TryDequeue(out _d); }
+
+                double prevMa2 = _chartMaEma.GetOrAdd(chartKey, norm2);
+                double ma2     = ChartMaAlpha * norm2 + (1.0 - ChartMaAlpha) * prevMa2;
+                _chartMaEma[chartKey] = ma2;
+                _liveMaQueue.Enqueue(Tuple.Create(chartKey, DateTime.Now, ma2));
+            }
+
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
@@ -5286,29 +5313,29 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             _classMatrixDgv.RowTemplate.Height = 24;
 
-            // col 0: 축
+            // col 0: 축 — 최소 너비
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "Axis",    HeaderText = "축",       Width = 34, ReadOnly = true });
+                { Name = "Axis",    HeaderText = "축",     Width = 28, MinimumWidth = 28, ReadOnly = true });
             // col 1-2: AE 토크 (per-axis)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TScore",  HeaderText = "AE 토크",  Width = 80, ReadOnly = true,
+                { Name = "TScore",  HeaderText = "AE 토크", Width = 62, MinimumWidth = 58, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TState",  HeaderText = "판정",     Width = 68, ReadOnly = true });
+                { Name = "TState",  HeaderText = "판정",   Width = 52, MinimumWidth = 48, ReadOnly = true });
             // col 3-4: CLS 토크 결함 (per-axis)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TCLS",    HeaderText = "토크 결함",  Width = 90, ReadOnly = true });
+                { Name = "TCLS",    HeaderText = "토크 결합", Width = 68, MinimumWidth = 60, ReadOnly = true });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TCLSC",   HeaderText = "신뢰도",   Width = 52, ReadOnly = true,
+                { Name = "TCLSC",   HeaderText = "신뢰도",  Width = 42, MinimumWidth = 38, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
             // col 5-6: CLS 결합 결함 (per-axis)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "CCLS",    HeaderText = "결합 결함",  Width = 90, ReadOnly = true });
+                { Name = "CCLS",    HeaderText = "결합 결함", Width = 68, MinimumWidth = 60, ReadOnly = true });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "CCLSC",   HeaderText = "신뢰도",   Width = 52, ReadOnly = true,
+                { Name = "CCLSC",   HeaderText = "신뢰도",  Width = 42, MinimumWidth = 38, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
 
-            // 마지막 열은 남은 공간 채우기
+            // 마지막 열은 남은 공간 채우기 (DGV가 부모보다 넓어질 경우 자동 조정)
             _classMatrixDgv.Columns[CMG_COL_CCLSCONF].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
             _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
