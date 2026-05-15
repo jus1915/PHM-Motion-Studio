@@ -2061,8 +2061,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
                 Margin = new Padding(2, 4, 2, 4),
             };
-            // 항목은 UpdateAflTrainModeItems() 에서 AE/CLS 세션에 맞게 채움
-            _aflTrainMode.SelectedIndex = 0;
+            // 항목은 아래 UpdateAflTrainModeItems() 호출에서 채워짐 (SelectedIndex도 거기서 설정)
             _aflTrainMode.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
 
             // 프로파일 컨트롤
