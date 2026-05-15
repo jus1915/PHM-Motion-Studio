@@ -39,6 +39,12 @@ namespace PHM_Project_DockPanel.Services.Core
 
         private int? _lastMovingAxis = null;
 
+        /// <summary>
+        /// CLS(결함진단) 추론 활성화 여부. 기본 false — AE 이상탐지만 실행.
+        /// true로 설정 시 RunClsInferenceAll / RunCombinedClsAll 호출.
+        /// </summary>
+        public bool EnableCls { get; set; } = false;
+
         public bool IsRunning => _loopTask != null && !_loopTask.IsCompleted;
 
         public ContinuousInferenceService(
@@ -146,22 +152,23 @@ namespace PHM_Project_DockPanel.Services.Core
                 //   • 토크:   축별     → axis = n,    Op 필터 없음
                 await RunAeInferenceAll(ct);
 
-                // ── (2) 결합 CLS: Idle/Pos 무관하게 항상 실행 ────────────────
-                //   filterOp=false — 전체 행 사용, AE 스코어 항상 갱신
-                await RunCombinedClsAll(ct);
-
-                // ── (3) 가속도/토크 CLS: Pos 상태일 때만 실행 ────────────────
-                //   • 가속도: 단일 센서 → axis = null, Op 필터 있음 (Pos 행만)
-                //   • 토크:   축별     → axis = n,    Op 필터 있음
-                string op = GetCurrentOp();
-                if (op == "Pos")
+                // ── (2) CLS 추론: EnableCls=true 일 때만 실행 ────────────────
+                if (EnableCls)
                 {
-                    int? curAxis = GetMovingAxis();
-                    if (curAxis.HasValue)
-                        _lastMovingAxis = curAxis;
-                    int? clsAxis = _lastMovingAxis;
+                    // 결합 CLS: Idle/Pos 무관하게 항상 실행
+                    await RunCombinedClsAll(ct);
 
-                    await RunClsInferenceAll(clsAxis, ct);
+                    // 가속도/토크 CLS: Pos 상태일 때만 실행
+                    string op = GetCurrentOp();
+                    if (op == "Pos")
+                    {
+                        int? curAxis = GetMovingAxis();
+                        if (curAxis.HasValue)
+                            _lastMovingAxis = curAxis;
+                        int? clsAxis = _lastMovingAxis;
+
+                        await RunClsInferenceAll(clsAxis, ct);
+                    }
                 }
             }
         }
