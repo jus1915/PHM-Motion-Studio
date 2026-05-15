@@ -1,0 +1,36 @@
+# PHM Airflow Scheduler — GPU 학습 지원 이미지
+# ================================================
+# 베이스: apache/airflow:2.9.2 (Ubuntu 22.04 기반)
+# CUDA 12.1 빌드 PyTorch 사전 설치 → 컨테이너 시작 시 재설치 없음
+#
+# 호스트 전제 조건 (서버 PC):
+#   1. NVIDIA 드라이버 ≥ 525  (nvidia-smi 로 버전 확인)
+#   2. nvidia-container-toolkit 설치
+#      → https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#      Ubuntu 예시:
+#        distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+#        curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+#        curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list \
+#          | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+#        sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+#        sudo systemctl restart docker
+#
+# CUDA 버전 선택:
+#   CUDA 12.1 → cu121  (드라이버 ≥ 525)  ← 기본값
+#   CUDA 11.8 → cu118  (드라이버 ≥ 450)  구형 GPU
+#   변경 시 아래 --index-url 의 cu121 을 해당 버전으로 교체
+
+FROM apache/airflow:2.9.2
+
+# airflow 사용자(UID 50000)로 직접 pip 설치
+# GPU PyTorch (CUDA 12.1)
+RUN pip install --no-cache-dir \
+        torch torchvision \
+        --index-url https://download.pytorch.org/whl/cu121
+
+# PHM 학습 의존 패키지
+RUN pip install --no-cache-dir \
+        mlflow==2.14.3 \
+        scikit-learn \
+        skl2onnx \
+        onnx

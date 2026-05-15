@@ -199,10 +199,16 @@ services:
       - airflow-init
 
   # --------------------------------------------------------------------------
-  # Airflow scheduler
+  # Airflow scheduler  ★ GPU 학습 전용 이미지 (Dockerfile.airflow-gpu)
+  #   - CUDA 12.1 PyTorch 사전 설치 → 매 시작 시 재설치 없음
+  #   - deploy.resources 로 호스트 GPU 1개 할당
+  #   - 호스트에 nvidia-container-toolkit 설치 필요
   # --------------------------------------------------------------------------
   airflow-scheduler:
-    image: apache/airflow:2.9.2
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow-gpu
+    image: phm_airflow_gpu:2.9.2   # 빌드 후 로컬 캐시 태그
     container_name: phm_airflow_scheduler
     restart: unless-stopped
     command: scheduler
@@ -221,9 +227,20 @@ services:
       PHM_SCRIPTS_DIR: /opt/phm/scripts
       PHM_DATA_ROOT: /opt/phm/data
       PHM_MODELS_ROOT: /opt/phm/models
-      _PIP_ADDITIONAL_REQUIREMENTS: "mlflow==2.14.3 scikit-learn skl2onnx onnx torch torchvision"
+      # PyTorch / MLflow 등은 Dockerfile 에서 설치 완료 → 재설치 제외
+      _PIP_ADDITIONAL_REQUIREMENTS: ""
       GIT_PYTHON_REFRESH: quiet
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # CUDA 가시성
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       - airflow-init
 
