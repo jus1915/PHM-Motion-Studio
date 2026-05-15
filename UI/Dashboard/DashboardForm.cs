@@ -4520,6 +4520,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 ls.Points.AddXY(liveItem.Item2.ToOADate(), liveItem.Item3);
                 if (liveItem.Item2 > latestTime) latestTime = liveItem.Item2;
             }
+            // 체크박스 상태에 따라 각 차트 래퍼 Visible 동기화 (히스토리 즉시 표시용)
+            // (실제 show/hide는 _UpdateChartLayout이 담당하므로 여기선 패스)
 
             if (latestTime == DateTime.MinValue) latestTime = DateTime.Now;
             double xMax = latestTime.AddSeconds(10).ToOADate();
@@ -4838,12 +4840,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private void OnLiveInferenceResult(string sensorType, InferenceResult result)
         {
             if (result == null) return;
-            if (!_IsSensorEnabled(sensorType)) return;
 
-            // 서버 오류 응답: 칩에 오류 상태 표시 후 즉시 반환
+            // 서버 오류 응답: 칩에 오류 상태 표시 후 즉시 반환 (센서 표시 여부 무관)
             if (result.IsError)
             {
-                // key 복원: axis 정보가 없으므로 sensorType만 사용
+                if (!_IsSensorEnabled(sensorType)) return;
                 string errKey = sensorType;
                 if (!IsHandleCreated || IsDisposed) return;
                 BeginInvoke(new Action(() =>
@@ -4868,16 +4869,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                          ? $"{sensorType}_ax{result.Axis.Value}"
                          : sensorType;
 
-            // 축별 임계값 초기화: 파일에 저장된 값 없으면 서버 전달값으로 초기화
+            // ── 차트 큐 적재: 체크박스 상태와 무관하게 항상 실행 ──────────────
+            // (체크박스는 UI 표시 여부만 제어. 나중에 활성화 시 즉시 데이터 표시 가능)
             if (result.Threshold > 0)
                 _axisThresholds.TryAdd(key, result.Threshold);
 
-            // 정규화 스코어를 차트 큐에 추가 (score / threshold → 임계선 항상 1.0)
             double axThr      = _axisThresholds.TryGetValue(key, out double t) ? t : 1.0;
             double normScore  = axThr > 0 ? (double)result.AnomalyScore / axThr : (double)result.AnomalyScore;
 
-            // EMA 평활화 적용 (차트 노이즈 감소 — 이상 판정은 rawScore 기반으로 별도 수행)
-            // ── 단기 EMA (차트 raw선) ─────────────────────────────────────────
             double prevEma    = _chartEma.GetOrAdd(key, normScore);
             double smoothed   = ChartEmaAlpha * normScore + (1.0 - ChartEmaAlpha) * prevEma;
             _chartEma[key]    = smoothed;
@@ -4889,7 +4888,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _liveScoreQueue.TryDequeue(out _discard);
             }
 
-            // ── 장기 EMA (MA 이평선) ──────────────────────────────────────────
             double prevMa  = _chartMaEma.GetOrAdd(key, normScore);
             double maScore = ChartMaAlpha * normScore + (1.0 - ChartMaAlpha) * prevMa;
             _chartMaEma[key] = maScore;
@@ -4901,7 +4899,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _liveMaQueue.TryDequeue(out _discardMa);
             }
 
-            // UI 컨트롤 업데이트는 UI 스레드에서
+            // ── UI 칩/이벤트 업데이트: 체크박스 활성화 시에만 ────────────────
+            if (!_IsSensorEnabled(sensorType)) return;
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
@@ -5050,13 +5049,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private void OnLiveClsInferenceResult(string sensorType, CombinedInferenceResult combined)
         {
             if (combined == null || combined.IsError) return;
-            if (!_IsSensorEnabled(sensorType)) return;
 
             bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
 
-            // ── combined AE 스코어를 차트 큐에 추가 (RunAeInference가 combined에 대해 호출되지 않으므로
-            //    여기서 직접 처리한다. axis=null(전역 모델)인 경우도 포함.
-            //    ConcurrentDictionary/Queue이므로 UI 스레드 불필요) ────────────────────────────────────
+            // ── combined AE 스코어를 차트 큐에 추가: 체크박스 상태와 무관하게 항상 실행 ──────────────
+            // (axis=null 전역 모델 포함. ConcurrentDictionary/Queue이므로 UI 스레드 불필요)
             if (combined.AnomalyScore >= 0)
             {
                 string chartKey = combined.Axis.HasValue
@@ -5079,6 +5076,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _liveMaQueue.Enqueue(Tuple.Create(chartKey, DateTime.Now, ma2));
             }
 
+            // UI 칩/이벤트/매트릭스 업데이트: 체크박스 활성화 시에만
+            if (!_IsSensorEnabled(sensorType)) return;
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
