@@ -392,14 +392,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2", "combined_ax0")
         private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
         private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
+        private Chart _chartCombined;               // 결합(Combined) 서버 추론 스코어 차트
         private bool  _liveChartFirstData = true;   // 첫 실데이터 수신 시 스켈레톤 제거 플래그
         private Label _lblAccelModelInfo;           // 가속도 차트 모델 정보 라벨
         private Label _lblTorqueModelInfo;          // 토크 차트 모델 정보 라벨
+        private Label _lblCombinedModelInfo;        // 결합 차트 모델 정보 라벨
         private TableLayoutPanel _dualChartPanel;   // 이상 스코어 차트 컨테이너 (동적 열 너비 조정용)
         private Panel _accelChartWrap;              // 가속도 차트 래퍼 패널
         private Panel _torqueChartWrap;             // 토크 차트 래퍼 패널
-        private readonly System.Collections.Generic.HashSet<string> _seenAccelModels  = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private readonly System.Collections.Generic.HashSet<string> _seenTorqueModels = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private Panel _combinedChartWrap;           // 결합 차트 래퍼 패널
+        private readonly System.Collections.Generic.HashSet<string> _seenAccelModels    = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Generic.HashSet<string> _seenTorqueModels   = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Generic.HashSet<string> _seenCombinedModels = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
 
         // ── 센서 표시 필터 체크박스 ──────────────────────────────────────────
@@ -746,8 +750,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         _consecutiveAnomalyCount.Clear();
                         _seenAccelModels.Clear();
                         _seenTorqueModels.Clear();
-                        if (_lblAccelModelInfo != null) _lblAccelModelInfo.Text = "모델: 수신 대기 중...";
-                        if (_lblTorqueModelInfo != null) _lblTorqueModelInfo.Text = "모델: 수신 대기 중...";
+                        _seenCombinedModels.Clear();
+                        if (_lblAccelModelInfo    != null) _lblAccelModelInfo.Text    = "모델: 수신 대기 중...";
+                        if (_lblTorqueModelInfo   != null) _lblTorqueModelInfo.Text   = "모델: 수신 대기 중...";
+                        if (_lblCombinedModelInfo != null) _lblCombinedModelInfo.Text = "모델: 수신 대기 중...";
                     }
                     else
                     {
@@ -1064,7 +1070,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 체크박스 변경 시 차트 레이아웃 + 상태 칩/컨트롤 동시 갱신
             _chkShowAccel.CheckedChanged    += (s, e) => { ApplySensorVisibility("accel",    _chkShowAccel.Checked);    _UpdateChartLayout(); };
             _chkShowTorque.CheckedChanged   += (s, e) => { ApplySensorVisibility("torque",   _chkShowTorque.Checked);   _UpdateChartLayout(); };
-            _chkShowCombined.CheckedChanged += (s, e) => { ApplySensorVisibility("combined", _chkShowCombined.Checked); /* combined 차트 없음 */ };
+            _chkShowCombined.CheckedChanged += (s, e) => { ApplySensorVisibility("combined", _chkShowCombined.Checked); _UpdateChartLayout(); };
 
             var lblFilter = new Label { Text = "표시:", AutoSize = true,
                 Font = new Font("Segoe UI", 8f, FontStyle.Bold),
@@ -1192,21 +1198,25 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // ── (0,1) 하단-좌: 이상 스코어 차트 ─────────────────────────────
             _dualChartPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1,
                 Padding = new Padding(0, 4, 4, 0), Margin = Padding.Empty,
                 BackColor = Color.FromArgb(245, 247, 250)
             };
-            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34f));
             _dualChartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            _chartAccel  = BuildLiveInferenceChart(isAccel: true);
-            _chartTorque = BuildLiveInferenceChart(isAccel: false);
+            _chartAccel    = BuildLiveInferenceChart(isAccel: true);
+            _chartTorque   = BuildLiveInferenceChart(isAccel: false);
+            _chartCombined = BuildLiveInferenceChart(isAccel: false);
             _dualChartPanel.SuspendLayout();
-            _accelChartWrap  = WrapChartInPanel("가속도 이상 스코어  [서버 추론]", _chartAccel,  Color.FromArgb(0, 84, 166),  out _lblAccelModelInfo);
-            _torqueChartWrap = WrapChartInPanel("토크 이상 스코어  [서버 추론]",   _chartTorque, Color.FromArgb(165, 45, 15), out _lblTorqueModelInfo);
-            _dualChartPanel.Controls.Add(_accelChartWrap,  0, 0);
-            _dualChartPanel.Controls.Add(_torqueChartWrap, 1, 0);
+            _accelChartWrap    = WrapChartInPanel("가속도 이상 스코어  [서버 추론]",    _chartAccel,    Color.FromArgb(0, 84, 166),   out _lblAccelModelInfo);
+            _torqueChartWrap   = WrapChartInPanel("토크 이상 스코어  [서버 추론]",      _chartTorque,   Color.FromArgb(165, 45, 15),  out _lblTorqueModelInfo);
+            _combinedChartWrap = WrapChartInPanel("결합 이상 스코어  [전역/축별 모델]", _chartCombined, Color.FromArgb(70, 120, 40),   out _lblCombinedModelInfo);
+            _dualChartPanel.Controls.Add(_accelChartWrap,    0, 0);
+            _dualChartPanel.Controls.Add(_torqueChartWrap,   1, 0);
+            _dualChartPanel.Controls.Add(_combinedChartWrap, 2, 0);
             _dualChartPanel.ResumeLayout(false);
 
             // ── (1,1) 하단-우: 발생 이벤트 ───────────────────────────────────
@@ -4481,14 +4491,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 chartLine.ChartAreas["a"].RecalculateAxesScale();
             }
 
-            // ─ 서버 추론 스코어 → _chartAccel / _chartTorque ─────────────────
-            if (_chartAccel == null || _chartTorque == null) return;
+            // ─ 서버 추론 스코어 → _chartAccel / _chartTorque / _chartCombined ──
+            if (_chartAccel == null || _chartTorque == null || _chartCombined == null) return;
             if (_liveScoreQueue.IsEmpty) return;
 
             // 첫 실데이터 수신 시 스켈레톤 시리즈 제거 (X축 고정 방지)
             if (_liveChartFirstData)
             {
-                foreach (var ch in new[] { _chartAccel, _chartTorque })
+                foreach (var ch in new[] { _chartAccel, _chartTorque, _chartCombined })
                 {
                     var sk = ch.Series.FindByName("_sk_");
                     if (sk != null) ch.Series.Remove(sk);
@@ -4500,9 +4510,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             Tuple<string, DateTime, double> liveItem;
             while (_liveScoreQueue.TryDequeue(out liveItem))
             {
-                bool isAccel = liveItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
-                Chart target = isAccel ? _chartAccel : _chartTorque;
-                var ls = EnsureLiveSeries(target, liveItem.Item1, isAccel);
+                bool isCombined = liveItem.Item1.StartsWith("combined", StringComparison.OrdinalIgnoreCase);
+                bool isAccel    = !isCombined && liveItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
+                Chart target = isCombined ? _chartCombined : (isAccel ? _chartAccel : _chartTorque);
+                var ls = EnsureLiveSeries(target, liveItem.Item1, isAccel, isCombined);
                 ls.Points.AddXY(liveItem.Item2.ToOADate(), liveItem.Item3);
                 if (liveItem.Item2 > latestTime) latestTime = liveItem.Item2;
             }
@@ -4514,7 +4525,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // → 막 시작했을 때는 데이터 시작점에 맞게 좁히고, 10분 이상 쌓이면 롤링 창으로 전환
             double xMinRolling = latestTime.AddMinutes(-10).ToOADate();
             double xMinData    = double.MaxValue;
-            foreach (Chart _ch in new[] { _chartAccel, _chartTorque })
+            foreach (Chart _ch in new[] { _chartAccel, _chartTorque, _chartCombined })
             {
                 if (_ch == null || _ch.IsDisposed) continue;
                 foreach (Series _s in _ch.Series)
@@ -4527,7 +4538,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 ? xMinData - PadOA   // 데이터 시작 10초 전 (짧은 구간)
                 : xMinRolling;       // 10분 롤링 창 (긴 구간)
 
-            foreach (Chart ch in new[] { _chartAccel, _chartTorque })
+            foreach (Chart ch in new[] { _chartAccel, _chartTorque, _chartCombined })
             {
                 if (ch == null || ch.IsDisposed || ch.ChartAreas.Count == 0) continue;
                 foreach (Series s in ch.Series)
@@ -4544,13 +4555,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             Tuple<string, DateTime, double> maItem;
             while (_liveMaQueue.TryDequeue(out maItem))
             {
-                bool isAccelMa = maItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
-                Chart tgtMa = isAccelMa ? _chartAccel : _chartTorque;
+                bool isCombinedMa = maItem.Item1.StartsWith("combined", StringComparison.OrdinalIgnoreCase);
+                bool isAccelMa    = !isCombinedMa && maItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
+                Chart tgtMa = isCombinedMa ? _chartCombined : (isAccelMa ? _chartAccel : _chartTorque);
                 if (tgtMa == null || tgtMa.IsDisposed) continue;
-                var mas = EnsureLiveMaSeries(tgtMa, maItem.Item1, isAccelMa);
+                var mas = EnsureLiveMaSeries(tgtMa, maItem.Item1, isAccelMa, isCombinedMa);
                 mas.Points.AddXY(maItem.Item2.ToOADate(), maItem.Item3);
             }
-            foreach (Chart ch in new[] { _chartAccel, _chartTorque })
+            foreach (Chart ch in new[] { _chartAccel, _chartTorque, _chartCombined })
             {
                 if (ch == null || ch.IsDisposed) continue;
                 foreach (Series s in ch.Series)
@@ -4577,10 +4589,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>서버 추론 전용 시리즈를 chart 에서 찾거나 생성합니다.</summary>
-        /// <param name="chart">대상 차트 (_chartAccel 또는 _chartTorque)</param>
-        /// <param name="key">예: "accel_ax0", "torque_ax2"</param>
-        /// <param name="isAccel">가속도 여부 (색상 팔레트 선택)</param>
-        private Series EnsureLiveSeries(Chart chart, string key, bool isAccel)
+        /// <param name="chart">대상 차트 (_chartAccel / _chartTorque / _chartCombined)</param>
+        /// <param name="key">예: "accel_ax0", "torque_ax2", "combined_ax0"</param>
+        /// <param name="isAccel">가속도 여부</param>
+        /// <param name="isCombined">결합 모델 여부</param>
+        private Series EnsureLiveSeries(Chart chart, string key, bool isAccel, bool isCombined = false)
         {
             string seriesName = "srv-" + key;
             var s = chart.Series.FindByName(seriesName);
@@ -4592,14 +4605,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bool isGlobal = axIdx < 0;
             if (isGlobal) axIdx = 0;  // 색상 인덱스용
 
-            Color[] accelColors  = { Color.FromArgb(0, 112, 204),  Color.FromArgb(0, 170, 230),  Color.FromArgb(70, 130, 210), Color.FromArgb(100, 160, 240) };
-            Color[] torqueColors = { Color.FromArgb(210, 55, 20),  Color.FromArgb(240, 100, 40), Color.FromArgb(255, 150, 0),  Color.FromArgb(200, 75, 55)  };
-            Color c = isAccel ? accelColors[axIdx % accelColors.Length]
-                               : torqueColors[axIdx % torqueColors.Length];
+            Color[] accelColors    = { Color.FromArgb(0, 112, 204),   Color.FromArgb(0, 170, 230),  Color.FromArgb(70, 130, 210),  Color.FromArgb(100, 160, 240) };
+            Color[] torqueColors   = { Color.FromArgb(210, 55, 20),   Color.FromArgb(240, 100, 40), Color.FromArgb(255, 150, 0),   Color.FromArgb(200, 75, 55)  };
+            Color[] combinedColors = { Color.FromArgb(60, 150, 40),   Color.FromArgb(90, 190, 60),  Color.FromArgb(130, 200, 80),  Color.FromArgb(160, 220, 100) };
+            Color c = isCombined ? combinedColors[axIdx % combinedColors.Length]
+                     : isAccel   ? accelColors[axIdx % accelColors.Length]
+                                 : torqueColors[axIdx % torqueColors.Length];
 
-            string legendText = isGlobal
-                ? (isAccel ? "가속도 (전역)" : "토크 (전역)")
-                : (isAccel ? $"Ax{axIdx} 가속" : $"Ax{axIdx} 토크");
+            string legendText;
+            if (isCombined)
+                legendText = isGlobal ? "결합 (전역)" : string.Format("Ax{0} 결합", axIdx);
+            else if (isAccel)
+                legendText = isGlobal ? "가속도 (전역)" : string.Format("Ax{0} 가속", axIdx);
+            else
+                legendText = isGlobal ? "토크 (전역)" : string.Format("Ax{0} 토크", axIdx);
 
             s = new Series(seriesName)
             {
@@ -4617,7 +4636,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>MA(이동평균)선 시리즈를 chart 에서 찾거나 생성합니다.</summary>
-        private Series EnsureLiveMaSeries(Chart chart, string key, bool isAccel)
+        private Series EnsureLiveMaSeries(Chart chart, string key, bool isAccel, bool isCombined = false)
         {
             string seriesName = "ma-" + key;
             var s = chart.Series.FindByName(seriesName);
@@ -4628,17 +4647,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (ux >= 0) int.TryParse(key.Substring(ux + 3), out axIdx);
 
             // raw선보다 밝고 굵게 — 추세선임을 시각적으로 구분
-            Color[] accelMa  = { Color.FromArgb(0, 170, 255),  Color.FromArgb(80, 210, 255), Color.FromArgb(120, 180, 255), Color.FromArgb(160, 200, 255) };
-            Color[] torqueMa = { Color.FromArgb(255, 100, 50), Color.FromArgb(255, 150, 70), Color.FromArgb(255, 190, 30),  Color.FromArgb(240, 120, 100) };
-            Color c = isAccel ? accelMa[axIdx % accelMa.Length]
-                               : torqueMa[axIdx % torqueMa.Length];
+            Color[] accelMa    = { Color.FromArgb(0, 170, 255),   Color.FromArgb(80, 210, 255),  Color.FromArgb(120, 180, 255), Color.FromArgb(160, 200, 255) };
+            Color[] torqueMa   = { Color.FromArgb(255, 100, 50),  Color.FromArgb(255, 150, 70),  Color.FromArgb(255, 190, 30),  Color.FromArgb(240, 120, 100) };
+            Color[] combinedMa = { Color.FromArgb(100, 210, 80),  Color.FromArgb(140, 230, 110), Color.FromArgb(180, 240, 140), Color.FromArgb(200, 250, 160) };
+            Color c = isCombined ? combinedMa[axIdx % combinedMa.Length]
+                     : isAccel   ? accelMa[axIdx % accelMa.Length]
+                                 : torqueMa[axIdx % torqueMa.Length];
 
+            string maLabel = isCombined ? "결합 이평" : (isAccel ? "가속도 이평" : "토크 이평");
             s = new Series(seriesName)
             {
                 ChartType   = SeriesChartType.FastLine,
                 XValueType  = ChartValueType.DateTime,
                 BorderWidth = 3,
-                LegendText  = isAccel ? "가속도 이평" : "토크 이평",
+                LegendText  = maLabel,
                 Color       = c,
             };
             chart.Series.Add(s);
@@ -4836,8 +4858,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 return;
             }
 
-            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
-            // 키: "accel_ax0", "torque_ax2" 등 (axis 없으면 "accel", "torque")
+            bool isAccel    = string.Equals(sensorType, "accel",    StringComparison.OrdinalIgnoreCase);
+            bool isCombined = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
+            // 키: "accel_ax0", "torque_ax2", "combined_ax0" 등 (axis 없으면 sensorType 그대로)
             string key = result.Axis.HasValue
                          ? $"{sensorType}_ax{result.Axis.Value}"
                          : sensorType;
@@ -4950,7 +4973,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 // 사용 모델 파일명 라벨 갱신
                 if (!string.IsNullOrEmpty(result.ModelFile))
-                    UpdateModelInfoLabel(isAccel, result.ModelFile);
+                    UpdateModelInfoLabel(isAccel, result.ModelFile, null, isCombined);
 
                 bool hasCls = !string.IsNullOrEmpty(result.ClassName) &&
                               !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
@@ -5048,8 +5071,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 UpdateClassMatrixCls(combined.Axis.Value, sensorType, clsName, confVal);
 
                 // 사용 모델 파일명 라벨 갱신 (AE + CLS)
+                bool isCombinedSensor = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
                 if (!string.IsNullOrEmpty(combined.AeModelFile) || !string.IsNullOrEmpty(combined.ClsModelFile))
-                    UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile);
+                    UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile, isCombinedSensor);
 
                 // 결함 감지 시 KPI 카운트 + 이벤트 로그 기록
                 if (combined.ClsAvailable && combined.ClsIsFault == true)
@@ -5130,43 +5154,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         /// <summary>
         /// 체크박스 상태에 따라 _dualChartPanel 의 열 너비와 차트 래퍼 패널 Visible 을 조정합니다.
-        /// 가속도만 표시: 가속도 100% / 토크 열 0px
-        /// 토크만 표시:   가속도 열 0px / 토크 100%
-        /// 둘 다 표시:    각 50%
-        /// 둘 다 숨김:    두 래퍼 모두 Visible=false
+        /// 표시 중인 차트끼리 균등 분할 (각 33% / 50% / 100%) — 숨겨진 열은 0px.
         /// </summary>
         private void _UpdateChartLayout()
         {
             if (_dualChartPanel == null) return;
-            bool showA = _chkShowAccel?.Checked  ?? true;
-            bool showT = _chkShowTorque?.Checked ?? false;
+            bool showA = _chkShowAccel?.Checked    ?? true;
+            bool showT = _chkShowTorque?.Checked   ?? false;
+            bool showC = _chkShowCombined?.Checked ?? false;
 
-            if (_accelChartWrap  != null) _accelChartWrap.Visible  = showA;
-            if (_torqueChartWrap != null) _torqueChartWrap.Visible = showT;
+            if (_accelChartWrap    != null) _accelChartWrap.Visible    = showA;
+            if (_torqueChartWrap   != null) _torqueChartWrap.Visible   = showT;
+            if (_combinedChartWrap != null) _combinedChartWrap.Visible = showC;
+
+            int visCount = (showA ? 1 : 0) + (showT ? 1 : 0) + (showC ? 1 : 0);
+            float pct = visCount > 0 ? 100f / visCount : 33.33f;
 
             _dualChartPanel.SuspendLayout();
             _dualChartPanel.ColumnStyles.Clear();
-            if (showA && showT)
-            {
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            }
-            else if (showA)
-            {
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
-            }
-            else if (showT)
-            {
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            }
-            else
-            {
-                // 둘 다 꺼진 경우 — 래퍼가 Visible=false이므로 비율은 무관
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-                _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            }
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(showA ? SizeType.Percent  : SizeType.Absolute, showA ? pct : 0));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(showT ? SizeType.Percent  : SizeType.Absolute, showT ? pct : 0));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(showC ? SizeType.Percent  : SizeType.Absolute, showC ? pct : 0));
             _dualChartPanel.ResumeLayout(true);
         }
 
@@ -5404,12 +5412,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         /// 가속도 전역 AE 결과를 _pnlAccelAeBar 패널에 반영합니다 (UI 스레드에서만 호출).
         /// </summary>
         /// <summary>수신된 모델 파일명을 차트 하단 모델 정보 라벨에 반영합니다.</summary>
-        private void UpdateModelInfoLabel(bool isAccel, string modelFile, string clsModelFile = null)
+        private void UpdateModelInfoLabel(bool isAccel, string modelFile, string clsModelFile = null, bool isCombined = false)
         {
-            if (string.IsNullOrWhiteSpace(modelFile)) return;
+            if (string.IsNullOrWhiteSpace(modelFile) && string.IsNullOrWhiteSpace(clsModelFile)) return;
 
-            var seen  = isAccel ? _seenAccelModels  : _seenTorqueModels;
-            var lbl   = isAccel ? _lblAccelModelInfo : _lblTorqueModelInfo;
+            System.Collections.Generic.HashSet<string> seen;
+            Label lbl;
+            if (isCombined)      { seen = _seenCombinedModels; lbl = _lblCombinedModelInfo; }
+            else if (isAccel)    { seen = _seenAccelModels;    lbl = _lblAccelModelInfo;    }
+            else                 { seen = _seenTorqueModels;   lbl = _lblTorqueModelInfo;   }
             if (lbl == null || lbl.IsDisposed) return;
 
             bool changed = false;
