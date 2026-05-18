@@ -278,14 +278,15 @@ namespace PHM_Project_DockPanel.Services.Core
             // → 정지 상태에서는 Pos 행 없음 → window=null → 추론 스킵 (false alarm 방지)
             int? axis = _lastMovingAxis;
 
+            // filterOp=false: Idle/Pos 전체 행 사용 — 결합 이상 스코어는 항상 갱신
             if (_axes != null)
             {
                 foreach (int ax in _axes)
-                    await RunClsInference(cp, "combined", ax, ct);
+                    await RunClsInference(cp, "combined", ax, ct, filterOp: false);
             }
             else
             {
-                await RunClsInference(cp, "combined", axis, ct);
+                await RunClsInference(cp, "combined", axis, ct, filterOp: false);
             }
         }
 
