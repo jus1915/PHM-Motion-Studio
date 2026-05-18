@@ -4586,19 +4586,25 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 {
                     double top = yMax * 1.15;
                     area.AxisY.Maximum = top;
-                    // 눈금 간격: 4~6개 눈금이 나오도록 (예: yMax=1.0 → 0.25씩 4개)
-                    double raw    = top / 5.0;
-                    double mag    = Math.Pow(10, Math.Floor(Math.Log10(raw)));
-                    double[] nice = { 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0 };
-                    double step   = mag;
+                    // nice-number 눈금 간격: 4~6개 눈금
+                    // raw를 [1,10) 정규화 후 nice 배열에서 선택
+                    double raw     = top / 5.0;
+                    double mag     = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+                    double rawNorm = raw / mag;                 // [1, 10)
+                    double[] nice  = { 1.0, 2.0, 2.5, 5.0, 10.0 };
+                    double step    = mag * 10.0;                // 폴백
                     foreach (double n in nice)
-                        if (n * mag >= raw) { step = n * mag; break; }
+                        if (n >= rawNorm) { step = n * mag; break; }
                     area.AxisY.Interval = step;
+                    // 라벨 포맷: step 크기에 맞게 소수 자릿수 조정
+                    area.AxisY.LabelStyle.Format =
+                        step < 0.095 ? "0.00" : step < 0.95 ? "0.0" : "0";
                 }
                 else
                 {
                     area.AxisY.Maximum  = double.NaN;
                     area.AxisY.Interval = double.NaN;
+                    area.AxisY.LabelStyle.Format = "0.0";
                 }
             }
 
