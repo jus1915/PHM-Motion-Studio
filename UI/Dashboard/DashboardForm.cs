@@ -1356,16 +1356,35 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White, MinimumSize = new Size(1, 1) };
             var ca = new ChartArea("a") { BackColor = Color.White };
-            // 플롯 영역 내부 여백 최소화 (우측 공백 축소)
+            // 플롯 영역 여백 — Y축 라벨/눈금 공간 확보
             ca.Position          = new ElementPosition(0, 0, 100, 100);
-            ca.InnerPlotPosition = new ElementPosition(7, 4, 91, 88);
+            ca.InnerPlotPosition = new ElementPosition(11, 3, 87, 86);
+
+            // ── X 축 ─────────────────────────────────────────────────────────
             ca.AxisX.LabelStyle.Format   = "HH:mm:ss";
+            ca.AxisX.LabelStyle.Font     = new Font("Segoe UI", 8f);
+            ca.AxisX.LabelStyle.ForeColor= Color.FromArgb(70, 70, 80);
             ca.AxisX.IntervalAutoMode    = IntervalAutoMode.VariableCount;
             ca.AxisX.MajorGrid.Enabled   = true;
-            ca.AxisX.MajorGrid.LineColor = Color.FromArgb(228, 228, 234);
+            ca.AxisX.MajorGrid.LineColor = Color.FromArgb(210, 210, 220);
+            ca.AxisX.MajorGrid.LineDashStyle = ChartDashStyle.Dot;
+            ca.AxisX.MajorTickMark.Enabled   = true;
+            ca.AxisX.MajorTickMark.LineColor = Color.FromArgb(150, 150, 165);
+            ca.AxisX.MajorTickMark.Size      = 3;
+            ca.AxisX.LineColor               = Color.FromArgb(180, 180, 195);
+
+            // ── Y 축 ─────────────────────────────────────────────────────────
             ca.AxisY.MajorGrid.Enabled   = true;
-            ca.AxisY.MajorGrid.LineColor = Color.FromArgb(228, 228, 234);
-            ca.AxisY.LabelStyle.Format   = "0.00";
+            ca.AxisY.MajorGrid.LineColor = Color.FromArgb(210, 210, 220);
+            ca.AxisY.MajorGrid.LineDashStyle = ChartDashStyle.Dot;
+            ca.AxisY.LabelStyle.Format   = "0.0";
+            ca.AxisY.LabelStyle.Font     = new Font("Segoe UI", 8.5f);
+            ca.AxisY.LabelStyle.ForeColor= Color.FromArgb(55, 55, 70);
+            ca.AxisY.MajorTickMark.Enabled   = true;
+            ca.AxisY.MajorTickMark.LineColor = Color.FromArgb(140, 140, 160);
+            ca.AxisY.MajorTickMark.Size      = 4;
+            ca.AxisY.LineColor               = Color.FromArgb(180, 180, 195);
+            ca.AxisY.IntervalAutoMode    = IntervalAutoMode.VariableCount;
             ca.AxisY.Minimum             = 0;
             // 임계값 점선 (서버 결과 수신 시 IntervalOffset 동적 갱신)
             ca.AxisY.StripLines.Add(new StripLine
@@ -4563,8 +4582,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 area.AxisX.Minimum = xMin;
                 area.AxisX.Maximum = xMax;
                 area.AxisY.Minimum = 0;
-                area.AxisY.Maximum = yMax > 0 ? yMax * 1.15 : double.NaN;
-            }
+                if (yMax > 0)
+                {
+                    double top = yMax * 1.15;
+                    area.AxisY.Maximum = top;
+                    // 눈금 간격: 4~6개 눈금이 나오도록 (예: yMax=1.0 → 0.25씩 4개)
+                    double raw    = top / 5.0;
+                    double mag    = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+                    double[] nice = { 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0 };
+                    double step   = mag;
+                    foreach (double n in nice)
+                        if (n * mag >= raw) { step = n * mag; break; }
+                    area.AxisY.Interval = step;
+                }
+                else
+                {
+                    area.AxisY.Maximum  = double.NaN;
+                    area.AxisY.Interval = double.NaN;
+                }
 
             // ── MA 이평선 업데이트 ────────────────────────────────────────────
             Tuple<string, DateTime, double> maItem;
