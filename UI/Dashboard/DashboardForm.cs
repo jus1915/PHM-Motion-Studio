@@ -339,14 +339,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         // UI
         private KpiCard cardDanger, cardWarning, cardCycles;
-#pragma warning disable CS0649  // 아래 필드는 null-guard 코드에서 사용되는 레거시 필드 (의도적 미초기화)
+#pragma warning disable CS0649, CS0169  // 레거시 필드: null-guard 코드에서 사용되거나 미사용 (의도적 미초기화)
         private Chart chartLine;
         private DataGridView grid;
         private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnQuickFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
         private DataGridView gridModelPaths;
         private TableLayoutPanel sampleGrid;                       // rightBottom 안에서 그리드 역할
-#pragma warning restore CS0649
+#pragma warning restore CS0649, CS0169
         private static readonly string MruFile = Path.Combine(DefaultLogsPath, "recent_watch_folders.txt");
         private const int MruMaxCount = 5;
         private readonly Dictionary<int, Chart> sampleCharts =     // 축별 Chart 캐시
@@ -385,7 +385,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 #pragma warning disable CS0649
         private FlowLayoutPanel axisGaugeFlow;
         private Button btnTestProbs;
-#pragma warning restore CS0649
+#pragma warning restore CS0649, CS0169
         private readonly Dictionary<int, ProbGaugeControl> _axisGauges = new Dictionary<int, ProbGaugeControl>();
         private string[] _clsLabels = { "0. 정상", "1. 벨트 결함", "2. 볼트 풀림", "3. 바디 불평형" };
         private readonly Dictionary<int, float[]> _axisGaugePrev = new Dictionary<int, float[]>();
@@ -5424,12 +5424,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
             finally
             {
-                if (!IsHandleCreated || IsDisposed) return;
-                BeginInvoke(new Action(() =>
-                {
-                    _btnRetrain.Enabled = true;
-                    _btnRetrain.Text    = "⟳ 재학습";
-                }));
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke(new Action(() =>
+                    {
+                        _btnRetrain.Enabled = true;
+                        _btnRetrain.Text    = "⟳ 재학습";
+                    }));
             }
         }
 
