@@ -339,14 +339,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         // UI
         private KpiCard cardDanger, cardWarning, cardCycles;
+#pragma warning disable CS0649  // 아래 필드는 null-guard 코드에서 사용되는 레거시 필드 (의도적 미초기화)
         private Chart chartLine;
         private DataGridView grid;
         private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnQuickFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
-        private static readonly string MruFile = Path.Combine(DefaultLogsPath, "recent_watch_folders.txt");
-        private const int MruMaxCount = 5;
         private DataGridView gridModelPaths;
         private TableLayoutPanel sampleGrid;                       // rightBottom 안에서 그리드 역할
+#pragma warning restore CS0649
+        private static readonly string MruFile = Path.Combine(DefaultLogsPath, "recent_watch_folders.txt");
+        private const int MruMaxCount = 5;
         private readonly Dictionary<int, Chart> sampleCharts =     // 축별 Chart 캐시
             new Dictionary<int, Chart>();
         private TextBox txtEventLog;
@@ -380,13 +382,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 데이터 테이블
         private BindingList<EventRow> rows = new BindingList<EventRow>();
         private enum XMode { Numeric, DateTime, Index }
+#pragma warning disable CS0649
         private FlowLayoutPanel axisGaugeFlow;
+        private Button btnTestProbs;
+#pragma warning restore CS0649
         private readonly Dictionary<int, ProbGaugeControl> _axisGauges = new Dictionary<int, ProbGaugeControl>();
         private string[] _clsLabels = { "0. 정상", "1. 벨트 결함", "2. 볼트 풀림", "3. 바디 불평형" };
         private readonly Dictionary<int, float[]> _axisGaugePrev = new Dictionary<int, float[]>();
         private const bool GAUGE_SORT_DESC = false;   // true면 확률 내림차순으로 정렬해 보여줌
-        private Button btnTestProbs;              // ← 추가
-        private readonly Random _rng = new Random(); // ← 추가
+        private readonly Random _rng = new Random();
 
         // ── 서버 실시간 추론 UI ──────────────────────────────────────────────────
         // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2", "combined_ax0")

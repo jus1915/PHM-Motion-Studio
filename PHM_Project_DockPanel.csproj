@@ -244,6 +244,9 @@
     <Compile Include="UI\DataCollection\TeachingForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UI\DataCollection\RealtimeSignalForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Controller\WMX3Controller.cs" />
     <Compile Include="Services\LLM\ClaudeApiClient.cs" />
     <Compile Include="Services\LLM\AppToolProvider.cs" />
