@@ -5239,6 +5239,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     else if (_prevAnomalyState.TryGetValue(chipKey, out bool _cWas) && _cWas)
                         AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 결합 Ax{combined.Axis.Value}  score={cRawScore:F3}");
                     _prevAnomalyState[chipKey] = cAnomaly;
+
+                    // DGV 이상탐지 현황에 결합 모델 행 갱신 (axis key = 100 + axisValue)
+                    UpdateClassMatrix(combined.Axis.Value + 100, cNorm);
                 }
 
                 // axis 없는 결과(전역 단일 모델)는 DGV 매트릭스 갱신 스킵 — 차트 큐는 이미 위에서 추가됨
@@ -5412,7 +5415,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         }
                     }
                     break;
-                // combined: CLS 열은 숨겨져 있으므로 별도 처리 불필요
+                case "combined":
+                    // DGV 결합 행 (key >= 100) show/hide
+                    if (_classMatrixDgv != null)
+                    {
+                        foreach (var kv in _classMatrixAxisRow)
+                        {
+                            if (kv.Key >= 100)
+                                _classMatrixDgv.Rows[kv.Value].Visible = visible;
+                        }
+                    }
+                    break;
             }
         }
 
@@ -5774,7 +5787,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         /// <summary>
         /// 실시간 이상탐지 현황 매트릭스 갱신 (UI 스레드에서만 호출).
-        /// axis 규약: -1=가속도 전역, -10=토크 전역, 0~N=토크 Ax{N}
+        /// axis 규약: -1=가속도 전역, -10=토크 전역, 0~N=토크 Ax{N}, 100~=결합 Ax{N-100}
         /// </summary>
         private void UpdateClassMatrix(int axis, double normScore)
         {
@@ -5785,8 +5798,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 rowIdx = _classMatrixDgv.Rows.Add();
                 // 센서 레이블
-                string axLabel = axis == -1  ? "가속도"
-                               : axis == -10 ? "토크 전역"
+                string axLabel = axis == -1   ? "가속도"
+                               : axis == -10  ? "토크 전역"
+                               : axis >= 100  ? $"결합 Ax{axis - 100}"
                                : $"Ax{axis}";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axLabel;
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
