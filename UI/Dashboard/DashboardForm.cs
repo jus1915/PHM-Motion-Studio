@@ -5233,7 +5233,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                             else           { Interlocked.Increment(ref cntWarning); cardWarning.ValueText = cntWarning + " 건"; }
                             AppendEventLog($"[{DateTime.Now:HH:mm:ss}] {cLevel} 결합 Ax{combined.Axis.Value} 이상  score={cRawScore:F3}  thr={cAxThr:F3}");
                             _lastAnomalyLogTime[chipKey] = DateTime.Now;
-                            UpdateEventCount(combined.Axis.Value, cIsDanger);
+                            UpdateEventCount(combined.Axis.Value + 100, cIsDanger);
                         }
                     }
                     else if (_prevAnomalyState.TryGetValue(chipKey, out bool _cWas) && _cWas)
@@ -5701,7 +5701,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         /// <summary>
         /// 이벤트 카운트 표를 업데이트합니다. (UI 스레드에서만 호출)
-        /// axisKey: -1=가속도, -10=토크 전역, 0~N=Ax{N}
+        /// axisKey: -1=가속도, -10=토크 전역, 0~N=토크 Ax{N}, 100~=결합 Ax{N-100}
         /// </summary>
         private void UpdateEventCount(int axisKey, bool isDanger)
         {
@@ -5717,8 +5717,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (!_eventCountRowIdx.TryGetValue(axisKey, out int rowIdx))
             {
                 rowIdx = _eventCountDgv.Rows.Add();
-                string axLabel = axisKey == -1  ? "가속도"
-                               : axisKey == -10 ? "토크 전역"
+                string axLabel = axisKey == -1   ? "가속도"
+                               : axisKey == -10  ? "토크 전역"
+                               : axisKey >= 100  ? $"결합 Ax{axisKey - 100}"
                                : $"Ax{axisKey}";
                 _eventCountDgv.Rows[rowIdx].Cells[0].Value = axLabel;
                 _eventCountDgv.Rows[rowIdx].Cells[1].Value = 0;
