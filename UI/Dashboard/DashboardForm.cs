@@ -411,14 +411,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private CheckBox _chkShowTorque;            // 토크 결과 표시 여부
         private CheckBox _chkShowCombined;          // 결합 결과 표시 여부
 
-        // ── 실시간 분류 현황 매트릭스 ─────────────────────────────────────────
-        // 행=토크 축, 열=AE 토크 점수/상태 + CLS 결함/신뢰도 (가속도 AE는 전역 단일 패널로 별도 표시)
+        // ── 실시간 이상탐지 현황 매트릭스 ────────────────────────────────────
+        // 행=센서 (axis: -1=가속도 전역, -10=토크 전역, 0~N=토크 AxN)
+        // 열=AE 점수/판정 (CLS 열은 정의만 하고 숨김)
         private DataGridView _classMatrixDgv;
-        private readonly Dictionary<int, int> _classMatrixAxisRow = new Dictionary<int, int>(); // axis → rowIdx
-        // ── AE 이상탐지 열 (토크 per-axis 전용) ─────────
+        private readonly Dictionary<int, int> _classMatrixAxisRow = new Dictionary<int, int>(); // axis key → rowIdx
+        // ── AE 이상탐지 열 ───────────────────────────────
         private const int CMG_COL_AXIS     = 0;
-        private const int CMG_COL_TS       = 1;  // [AE] 토크 점수
-        private const int CMG_COL_TSTATE   = 2;  // [AE] 토크 판정
+        private const int CMG_COL_TS       = 1;  // [AE] 점수
+        private const int CMG_COL_TSTATE   = 2;  // [AE] 판정
         // ── CLS 결함진단 열 ─────────────────────────────
         private const int CMG_COL_TCLS     = 3;  // [CLS] 토크 결함명
         private const int CMG_COL_TCLSCONF = 4;  // [CLS] 토크 신뢰도
@@ -5017,13 +5018,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         ? Color.FromArgb(254, 226, 226)
                         : Color.FromArgb(220, 252, 231);
 
-                // 실시간 분류 현황 매트릭스 갱신 (정상/경고/위험 모두 반영)
-                // 가속도(전역 단일 모델, axis 없음) → _pnlAccelAeBar 패널
-                // 토크(per-axis) → DGV 매트릭스 행
+                // 실시간 이상탐지 현황 매트릭스 갱신 (모든 센서·모델 DGV에 반영)
                 if (isAccel && !result.Axis.HasValue)
-                    UpdateAccelAeDisplay(normScore);
+                {
+                    UpdateAccelAeDisplay(normScore);        // 상단 가속도 바 패널 (기존 유지)
+                    UpdateClassMatrix(-1, normScore);        // DGV: 가속도 전역 행
+                }
+                else if (!isAccel && !isCombined && !result.Axis.HasValue)
+                    UpdateClassMatrix(-10, normScore);       // DGV: 토크 전역 행
                 else if (!isAccel && result.Axis.HasValue)
-                    UpdateClassMatrix(result.Axis.Value, normScore);
+                    UpdateClassMatrix(result.Axis.Value, normScore); // DGV: 토크 Ax{N} 행
 
                 // 사용 모델 파일명 라벨 갱신
                 if (!string.IsNullOrEmpty(result.ModelFile))
@@ -5269,8 +5273,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         /// <summary>
         /// 체크박스 CheckedChanged 시 호출 — 해당 sensorType의 칩과 컨트롤을 표시/숨깁니다.
-        /// 가속도: _pnlAccelAeBar 패널 (전역 단일 모델)
-        /// 토크/결합: DGV 열 그룹
+        /// accel: _pnlAccelAeBar 패널 + DGV 가속도 행
+        /// torque: DGV 토크 행들 (열 show/hide 불필요 — AE만 사용)
         /// </summary>
         private void ApplySensorVisibility(string sensorType, bool visible)
         {
@@ -5288,25 +5292,25 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             switch (sensorType?.ToLowerInvariant())
             {
                 case "accel":
-                    // 가속도는 전역 단일 모델 → _pnlAccelAeBar 패널
                     if (_pnlAccelAeBar != null) _pnlAccelAeBar.Visible = visible;
+                    // DGV 가속도 행 show/hide
+                    if (_classMatrixDgv != null && _classMatrixAxisRow.TryGetValue(-1, out int accelRow))
+                        _classMatrixDgv.Rows[accelRow].Visible = visible;
                     break;
                 case "torque":
+                    // DGV 토크 행들 (전역 + per-axis) show/hide
                     if (_classMatrixDgv != null)
                     {
-                        _classMatrixDgv.Columns[CMG_COL_TS].Visible       = visible;
-                        _classMatrixDgv.Columns[CMG_COL_TSTATE].Visible   = visible;
-                        _classMatrixDgv.Columns[CMG_COL_TCLS].Visible     = visible;
-                        _classMatrixDgv.Columns[CMG_COL_TCLSCONF].Visible = visible;
+                        if (_classMatrixAxisRow.TryGetValue(-10, out int tGlobalRow))
+                            _classMatrixDgv.Rows[tGlobalRow].Visible = visible;
+                        foreach (var kv in _classMatrixAxisRow)
+                        {
+                            if (kv.Key >= 0)
+                                _classMatrixDgv.Rows[kv.Value].Visible = visible;
+                        }
                     }
                     break;
-                case "combined":
-                    if (_classMatrixDgv != null)
-                    {
-                        _classMatrixDgv.Columns[CMG_COL_CCLS].Visible     = visible;
-                        _classMatrixDgv.Columns[CMG_COL_CCLSCONF].Visible = visible;
-                    }
-                    break;
+                // combined: CLS 열은 숨겨져 있으므로 별도 처리 불필요
             }
         }
 
@@ -5328,7 +5332,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // ─────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// 실시간 분류 현황 패널을 생성합니다. (행=축, 열=가속도/토크 점수+상태)
+        /// 실시간 이상탐지 현황 패널을 생성합니다. (행=센서, 열=AE 점수/판정)
         /// </summary>
         private Panel BuildClassMatrixPanel()
         {
@@ -5336,7 +5340,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             var lbl = new Label
             {
-                Text = "실시간 분류 현황  ( AE: 토크 이상탐지 점수/판정 │ CLS: 토크/결합 결함명/신뢰도 )",
+                Text = "실시간 이상탐지 현황  ( AE: 가속도·토크 이상탐지 점수/판정 )",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 Dock = DockStyle.Top, Height = 22,
                 TextAlign = ContentAlignment.MiddleLeft,
@@ -5375,30 +5379,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             _classMatrixDgv.RowTemplate.Height = 24;
 
-            // col 0: 축 — 최소 너비
+            // col 0: 센서 레이블 ("가속도", "토크 전역", "Ax0"…)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "Axis",    HeaderText = "축",     Width = 28, MinimumWidth = 28, ReadOnly = true });
-            // col 1-2: AE 토크 (per-axis)
+                { Name = "Axis",    HeaderText = "센서",    Width = 72, MinimumWidth = 64, ReadOnly = true });
+            // col 1-2: AE 점수/판정 (가속도·토크 공용)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TScore",  HeaderText = "AE 토크", Width = 62, MinimumWidth = 58, ReadOnly = true,
+                { Name = "TScore",  HeaderText = "AE 점수", Width = 62, MinimumWidth = 58, ReadOnly = true,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TState",  HeaderText = "판정",   Width = 52, MinimumWidth = 48, ReadOnly = true });
-            // col 3-4: CLS 토크 결함 (per-axis)
+                { Name = "TState",  HeaderText = "판정",   Width = 68, MinimumWidth = 58, ReadOnly = true,
+                  AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+            // col 3-6: CLS 열 (현재 미사용 — 숨김)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TCLS",    HeaderText = "토크 결합", Width = 68, MinimumWidth = 60, ReadOnly = true });
+                { Name = "TCLS",    HeaderText = "토크 결함", Width = 68, MinimumWidth = 60, ReadOnly = true, Visible = false });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "TCLSC",   HeaderText = "신뢰도",  Width = 42, MinimumWidth = 38, ReadOnly = true,
+                { Name = "TCLSC",   HeaderText = "신뢰도",   Width = 42, MinimumWidth = 38, ReadOnly = true, Visible = false,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
-            // col 5-6: CLS 결합 결함 (per-axis)
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "CCLS",    HeaderText = "결합 결함", Width = 68, MinimumWidth = 60, ReadOnly = true });
+                { Name = "CCLS",    HeaderText = "결합 결함", Width = 68, MinimumWidth = 60, ReadOnly = true, Visible = false });
             _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
-                { Name = "CCLSC",   HeaderText = "신뢰도",  Width = 42, MinimumWidth = 38, ReadOnly = true,
+                { Name = "CCLSC",   HeaderText = "신뢰도",   Width = 42, MinimumWidth = 38, ReadOnly = true, Visible = false,
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
-
-            // 마지막 열은 남은 공간 채우기 (DGV가 부모보다 넓어질 경우 자동 조정)
-            _classMatrixDgv.Columns[CMG_COL_CCLSCONF].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
             _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
 
@@ -5462,18 +5463,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>
-        /// 실시간 분류 현황 매트릭스 갱신 — 토크 per-axis (UI 스레드에서만 호출)
-        /// 가속도 전역 결과는 UpdateAccelAeDisplay() 를 사용하세요.
+        /// 실시간 이상탐지 현황 매트릭스 갱신 (UI 스레드에서만 호출).
+        /// axis 규약: -1=가속도 전역, -10=토크 전역, 0~N=토크 Ax{N}
         /// </summary>
         private void UpdateClassMatrix(int axis, double normScore)
         {
-            if (_classMatrixDgv == null || axis < 0) return;
+            if (_classMatrixDgv == null) return;
 
             // 행 확보
             if (!_classMatrixAxisRow.TryGetValue(axis, out int rowIdx))
             {
                 rowIdx = _classMatrixDgv.Rows.Add();
-                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axis;
+                // 센서 레이블
+                string axLabel = axis == -1  ? "가속도"
+                               : axis == -10 ? "토크 전역"
+                               : $"Ax{axis}";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axLabel;
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value   = "-";
                 _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";

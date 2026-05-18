@@ -191,10 +191,13 @@ namespace PHM_Project_DockPanel.Services.Core
                 // 가속도 AE: 단일 센서 → axis = null
                 await RunAeInference(cp, "accel", null, ct);
 
-                // 토크 AE: 축별 (제어기 미연결 시 axis=null로 단일 추론)
+                // 토크 AE: 전역 단일 모델 + 축별 모델 모두 실행
                 if (_axes != null)
+                {
+                    await RunAeInference(cp, "torque", null, ct);   // 전역 단일 (ae_torque_global)
                     foreach (int ax in _axes)
-                        await RunAeInference(cp, "torque", ax, ct);
+                        await RunAeInference(cp, "torque", ax, ct); // per-axis (ae_torque_axN)
+                }
                 else
                     await RunAeInference(cp, "torque", null, ct);
             }
@@ -212,15 +215,18 @@ namespace PHM_Project_DockPanel.Services.Core
                         }
                 }
 
-                // 단독 토크 AE: 축별
+                // 단독 토크 AE: 전역 단일 + 축별 모두 실행
                 if (_torqueLogger != null && _torqueLogger.IsLogging)
                 {
                     string p = _torqueLogger.OutputPath;
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
                     {
                         if (_axes != null)
+                        {
+                            await RunAeInference(p, "torque", null, ct);   // 전역 단일
                             foreach (int ax in _axes)
-                                await RunAeInference(p, "torque", ax, ct);
+                                await RunAeInference(p, "torque", ax, ct); // per-axis
+                        }
                         else
                             await RunAeInference(p, "torque", null, ct);
                     }

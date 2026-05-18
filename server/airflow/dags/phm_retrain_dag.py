@@ -657,7 +657,7 @@ with DAG(
         python_callable=run_training_ae_torque,
         doc_md=(
             "토크 AE 이상탐지 모델 학습 (축별). "
-            "augment_mode=mixed, filter_op=Op_Ax{n}. 출력: ae_torque_ax{n}.onnx"
+            "augment_mode=mixed, filter_op=None (Idle+Pos 전체 학습). 출력: ae_torque_ax{n}.onnx"
         ),
     )
 
