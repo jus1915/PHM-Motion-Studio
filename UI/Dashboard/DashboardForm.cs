@@ -498,6 +498,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private Button   _btnProfileApply, _btnProfileRefresh;
         private PHM_Project_DockPanel.Services.Core.InferenceServerClient _profileClient;
 
+        // 재학습 트리거
+        private Button _btnRetrain;
+        private string _lastRetrainRunId;
+
         // DB 모드 UI 컨트롤
         private RadioButton rbtnCsvMode, rbtnDbMode;
         private Panel pnlCsvSource, pnlDbSource;
@@ -988,8 +992,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             toolbarLeft.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode, pnlCsvSource, pnlDbSource });
 
+            // ── 재학습 버튼 ──────────────────────────────────────────────────
+            _btnRetrain = new Button
+            {
+                Text = "⟳ 재학습", Width = 80, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                BackColor = Color.FromArgb(34, 100, 175), ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 8.5f)
+            };
+            _btnRetrain.FlatAppearance.BorderSize = 0;
+            _btnRetrain.Click += OnRetrainButtonClick;
+
             toolbar.Controls.Add(btnStop);
             toolbar.Controls.Add(btnStart);
+            toolbar.Controls.Add(_btnRetrain);
             toolbar.Controls.Add(_btnProfileApply);
             toolbar.Controls.Add(_btnProfileRefresh);
             toolbar.Controls.Add(_cmbProfile);
@@ -1012,8 +1028,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _cmbProfile.Top  = cy;
                 _cmbProfile.Left = _btnProfileRefresh.Left - _cmbProfile.Width - 4;
 
+                // 재학습 버튼: 프로파일 콤보박스 왼쪽
+                _btnRetrain.Top  = cy;
+                _btnRetrain.Left = _cmbProfile.Left - _btnRetrain.Width - 8;
+
                 lblStatus.Top  = cy + 2;
-                lblStatus.Left = _cmbProfile.Left - lblStatus.PreferredWidth - 8;
+                lblStatus.Left = _btnRetrain.Left - lblStatus.PreferredWidth - 8;
             };
 
             // ── 모드 전환 시 소스 패널 교체 ──────────────────────────────────
@@ -5315,6 +5335,101 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     }
                     break;
                 // combined: CLS 열은 숨겨져 있으므로 별도 처리 불필요
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 재학습 트리거
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// ⟳ 재학습 버튼 클릭 — ContextMenu로 학습 모드 선택 후 Airflow DAG 트리거.
+        /// </summary>
+        private void OnRetrainButtonClick(object sender, EventArgs e)
+        {
+            var menu = new ContextMenuStrip();
+
+            void AddItem(string text, string[] modes)
+            {
+                var item = menu.Items.Add(text) as ToolStripMenuItem;
+                if (item == null) return;
+                item.Click += async (s2, e2) => await TriggerRetrainAsync(modes);
+            }
+
+            AddItem("AE 전체 재학습",           new[] { "ae_accel", "ae_torque_global", "ae_torque", "ae_combined_global", "ae_combined" });
+            menu.Items.Add(new ToolStripSeparator());
+            AddItem("가속도 AE 재학습",          new[] { "ae_accel" });
+            AddItem("토크 AE 재학습 (전역+축별)", new[] { "ae_torque_global", "ae_torque" });
+            AddItem("토크 전역 AE 재학습",       new[] { "ae_torque_global" });
+            AddItem("토크 축별 AE 재학습",       new[] { "ae_torque" });
+            AddItem("결합 AE 재학습 (전역+축별)",new[] { "ae_combined_global", "ae_combined" });
+
+            menu.Show(_btnRetrain, new System.Drawing.Point(0, _btnRetrain.Height));
+        }
+
+        /// <summary>
+        /// Airflow DAG 트리거 — train_modes conf를 전달하고 결과를 이벤트 로그에 기록합니다.
+        /// </summary>
+        private async System.Threading.Tasks.Task TriggerRetrainAsync(string[] trainModes)
+        {
+            var s = Services.ServerSettings.Current;
+            string dagId = s.AirflowDagId;
+
+            if (string.IsNullOrWhiteSpace(s.AirflowUrl) || string.IsNullOrWhiteSpace(dagId))
+            {
+                MessageBox.Show(
+                    "Airflow URL 또는 DAG ID가 설정되지 않았습니다.\n환경 설정 > 연결 설정에서 확인하세요.",
+                    "Airflow 설정 없음", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            _btnRetrain.Enabled = false;
+            _btnRetrain.Text    = "⟳ 요청 중…";
+            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] 재학습 트리거: {string.Join(", ", trainModes)}");
+
+            try
+            {
+                var conf = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["train_modes"] = trainModes
+                };
+
+                using (var client = new Services.Core.AirflowClient(s.AirflowUrl, s.AirflowUser, s.AirflowPassword))
+                {
+                    var (ok, runId, error) = await client.TriggerDagAsync(dagId, conf)
+                        .ConfigureAwait(false);
+
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (ok)
+                        {
+                            _lastRetrainRunId = runId;
+                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✓ DAG 트리거 성공  run_id={runId}");
+                        }
+                        else
+                        {
+                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✗ DAG 트리거 실패  {error}");
+                            MessageBox.Show($"DAG 트리거 실패:\n{error}", "오류",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                    AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✗ 재학습 오류  {ex.Message}")));
+            }
+            finally
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    _btnRetrain.Enabled = true;
+                    _btnRetrain.Text    = "⟳ 재학습";
+                }));
             }
         }
 
