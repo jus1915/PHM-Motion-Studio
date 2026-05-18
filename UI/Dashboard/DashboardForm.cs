@@ -4600,6 +4600,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     area.AxisY.Maximum  = double.NaN;
                     area.AxisY.Interval = double.NaN;
                 }
+            }
 
             // ── MA 이평선 업데이트 ────────────────────────────────────────────
             Tuple<string, DateTime, double> maItem;
