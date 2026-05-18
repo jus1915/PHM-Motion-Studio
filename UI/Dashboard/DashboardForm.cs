@@ -5823,8 +5823,64 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value     = normScore;
             _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value = stateText;
 
-            // 색 갱신을 위해 해당 행 무효화
-            _classMatrixDgv.InvalidateRow(rowIdx);
+            // 점수 내림차순 정렬
+            SortClassMatrixByScore();
+        }
+
+        /// <summary>
+        /// _classMatrixDgv 행을 AE 점수 내림차순으로 재정렬합니다 (UI 스레드에서만 호출).
+        /// 기존 행 슬롯에 데이터를 덮어쓰는 방식으로 깜빡임 없이 동작합니다.
+        /// </summary>
+        private void SortClassMatrixByScore()
+        {
+            if (_classMatrixDgv == null || _classMatrixAxisRow.Count == 0) return;
+
+            // 1) 현재 각 axis의 데이터 스냅샷
+            var items = new List<(int axisKey, double score, object label, object state,
+                                   object tcls, object tclsc, object ccls, object cclsc, bool visible)>();
+            foreach (var kv in _classMatrixAxisRow)
+            {
+                var r = _classMatrixDgv.Rows[kv.Value];
+                double score = 0;
+                double.TryParse(r.Cells[CMG_COL_TS].Value?.ToString(),
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out score);
+                items.Add((
+                    kv.Key,
+                    score,
+                    r.Cells[CMG_COL_AXIS].Value,
+                    r.Cells[CMG_COL_TSTATE].Value,
+                    r.Cells[CMG_COL_TCLS].Value,
+                    r.Cells[CMG_COL_TCLSCONF].Value,
+                    r.Cells[CMG_COL_CCLS].Value,
+                    r.Cells[CMG_COL_CCLSCONF].Value,
+                    r.Visible
+                ));
+            }
+
+            // 2) 점수 내림차순 정렬
+            items.Sort((a, b) => b.score.CompareTo(a.score));
+
+            // 3) 기존 행 슬롯 인덱스 목록 (추가된 순서대로)
+            var slots = _classMatrixAxisRow.Values.OrderBy(x => x).ToList();
+
+            // 4) 정렬된 순서대로 셀값 덮어쓰기 & _classMatrixAxisRow 인덱스 갱신
+            for (int i = 0; i < items.Count; i++)
+            {
+                int slot = slots[i];
+                var it   = items[i];
+                var row  = _classMatrixDgv.Rows[slot];
+                row.Cells[CMG_COL_AXIS].Value     = it.label;
+                row.Cells[CMG_COL_TS].Value        = it.score;
+                row.Cells[CMG_COL_TSTATE].Value    = it.state;
+                row.Cells[CMG_COL_TCLS].Value      = it.tcls;
+                row.Cells[CMG_COL_TCLSCONF].Value  = it.tclsc;
+                row.Cells[CMG_COL_CCLS].Value      = it.ccls;
+                row.Cells[CMG_COL_CCLSCONF].Value  = it.cclsc;
+                row.Visible                        = it.visible;
+                _classMatrixAxisRow[it.axisKey]    = slot;
+            }
+            _classMatrixDgv.Invalidate();
         }
 
         /// <summary>
