@@ -594,6 +594,7 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 if (axis.HasValue)
                 {
+                    // per-axis: 해당 축 토크 채널 1개
                     string target = "ax" + axis.Value.ToString() + "_trq(%)";
                     for (int i = 0; i < headers.Length; i++)
                     {
@@ -601,14 +602,15 @@ namespace PHM_Project_DockPanel.Services.Core
                             result.Add(i);
                     }
                 }
-
-                if (result.Count == 0)
+                else
                 {
+                    // axis=null: 전역 단일 모델(ae_torque_global) — 현재 1ch 모델이므로 첫 토크 채널만 전송.
+                    // ae_torque_global이 다채널(전 축 통합)로 재학습된 후에는 모든 Ax*_Trq(%) 컬럼을 수집하도록 변경 필요.
                     for (int i = 0; i < headers.Length; i++)
                     {
                         string h = headers[i].Trim().ToLower();
                         if (h.Contains("trq") || h.Contains("torque"))
-                            result.Add(i);
+                        { result.Add(i); break; }   // 첫 번째 토크 채널만 (1ch 모델 매칭)
                     }
                 }
             }
