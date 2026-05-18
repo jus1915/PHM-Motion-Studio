@@ -5729,7 +5729,46 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             _eventCountDgv.Rows[rowIdx].Cells[1].Value = _dangerEventCounts[axisKey];
             _eventCountDgv.Rows[rowIdx].Cells[2].Value = _warnEventCounts[axisKey];
-            _eventCountDgv.InvalidateRow(rowIdx);
+            SortEventCountByCount();
+        }
+
+        /// <summary>
+        /// _eventCountDgv 행을 위험 건수 → 경고 건수 내림차순으로 재정렬합니다 (UI 스레드에서만 호출).
+        /// </summary>
+        private void SortEventCountByCount()
+        {
+            if (_eventCountDgv == null || _eventCountRowIdx.Count == 0) return;
+
+            // 1) 스냅샷
+            var items = new List<(int axisKey, int danger, int warn, object label)>();
+            foreach (var kv in _eventCountRowIdx)
+            {
+                var r = _eventCountDgv.Rows[kv.Value];
+                int d = 0, w = 0;
+                int.TryParse(r.Cells[1].Value?.ToString(), out d);
+                int.TryParse(r.Cells[2].Value?.ToString(), out w);
+                items.Add((kv.Key, d, w, r.Cells[0].Value));
+            }
+
+            // 2) 위험 내림차순 → 경고 내림차순
+            items.Sort((a, b) =>
+            {
+                int cmp = b.danger.CompareTo(a.danger);
+                return cmp != 0 ? cmp : b.warn.CompareTo(a.warn);
+            });
+
+            // 3) 기존 슬롯에 덮어쓰기
+            var slots = _eventCountRowIdx.Values.OrderBy(x => x).ToList();
+            for (int i = 0; i < items.Count; i++)
+            {
+                int slot = slots[i];
+                var it   = items[i];
+                _eventCountDgv.Rows[slot].Cells[0].Value = it.label;
+                _eventCountDgv.Rows[slot].Cells[1].Value = it.danger;
+                _eventCountDgv.Rows[slot].Cells[2].Value = it.warn;
+                _eventCountRowIdx[it.axisKey] = slot;
+            }
+            _eventCountDgv.Invalidate();
         }
 
         /// <summary>
