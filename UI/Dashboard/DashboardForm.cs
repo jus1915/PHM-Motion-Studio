@@ -4549,11 +4549,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 foreach (Series s in ch.Series)
                     while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
 
+                // 가시 구간(xMin~xMax) 내 최댓값 계산 → Y축 자동 맞춤
+                double yMax = 0;
+                foreach (Series s in ch.Series)
+                {
+                    if (s.Name.StartsWith("_")) continue;
+                    foreach (DataPoint p in s.Points)
+                        if (p.XValue >= xMin && p.YValues[0] > yMax)
+                            yMax = p.YValues[0];
+                }
+
                 var area = ch.ChartAreas[0];
                 area.AxisX.Minimum = xMin;
                 area.AxisX.Maximum = xMax;
                 area.AxisY.Minimum = 0;
-                area.AxisY.Maximum = double.NaN;
+                area.AxisY.Maximum = yMax > 0 ? yMax * 1.15 : double.NaN;
             }
 
             // ── MA 이평선 업데이트 ────────────────────────────────────────────
