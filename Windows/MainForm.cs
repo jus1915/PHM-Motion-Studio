@@ -211,6 +211,11 @@ namespace PHM_Project_DockPanel
             // DaqAccelCsvLogger 블록 → InfluxDB (모션 런 중)
             _daq.BlockReceived += _influxPublisher.Feed;
 
+            // DaqAccelCsvLogger 블록 → 실시간 신호 모니터 브로드캐스트
+            _daq.BlockReceived += (mod, blk, ts) =>
+                AppEvents.RaiseAccelBlock(mod, blk, ts,
+                    _daq.SampleRate > 0 ? _daq.SampleRate : 1000.0);
+
             _motion.SetAccelInfluxPublisher(_influxPublisher);
         }
 
@@ -358,6 +363,10 @@ namespace PHM_Project_DockPanel
                             pmf.BlockPublished += _influxPublisher.Feed;
                         return pmf;
                     }));
+            monitorMenu.DropDownItems.Add(
+                CreateDockMenuItem("실시간 신호 모니터", DockState.Document,
+                    typeof(PHM_Project_DockPanel.UI.DataCollection.RealtimeSignalForm),
+                    () => new PHM_Project_DockPanel.UI.DataCollection.RealtimeSignalForm()));
 
             var logMenu = new ToolStripMenuItem("로그 관리");
             logMenu.DropDownItems.Add(CreateDockMenuItem<LogWriterForm>("Log Writer", DockState.DockBottom));
@@ -657,6 +666,8 @@ namespace PHM_Project_DockPanel
                 if (persistString == typeof(AnomalyDetectionForm).ToString()) return new AnomalyDetectionForm();
                 if (persistString == typeof(AIForm).ToString()) return new AIForm();
                 if (persistString == typeof(DashboardForm).ToString()) return new DashboardForm();
+                if (persistString == typeof(PHM_Project_DockPanel.UI.DataCollection.RealtimeSignalForm).ToString())
+                    return new PHM_Project_DockPanel.UI.DataCollection.RealtimeSignalForm();
             }
             catch (Exception ex)
             {

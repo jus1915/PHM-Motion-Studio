@@ -505,13 +505,17 @@ namespace PHM_Project_DockPanel.Services
                             combined.ProcessAccelBlock(modIdx, block, n, accelRate);
                         };
                         // ★ InfluxDB 토크 피드 연결: combined 내부 1ms 폴링 → InfluxDB
-                        if (_accelInfluxPublisher != null)
                         {
                             string influxModule = _accelLogger.Modules.Length > 0
                                 ? _accelLogger.Modules[0] : "combined";
                             combined.TorqueSampled = (axisIdx, torqueVal, utcTs) =>
-                                _accelInfluxPublisher.FeedTorqueSample(
-                                    influxModule, axisIdx, torqueVal, utcTs);
+                            {
+                                // 실시간 신호 모니터 브로드캐스트
+                                AppEvents.RaiseTorqueSample(axisIdx, torqueVal, utcTs);
+                                if (_accelInfluxPublisher != null)
+                                    _accelInfluxPublisher.FeedTorqueSample(
+                                        influxModule, axisIdx, torqueVal, utcTs);
+                            };
                         }
 
                         bool accelOk = _accelLogger.Start(new int[0], rootDir, baseName, 0);

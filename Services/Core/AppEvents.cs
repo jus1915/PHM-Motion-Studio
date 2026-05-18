@@ -107,6 +107,24 @@ namespace PHM_Project_DockPanel.Services
         public static void RaiseClsInferenceResult(string sensorType, CombinedInferenceResult result)
             => ClsInferenceResultReceived?.Invoke(sensorType, result);
 
+        // ── 실시간 신호 모니터 (RealtimeSignalForm) ──────────────────────────
+        /// <summary>
+        /// 가속도 블록 수신 — 비UI 스레드에서 발생.
+        /// module: 센서 모듈명  block: [3, N] (X/Y/Z, g단위)
+        /// ts: 블록 마지막 샘플 UTC  sampleRate: Hz
+        /// </summary>
+        public static event Action<string, double[,], DateTime, double> AccelBlockReceived;
+        public static void RaiseAccelBlock(string module, double[,] block, DateTime ts, double sampleRate)
+            => AccelBlockReceived?.Invoke(module, block, ts, sampleRate);
+
+        /// <summary>
+        /// 토크 샘플 수신 — 비UI 스레드에서 발생 (1ms 주기).
+        /// axis: 축 인덱스  value: 토크 [%]  ts: UTC
+        /// </summary>
+        public static event Action<int, double, DateTime> TorqueSampleReceived;
+        public static void RaiseTorqueSample(int axis, double value, DateTime ts)
+            => TorqueSampleReceived?.Invoke(axis, value, ts);
+
         // ── Teaching Sequence 루프 완료 ──────────────────────────────────────
         /// <summary>
         /// TeachingForm 에서 시퀀스 한 회차가 완료될 때마다 발생합니다.
