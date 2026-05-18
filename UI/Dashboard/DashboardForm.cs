@@ -430,6 +430,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private const int CMG_COL_CCLS     = 5;  // [CLS] 결합 결함명
         private const int CMG_COL_CCLSCONF = 6;  // [CLS] 결합 신뢰도
 
+        // ── 이벤트 카운트 표 (축별 위험/경고 누적 건수) ─────────────────────
+        private DataGridView _eventCountDgv;
+        private readonly Dictionary<int, int> _eventCountRowIdx  = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _warnEventCounts   = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _dangerEventCounts = new Dictionary<int, int>();
+
         // ── 가속도 AE 전역 표시 패널 (단일 모델 — per-axis 없음) ─────────
         private Panel  _pnlAccelAeBar;
         private Label  _lblAccelAeScore;
@@ -5101,6 +5107,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                             $"score={displayScore:F3}  thr={clientThr:F3}{cls}{spikeInfo}");
                         _lastAnomalyLogTime[key] = DateTime.Now;
 
+                        // 이벤트 카운트 표 갱신
+                        int _evtAxisKey = (isAccel && !result.Axis.HasValue)         ? -1
+                                        : (!isAccel && !isCombined && !result.Axis.HasValue) ? -10
+                                        : result.Axis.HasValue ? result.Axis.Value
+                                        : -99;
+                        if (_evtAxisKey != -99) UpdateEventCount(_evtAxisKey, isDanger);
+
                         rows.Add(new EventRow
                         {
                             TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
@@ -5161,13 +5174,79 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
+                bool isCombinedSensor = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
+
+                // ── combined AE 칩 상태 업데이트 (결합 모델 추론 칩을 상태 바에 표시) ──
+                if (isCombinedSensor && combined.Axis.HasValue && combined.AnomalyScore >= 0)
+                {
+                    string chipKey  = $"combined_ax{combined.Axis.Value}";
+                    string chipName = $"결합 Ax{combined.Axis.Value}";
+                    EnsureLiveChip(chipKey, chipName);
+
+                    // 임계값 기준 normScore
+                    if (combined.Threshold > 0)
+                        _axisThresholds.TryAdd(chipKey, combined.Threshold);
+                    double cAxThr   = _axisThresholds.TryGetValue(chipKey, out double ctv) ? ctv : 1.0;
+                    double cRawScore = (combined.RawMae.HasValue && combined.RawThreshold.HasValue
+                                        && combined.RawThreshold.Value > 0)
+                                       ? combined.RawMae.Value / combined.RawThreshold.Value
+                                       : (double)combined.AnomalyScore;
+                    double cNorm    = cAxThr > 0 ? (double)combined.AnomalyScore / cAxThr : (double)combined.AnomalyScore;
+
+                    // 연속 카운터 + 스파이크 감지
+                    bool cThreshAnom;
+                    { int prev; _consecutiveAnomalyCount.TryGetValue(chipKey, out prev);
+                      cThreshAnom = (double)combined.AnomalyScore >= cAxThr;
+                      int nc = cThreshAnom ? prev + 1 : 0;
+                      _consecutiveAnomalyCount[chipKey] = nc;
+                      cThreshAnom = nc >= AnomalyConfirmCount; }
+
+                    var cBase = _scoreBaseline.GetOrAdd(chipKey, ((double)combined.AnomalyScore, 0));
+                    bool cSpike = cBase.count >= SpikeWarmup
+                                  && (double)combined.AnomalyScore > cBase.ema * SpikeFactor;
+                    _scoreBaseline[chipKey] = (cBase.ema * (1 - SpikeEmaAlpha)
+                                               + (double)combined.AnomalyScore * SpikeEmaAlpha,
+                                               cBase.count + 1);
+
+                    bool cAnomaly = cThreshAnom || cSpike;
+
+                    // 칩 UI 갱신
+                    _statusChips.TryGetValue(chipKey, out Panel cChip);
+                    _liveStatusLabels.TryGetValue(chipKey, out Label cLblState);
+                    _liveScoreLabels.TryGetValue(chipKey,  out Label cLblScore);
+                    if (cChip     != null) cChip.BackColor    = cAnomaly ? Color.FromArgb(254, 226, 226) : Color.FromArgb(220, 252, 231);
+                    if (cLblState != null) { cLblState.Text      = cAnomaly ? "⚠ 이상" : "✓ 정상";
+                                             cLblState.ForeColor = cAnomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55); }
+                    if (cLblScore != null) cLblScore.Text = $"{cRawScore:F3}";
+
+                    // 이상 이벤트 기록 (쿨다운 + 이벤트 카운트)
+                    if (cAnomaly)
+                    {
+                        bool cIsDanger  = cNorm >= DangerMultiplier;
+                        bool cWasAnom   = _prevAnomalyState.TryGetValue(chipKey, out bool _ca) && _ca;
+                        bool cCooldownOk = !_lastAnomalyLogTime.TryGetValue(chipKey, out DateTime _ct)
+                                           || (DateTime.Now - _ct) >= AnomalyLogCooldown;
+                        if (!cWasAnom || cCooldownOk)
+                        {
+                            string cLevel = cIsDanger ? "🔴 위험" : "🟡 경고";
+                            if (cIsDanger) { Interlocked.Increment(ref cntDanger);  cardDanger.ValueText  = cntDanger  + " 건"; }
+                            else           { Interlocked.Increment(ref cntWarning); cardWarning.ValueText = cntWarning + " 건"; }
+                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] {cLevel} 결합 Ax{combined.Axis.Value} 이상  score={cRawScore:F3}  thr={cAxThr:F3}");
+                            _lastAnomalyLogTime[chipKey] = DateTime.Now;
+                            UpdateEventCount(combined.Axis.Value, cIsDanger);
+                        }
+                    }
+                    else if (_prevAnomalyState.TryGetValue(chipKey, out bool _cWas) && _cWas)
+                        AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 결합 Ax{combined.Axis.Value}  score={cRawScore:F3}");
+                    _prevAnomalyState[chipKey] = cAnomaly;
+                }
+
                 // axis 없는 결과(전역 단일 모델)는 DGV 매트릭스 갱신 스킵 — 차트 큐는 이미 위에서 추가됨
                 if (!combined.Axis.HasValue)
                 {
                     // 모델 정보 라벨만 갱신
-                    bool isCombinedSensorOnly = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
                     if (!string.IsNullOrEmpty(combined.AeModelFile) || !string.IsNullOrEmpty(combined.ClsModelFile))
-                        UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile, isCombinedSensorOnly);
+                        UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile, isCombinedSensor);
                     return;
                 }
 
@@ -5188,7 +5267,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 UpdateClassMatrixCls(combined.Axis.Value, sensorType, clsName, confVal);
 
                 // 사용 모델 파일명 라벨 갱신 (AE + CLS)
-                bool isCombinedSensor = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
                 if (!string.IsNullOrEmpty(combined.AeModelFile) || !string.IsNullOrEmpty(combined.ClsModelFile))
                     UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile, isCombinedSensor);
 
@@ -5197,7 +5275,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 {
                     string axLabel   = $" Ax{combined.Axis.Value}";
                     string sensor    = isAccel ? "가속도"
-                                     : string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase) ? "결합"
+                                     : isCombinedSensor ? "결합"
                                      : "토크";
                     string conf      = combined.ClsConfidence.HasValue
                                        ? $"  신뢰도={combined.ClsConfidence.Value:P0}" : "";
@@ -5455,9 +5533,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         /// </summary>
         private Panel BuildClassMatrixPanel()
         {
-            var wrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 4) };
+            var outer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 4) };
 
-            var lbl = new Label
+            var hdr = new Label
             {
                 Text = "실시간 이상탐지 현황  ( AE: 가속도·토크 이상탐지 점수/판정 )",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
@@ -5466,6 +5544,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Padding = new Padding(4, 0, 0, 0)
             };
 
+            // ── 좌/우 분할: 60% AE 매트릭스 / 40% 이벤트 카운트 표 ──────────
+            var tbl = new TableLayoutPanel
+            {
+                Dock        = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount    = 1,
+                Margin      = Padding.Empty,
+                Padding     = Padding.Empty
+            };
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60f));
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40f));
+            tbl.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            // ── 좌: AE 이상탐지 매트릭스 DGV ─────────────────────────────────
             _classMatrixDgv = new DataGridView
             {
                 Dock = DockStyle.Fill,
@@ -5521,10 +5613,109 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                   DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
 
             _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
+            tbl.Controls.Add(_classMatrixDgv, 0, 0);
 
-            wrap.Controls.Add(_classMatrixDgv);
-            wrap.Controls.Add(lbl);   // Top — 최상단 헤더
-            return wrap;
+            // ── 우: 이벤트 카운트 표 ─────────────────────────────────────────
+            var dgvHeaderStyle = new DataGridViewCellStyle
+            {
+                Font      = new Font("Segoe UI", 8f, FontStyle.Bold),
+                BackColor = Color.FromArgb(50, 50, 65),
+                ForeColor = Color.White,
+                Alignment = DataGridViewContentAlignment.MiddleCenter
+            };
+            _eventCountDgv = new DataGridView
+            {
+                Dock        = DockStyle.Fill,
+                ReadOnly    = true,
+                AllowUserToAddRows    = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                RowHeadersVisible   = false,
+                SelectionMode       = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect         = false,
+                AutoGenerateColumns = false,
+                EnableHeadersVisualStyles        = false,
+                ColumnHeadersHeightSizeMode      = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight              = 22,
+                BackgroundColor                  = SystemColors.Window,
+                BorderStyle                      = BorderStyle.None,
+                GridColor                        = Color.FromArgb(220, 220, 225),
+                DefaultCellStyle                 = new DataGridViewCellStyle
+                {
+                    Font      = new Font("Segoe UI", 8.5f),
+                    Alignment = DataGridViewContentAlignment.MiddleCenter
+                },
+                ColumnHeadersDefaultCellStyle = dgvHeaderStyle
+            };
+            _eventCountDgv.RowTemplate.Height = 24;
+            _eventCountDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "EvtAxis",   HeaderText = "축",       Width = 60, MinimumWidth = 52, ReadOnly = true,
+                  DefaultCellStyle   = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleLeft, Padding = new Padding(4,0,0,0) } });
+            _eventCountDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "EvtDanger", HeaderText = "🔴 위험",  Width = 50, MinimumWidth = 44, ReadOnly = true,
+                  DefaultCellStyle   = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            _eventCountDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "EvtWarn",   HeaderText = "🟡 경고",  AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 44, ReadOnly = true,
+                  DefaultCellStyle   = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter } });
+
+            _eventCountDgv.CellFormatting += EventCountDgv_CellFormatting;
+            tbl.Controls.Add(_eventCountDgv, 1, 0);
+
+            outer.Controls.Add(tbl);
+            outer.Controls.Add(hdr);   // Top — 최상단 헤더
+            return outer;
+        }
+
+        /// <summary>이벤트 카운트 DGV 셀 색상 (위험=연빨강, 경고=연노랑, 0=흰색)</summary>
+        private void EventCountDgv_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.ColumnIndex == 1) // 위험
+            {
+                int v = 0;
+                int.TryParse(e.Value?.ToString(), out v);
+                e.CellStyle.BackColor = v > 0 ? Color.FromArgb(255, 220, 220) : Color.FromArgb(245, 245, 248);
+                e.CellStyle.ForeColor = v > 0 ? Color.FromArgb(160, 20, 20)   : Color.Gray;
+            }
+            else if (e.ColumnIndex == 2) // 경고
+            {
+                int v = 0;
+                int.TryParse(e.Value?.ToString(), out v);
+                e.CellStyle.BackColor = v > 0 ? Color.FromArgb(255, 248, 210) : Color.FromArgb(245, 245, 248);
+                e.CellStyle.ForeColor = v > 0 ? Color.FromArgb(150, 100, 0)   : Color.Gray;
+            }
+        }
+
+        /// <summary>
+        /// 이벤트 카운트 표를 업데이트합니다. (UI 스레드에서만 호출)
+        /// axisKey: -1=가속도, -10=토크 전역, 0~N=Ax{N}
+        /// </summary>
+        private void UpdateEventCount(int axisKey, bool isDanger)
+        {
+            if (_eventCountDgv == null) return;
+
+            if (!_warnEventCounts.ContainsKey(axisKey))    _warnEventCounts[axisKey]   = 0;
+            if (!_dangerEventCounts.ContainsKey(axisKey))  _dangerEventCounts[axisKey] = 0;
+
+            if (isDanger) _dangerEventCounts[axisKey]++;
+            else          _warnEventCounts[axisKey]++;
+
+            // 행 확보
+            if (!_eventCountRowIdx.TryGetValue(axisKey, out int rowIdx))
+            {
+                rowIdx = _eventCountDgv.Rows.Add();
+                string axLabel = axisKey == -1  ? "가속도"
+                               : axisKey == -10 ? "토크 전역"
+                               : $"Ax{axisKey}";
+                _eventCountDgv.Rows[rowIdx].Cells[0].Value = axLabel;
+                _eventCountDgv.Rows[rowIdx].Cells[1].Value = 0;
+                _eventCountDgv.Rows[rowIdx].Cells[2].Value = 0;
+                _eventCountRowIdx[axisKey] = rowIdx;
+            }
+
+            _eventCountDgv.Rows[rowIdx].Cells[1].Value = _dangerEventCounts[axisKey];
+            _eventCountDgv.Rows[rowIdx].Cells[2].Value = _warnEventCounts[axisKey];
+            _eventCountDgv.InvalidateRow(rowIdx);
         }
 
         /// <summary>
