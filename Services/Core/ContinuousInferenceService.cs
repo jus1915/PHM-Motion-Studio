@@ -152,13 +152,12 @@ namespace PHM_Project_DockPanel.Services.Core
                 //   • 토크:   축별     → axis = n,    Op 필터 없음
                 await RunAeInferenceAll(ct);
 
-                // ── (2) CLS 추론: EnableCls=true 일 때만 실행 ────────────────
+                // ── (2) 결합 이상 스코어: 항상 실행 (/predict/combined → AE 스코어) ──
+                await RunCombinedClsAll(ct);
+
+                // ── (3) 가속도/토크 CLS: EnableCls=true + Pos 상태일 때만 실행 ────
                 if (EnableCls)
                 {
-                    // 결합 CLS: Idle/Pos 무관하게 항상 실행
-                    await RunCombinedClsAll(ct);
-
-                    // 가속도/토크 CLS: Pos 상태일 때만 실행
                     string op = GetCurrentOp();
                     if (op == "Pos")
                     {
@@ -193,13 +192,6 @@ namespace PHM_Project_DockPanel.Services.Core
                         await RunAeInference(cp, "torque", ax, ct);
                 else
                     await RunAeInference(cp, "torque", null, ct);
-
-                // 결합 AE: 축별 (ae_combined_ax{n}.onnx — accel+torque 통합 모델)
-                if (_axes != null)
-                    foreach (int ax in _axes)
-                        await RunAeInference(cp, "combined", ax, ct);
-                else
-                    await RunAeInference(cp, "combined", null, ct);
             }
             else
             {
