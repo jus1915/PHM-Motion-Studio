@@ -39,6 +39,11 @@ namespace PHM_Project_DockPanel.Services.Core
 
         private int? _lastMovingAxis = null;
 
+        // ── 개별 AE 스코어 캐시 (combined 폴백용) ─────────────────────────────
+        private float _latestAccelScore = 0f;
+        private readonly System.Collections.Generic.Dictionary<int, float> _latestTorqueScores
+            = new System.Collections.Generic.Dictionary<int, float>();
+
         /// <summary>
         /// CLS(결함진단) 추론 활성화 여부. 기본 false — AE 이상탐지만 실행.
         /// true로 설정 시 RunClsInferenceAll / RunCombinedClsAll 호출.
@@ -273,20 +278,59 @@ namespace PHM_Project_DockPanel.Services.Core
             string cp = _combinedLogger.OutputPath;
             if (string.IsNullOrEmpty(cp) || !File.Exists(cp)) return;
 
-            // combined CLS 모델은 Pos(모션) 구간 데이터로만 학습됨
-            // → filterOp 기본값(sensorType != "accel" = true) 그대로 사용: Pos 행만 입력
-            // → 정지 상태에서는 Pos 행 없음 → window=null → 추론 스킵 (false alarm 방지)
-            int? axis = _lastMovingAxis;
-
-            // filterOp=false: Idle/Pos 전체 행 사용 — 결합 이상 스코어는 항상 갱신
+            // 처리할 축 목록 구성
+            System.Collections.Generic.List<int?> axList;
             if (_axes != null)
             {
-                foreach (int ax in _axes)
-                    await RunClsInference(cp, "combined", ax, ct, filterOp: false);
+                axList = new System.Collections.Generic.List<int?>();
+                foreach (int ax in _axes) axList.Add(ax);
             }
             else
             {
-                await RunClsInference(cp, "combined", axis, ct, filterOp: false);
+                axList = new System.Collections.Generic.List<int?> { _lastMovingAxis };
+            }
+
+            foreach (int? ax in axList)
+            {
+                // ── 1차 시도: 서버의 ae_combined / cls_combined 모델 사용 ──────────
+                int nCh;
+                int ws = GetWindowSize("combined");
+                float[] window = ReadLastWindow(cp, "combined", ws, ax, out nCh,
+                    filterOp: false);   // Idle/Pos 전체 행 사용
+
+                bool serverSuccess = false;
+                if (window != null)
+                {
+                    CombinedInferenceResult combined = await _client.PredictCombinedAsync(
+                        window, ws, nCh, "combined", ax, ct);
+
+                    if (!combined.IsError)
+                    {
+                        AppEvents.RaiseClsInferenceResult("combined", combined);
+                        serverSuccess = true;
+                    }
+                    // 404 등 서버 오류는 조용히 폴백 (반복 로그 스팸 방지)
+                }
+
+                if (serverSuccess) continue;
+
+                // ── 2차 폴백: 개별 accel/torque AE 스코어의 최댓값으로 합성 ─────────
+                // 서버에 ae_combined 모델이 없어도 combined 차트는 항상 갱신됨.
+                float torqueScore = 0f;
+                if (ax.HasValue)
+                    _latestTorqueScores.TryGetValue(ax.Value, out torqueScore);
+                float combinedScore = Math.Max(_latestAccelScore, torqueScore);
+
+                var synth = new CombinedInferenceResult
+                {
+                    SensorType   = "combined",
+                    Axis         = ax,
+                    IsAnomaly    = combinedScore >= 1.0f,
+                    AnomalyScore = combinedScore,
+                    Threshold    = 1.0f,
+                    ClsAvailable = false,
+                };
+                AppEvents.RaiseClsInferenceResult("combined", synth);
             }
         }
 
@@ -317,6 +361,14 @@ namespace PHM_Project_DockPanel.Services.Core
                 AppEvents.RaiseLog(
                     $"[AE 추론 오류] sensorType={sensorType} axis={axis?.ToString() ?? "null"}" +
                     $"  nCh={nCh}  windowLen={window.Length}  →  {result.Error}");
+            else
+            {
+                // combined 폴백용: 최신 개별 AE 스코어 캐시
+                if (sensorType == "accel")
+                    _latestAccelScore = result.AnomalyScore;
+                else if (sensorType == "torque" && axis.HasValue)
+                    _latestTorqueScores[axis.Value] = result.AnomalyScore;
+            }
 
             AppEvents.RaiseInferenceResult(sensorType, result);
         }
