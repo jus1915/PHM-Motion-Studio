@@ -446,18 +446,19 @@ def run_training_ae_torque(**context) -> None:
     """
     AE 이상탐지 — 토크 축별 모델 학습.
 
-    · channels               = ["Ax{n}_Trq(%)"]
-    · filter_op_column       = f"Op_Ax{n}"  (기동 구간만 학습 — Idle near-zero 제외)
-    · standardize_per_sample = True          (윈도우별 독립 정규화, 스케일 무관 패턴 학습)
-    · augment_mode           = "mixed"
-    · normalize              = False
+    · channels          = ["Ax{n}_Trq(%)"]
+    · filter_op_column  = None  (Idle + 기동 전체 학습)
+    · augment_mode      = "mixed"
+    · normalize         = False
     · 출력: ae_torque_ax0.onnx, ae_torque_ax1.onnx, ...
 
     [전처리 설명]
-    토크 신호는 Idle(≈0)과 기동충격(±수백%) 이중 분포(bimodal)를 가짐.
-    Idle 구간을 포함하면 AE가 "near-zero = 정상"에 과적합 → 기동 중 이상 탐지 민감도 저하.
-    filter_op_column으로 기동 구간만 선별하고, standardize_per_sample로
-    절대 스케일 차이를 제거해 패턴(형상) 위주로 학습함.
+    토크 AE는 Idle(≈0)과 기동 패턴 모두 "정상"으로 학습해야 함.
+    filter_op_column으로 기동 구간만 학습하면:
+      - norm_mean/std가 기동 데이터 기준으로 계산됨
+      - 실제 기동 중 정상 패턴도 이상으로 판정되는 false alarm 발생
+    전체 데이터(Idle+기동)로 학습하면:
+      - AE가 두 상태 모두 "정상"으로 학습 → 실제 이상만 재구성 오차 증가
     """
     conf = dict(context["dag_run"].conf or {})
 
@@ -472,13 +473,12 @@ def run_training_ae_torque(**context) -> None:
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ AE 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["session"]                = "AE"
-        params["sensor_type"]            = "torque"
-        params["channels"]               = [f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"]       = f"Op_Ax{ax}"   # 기동 구간만 학습
-        params["standardize_per_sample"] = True            # 윈도우별 독립 정규화
-        params["augment_mode"]           = "mixed"
-        params["normalize"]              = False
+        params["session"]          = "AE"
+        params["sensor_type"]      = "torque"
+        params["channels"]         = [f"Ax{ax}_Trq(%)"]
+        params["filter_op_column"] = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["augment_mode"]     = "mixed"
+        params["normalize"]        = False
         params["output"] = str(profile_dir / f"ae_torque_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
@@ -498,9 +498,8 @@ def run_training_ae_torque_global(**context) -> None:
     · 출력: ae_torque_global.onnx  (단일, 축 suffix 없음)
 
     [전처리 설명]
-    전역 모델은 복수 축의 토크를 통합 학습하므로 축 간 스케일 차이가 발생함.
-    standardize_per_sample로 윈도우별 정규화를 적용해 축 간 스케일 편차를 제거하고
-    패턴(형상) 위주로 학습함. filter_op는 None 유지 — 어느 축이 동작 중이든 포함.
+    전역 모델은 복수 축의 토크를 통합 학습. Idle+기동 전체 데이터로 학습해야
+    정상 상태를 폭넓게 커버하고 false alarm을 방지함.
     """
     conf = dict(context["dag_run"].conf or {})
 
@@ -513,13 +512,12 @@ def run_training_ae_torque_global(**context) -> None:
     profile_dir = _get_profile_dir(conf)
 
     params = {**_DEFAULT_CONF, **conf}
-    params["session"]                = "AE"
-    params["sensor_type"]            = "torque"
-    params["channels"]               = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
-    params["filter_op_column"]       = None    # 전체 행 — 어느 축이 동작 중이어도 학습
-    params["standardize_per_sample"] = True    # 윈도우별 독립 정규화
-    params["augment_mode"]           = "mixed"
-    params["normalize"]              = False
+    params["session"]          = "AE"
+    params["sensor_type"]      = "torque"
+    params["channels"]         = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
+    params["filter_op_column"] = None   # 전체 행 — 어느 축이 동작 중이어도 학습
+    params["augment_mode"]     = "mixed"
+    params["normalize"]        = False
     params["output"] = str(profile_dir / "ae_torque_global.onnx")
     print(f"[PHM] AE 토크 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_torque_global")
@@ -538,9 +536,8 @@ def run_training_ae_combined_global(**context) -> None:
     · 출력: ae_combined_global.onnx  (단일, 축 suffix 없음)
 
     [전처리 설명]
-    가속도(mg/g단위)와 토크(% 단위)는 절대 스케일이 근본적으로 다름.
-    standardize_per_sample로 윈도우별 독립 정규화를 적용해 채널 간 스케일 편차를 제거하고
-    각 채널의 형상(패턴)을 공정하게 학습함.
+    가속도+토크 전역 모델. Idle+기동 전체 학습으로 정상 상태를 폭넓게 커버.
+    채널 간 스케일 차이(mg/g vs %)는 global_norm(학습 중 채널별 mean/std 계산)으로 흡수됨.
     """
     conf = dict(context["dag_run"].conf or {})
 
@@ -553,13 +550,12 @@ def run_training_ae_combined_global(**context) -> None:
     profile_dir = _get_profile_dir(conf)
 
     params = {**_DEFAULT_CONF, **conf}
-    params["session"]                = "AE"
-    params["sensor_type"]            = "combined"
-    params["channels"]               = ["x", "y", "z"] + [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
-    params["filter_op_column"]       = None
-    params["standardize_per_sample"] = True    # 윈도우별 독립 정규화
-    params["augment_mode"]           = "standard"
-    params["normalize"]              = True
+    params["session"]          = "AE"
+    params["sensor_type"]      = "combined"
+    params["channels"]         = ["x", "y", "z"] + [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
+    params["filter_op_column"] = None   # 전체 행 학습
+    params["augment_mode"]     = "standard"
+    params["normalize"]        = True
     params["output"] = str(profile_dir / "ae_combined_global.onnx")
     print(f"[PHM] AE 결합 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_combined_global")
@@ -578,8 +574,9 @@ def run_training_ae_combined(**context) -> None:
     · 출력: ae_combined_ax0.onnx, ae_combined_ax1.onnx, ...
 
     [전처리 설명]
-    토크 채널의 Idle(≈0) 구간을 filter_op_column으로 제거해 기동 중 이상 탐지 민감도를 높임.
-    가속도(mg/g)와 토크(%) 간 절대 스케일 차이는 standardize_per_sample로 윈도우별 흡수함.
+    결합 모델(가속도+토크)도 Idle+기동 전체 데이터로 학습해야 정상 상태를 폭넓게 커버함.
+    filter_op_column으로 기동 구간만 학습 시 정상 기동 패턴도 이상으로 판정되는 문제 발생.
+    가속도(mg/g)와 토크(%) 스케일 차이는 global_norm(학습 중 자동 계산)으로 흡수됨.
     """
     conf = dict(context["dag_run"].conf or {})
 
@@ -594,13 +591,12 @@ def run_training_ae_combined(**context) -> None:
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ AE 결합 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["session"]                = "AE"
-        params["sensor_type"]            = "combined"
-        params["channels"]               = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"]       = f"Op_Ax{ax}"   # 기동 구간만 학습
-        params["standardize_per_sample"] = True            # 윈도우별 독립 정규화
-        params["augment_mode"]           = "standard"
-        params["normalize"]              = True
+        params["session"]          = "AE"
+        params["sensor_type"]      = "combined"
+        params["channels"]         = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
+        params["filter_op_column"] = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["augment_mode"]     = "standard"
+        params["normalize"]        = True
         params["output"] = str(profile_dir / f"ae_combined_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_combined_ax{ax}")
