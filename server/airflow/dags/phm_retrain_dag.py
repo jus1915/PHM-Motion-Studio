@@ -85,8 +85,8 @@ _DEFAULT_CONF: dict = {
         "ae_torque_global", "ae_torque",
         "ae_combined_global", "ae_combined",
     ],
-    # AE threshold: 99th pct → 99.5th pct (정상 동작 중 false alarm 감소)
-    "ae_threshold_percentile":  99.5,
+    # AE threshold: 99.9th pct (정상 기동 패턴 포함, false alarm 감소)
+    "ae_threshold_percentile":  99.9,
     # MLflow 추적 서버 — 컨테이너 내부 서비스명 사용 (--serve-artifacts 프록시 모드)
     # MLFLOW_TRACKING_URI env var 로도 설정됨 (docker-compose); 여기선 명시적 override
     "mlflow_tracking_uri":      "http://mlflow:5000",
