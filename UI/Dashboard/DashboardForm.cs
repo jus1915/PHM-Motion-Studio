@@ -499,8 +499,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private static readonly TimeSpan AnomalyLogCooldown = TimeSpan.FromSeconds(30);
 
         // ── 연속 이상 카운터 (N회 연속 threshold 초과 시 경보 확정) ──────────
-        // 256ms 간격 × 5회 = 약 1.3초 연속 초과 시 확정 → 단발성 노이즈 무시
-        private const int AnomalyConfirmCount = 5;
+        // 256ms 간격 × 1회 = 즉시 확정 → 500ms 미만 단발 모션도 감지
+        private const int AnomalyConfirmCount = 1;
         private readonly Dictionary<string, int> _consecutiveAnomalyCount
             = new Dictionary<string, int>();
 
