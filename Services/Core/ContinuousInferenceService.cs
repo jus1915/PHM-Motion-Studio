@@ -302,7 +302,7 @@ namespace PHM_Project_DockPanel.Services.Core
                 int nCh;
                 int ws = GetWindowSize("combined");
                 float[] window = ReadLastWindow(cp, "combined", ws, ax, out nCh,
-                    filterOp: false);   // Idle/Pos 전체 행 사용
+                    filterOp: true);    // 기동 구간만 — filter_op_column 학습과 일치
 
                 bool serverSuccess = false;
                 if (window != null)
@@ -345,16 +345,18 @@ namespace PHM_Project_DockPanel.Services.Core
         // ──────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// AE 이상탐지 추론 — filterOp=false (전체 데이터), /predict 엔드포인트 사용.
+        /// AE 이상탐지 추론 — /predict 엔드포인트 사용.
+        /// · accel       : filterOp=false (전체 행 — Idle 포함 학습과 일치)
+        /// · torque/combined : filterOp=true (기동 구간만 — filter_op_column 학습과 일치)
+        ///   기동 구간 데이터가 부족하면 window==null → 추론 생략 (Idle 중 false alarm 방지)
         /// </summary>
         private async Task RunAeInference(
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            // AE 추론: 모든 센서 타입 filterOp=false (전체 행 사용)
-            // torque/combined 재학습 시 filter_op_column=None 적용 예정 → 학습과 일치
-            // 현재 모델(Pos 학습)이라도 일단 데이터를 보여주는 것이 평가에 필요
-            bool filterOp = false;
+            // accel: 전체 행 사용 (Idle 포함 학습과 일치)
+            // torque/combined: 기동 구간(Op==Pos)만 사용 — 학습 시 filter_op_column="Op_Ax{n}" 적용과 일치
+            bool filterOp = (sensorType != "accel");
             int ws = GetWindowSize(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
                 filterOp: filterOp);

@@ -83,6 +83,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public string OutputName = "logits"; // 분류기일 때
             public bool StandardizePerSample = true;
 
+            // AE 전역 정규화 파라미터 (_meta.json 의 norm_mean / norm_std)
+            // null 이면 StandardizePerSample 분기 사용, 있으면 전역 정규화 우선
+            public double[] NormMean = null;
+            public double[] NormStd  = null;
+
             public bool IsAutoencoder;          // AE 여부
             public string ReconOutputName = "recon"; // (T,C) 또는 (1,T,C)
             public double Threshold = 1.0;      // AE 스코어 임계값 (없으면 DashboardForm.DefaultThreshold)
@@ -1697,7 +1702,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public double   Threshold   = -1;   // -1 = 없음(기본값 사용)
             public double   RmsMean     = -1;   // AE 정상 RMS 평균
             public double   RmsThr      = -1;   // AE RMS 임계값
-            public int      WindowSize  = 256;   // 학습 시 슬라이딩 윈도우 크기
+            public int      WindowSize  = 256;  // 학습 시 슬라이딩 윈도우 크기
+            // 전역 정규화 파라미터 (norm_mean / norm_std)
+            public double[] NormMean    = null;
+            public double[] NormStd     = null;
+            public bool     StandardizePerSample = true;
         }
 
         private static OnnxMeta TryParseOnnxMeta(string onnxPath)
@@ -1753,6 +1762,25 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         int wv;
                         if (wp.TryGetInt32(out wv) && wv > 0) m.WindowSize = wv;
                     }
+                    // 전역 정규화 파라미터
+                    if (root.TryGetProperty("norm_mean", out var nmp) &&
+                        nmp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var arr = new System.Collections.Generic.List<double>();
+                        foreach (var v in nmp.EnumerateArray())
+                        { double dv; if (v.TryGetDouble(out dv)) arr.Add(dv); }
+                        if (arr.Count > 0) m.NormMean = arr.ToArray();
+                    }
+                    if (root.TryGetProperty("norm_std", out var nsp) &&
+                        nsp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var arr = new System.Collections.Generic.List<double>();
+                        foreach (var v in nsp.EnumerateArray())
+                        { double dv; if (v.TryGetDouble(out dv)) arr.Add(dv); }
+                        if (arr.Count > 0) m.NormStd = arr.ToArray();
+                    }
+                    if (root.TryGetProperty("standardize_per_sample", out var spp))
+                        m.StandardizePerSample = spp.GetBoolean();
                     return m;
                 }
             }
@@ -1915,23 +1943,44 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 try { session = new InferenceSession(onnxPath); }
                 catch (Exception ex) { MessageBox.Show("ONNX 로드 실패: " + ex.Message); return; }
 
+                // meta.json 에서 전역 정규화 파라미터 로드
+                double[] normMean = null;
+                double[] normStd  = null;
+                bool standardizePerSample = true;  // 기본: per-sample z-score
+                if (isAe && meta != null)
+                {
+                    if (meta.NormMean != null && meta.NormMean.Length > 0)
+                    {
+                        normMean = meta.NormMean;
+                        normStd  = meta.NormStd;
+                        standardizePerSample = false;  // 전역 정규화 사용
+                    }
+                    else
+                    {
+                        // meta.json 의 standardize_per_sample 값 우선 사용
+                        standardizePerSample = meta.StandardizePerSample;
+                    }
+                }
+
                 var om = new OnnxAxisModel
                 {
-                    AxisId              = axis,
-                    ModelPath           = onnxPath,
-                    YColumn             = yCol,
-                    C                   = C,
-                    Kind                = kind,
-                    InputName           = "input",
-                    OutputName          = isAe ? null    : "logits",
-                    ReconOutputName     = isAe ? "recon" : null,
-                    IsAutoencoder       = isAe,
-                    StandardizePerSample = true,   // AE도 per-sample z-score 사용 (형태 학습)
-                    RmsMean             = (isAe && meta != null) ? meta.RmsMean : -1,
-                    RmsThr              = (isAe && meta != null) ? meta.RmsThr  : -1,
-                    WindowSize          = (isAe && meta != null && meta.WindowSize > 0) ? meta.WindowSize : 256,
-                    Threshold           = threshold,
-                    Session             = session,
+                    AxisId               = axis,
+                    ModelPath            = onnxPath,
+                    YColumn              = yCol,
+                    C                    = C,
+                    Kind                 = kind,
+                    InputName            = "input",
+                    OutputName           = isAe ? null    : "logits",
+                    ReconOutputName      = isAe ? "recon" : null,
+                    IsAutoencoder        = isAe,
+                    StandardizePerSample = standardizePerSample,
+                    NormMean             = normMean,
+                    NormStd              = normStd,
+                    RmsMean              = (isAe && meta != null) ? meta.RmsMean : -1,
+                    RmsThr               = (isAe && meta != null) ? meta.RmsThr  : -1,
+                    WindowSize           = (isAe && meta != null && meta.WindowSize > 0) ? meta.WindowSize : 256,
+                    Threshold            = threshold,
+                    Session              = session,
                 };
 
                 if (isAe)
@@ -2155,7 +2204,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (T < W)
             {
                 double rawRms = ComputeRms(seq, 0, T);
-                if (om.StandardizePerSample) ZScoreInPlace(seq);
+                if (om.NormMean != null && om.NormStd != null)
+                    GlobalNormalizeInPlace(seq, om.NormMean, om.NormStd);
+                else if (om.StandardizePerSample)
+                    ZScoreInPlace(seq);
                 double mae = AeInferWindow(om, seq, 0, T);
                 score = CompositeAeScore(mae, rawRms, om);
                 info  = string.Format("AE W={0} single", T);
@@ -2170,8 +2222,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 double rawRms = ComputeRms(seq, start, W);
                 if (rawRms > windowRmsMax) windowRmsMax = rawRms;
 
-                // z-score 슬라이스 복사 후 추론
-                double mae = AeInferWindowZScore(om, seq, start, W);
+                // 전처리 분기: 전역 정규화 우선, 없으면 per-sample z-score
+                double mae;
+                if (om.NormMean != null && om.NormStd != null)
+                    mae = AeInferWindowGlobalNorm(om, seq, start, W);
+                else if (om.StandardizePerSample)
+                    mae = AeInferWindowZScore(om, seq, start, W);
+                else
+                    mae = AeInferWindow(om, seq, start, W);
                 if (mae < 0) continue;
                 if (mae > maxMae) maxMae = mae;
                 wCount++;
@@ -2217,13 +2275,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private double AeInferWindowZScore(OnnxAxisModel om, float[,] seq, int start, int length)
         {
             int C = seq.GetLength(1);
-            // 슬라이스 복사 + z-score
+            // 슬라이스 복사 + per-sample z-score
             float[,] win = new float[length, C];
             for (int t = 0; t < length; t++)
                 for (int c = 0; c < C; c++)
                     win[t, c] = seq[start + t, c];
             ZScoreInPlace(win);
+            return AeInferWindow(om, win, 0, length);
+        }
 
+        /// <summary>슬라이스 복사 후 전역 정규화(norm_mean/norm_std) 적용해 MAE를 반환합니다.</summary>
+        private double AeInferWindowGlobalNorm(OnnxAxisModel om, float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            float[,] win = new float[length, C];
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    win[t, c] = seq[start + t, c];
+            GlobalNormalizeInPlace(win, om.NormMean, om.NormStd);
             return AeInferWindow(om, win, 0, length);
         }
 
