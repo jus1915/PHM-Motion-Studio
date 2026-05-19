@@ -302,7 +302,7 @@ namespace PHM_Project_DockPanel.Services.Core
                 int nCh;
                 int ws = GetWindowSize("combined");
                 float[] window = ReadLastWindow(cp, "combined", ws, ax, out nCh,
-                    filterOp: true);    // 기동 구간만 — Idle 중 false alarm 방지
+                    filterOp: false);   // 학습과 동일: Idle+Pos 전체 행 사용
 
                 bool serverSuccess = false;
                 if (window != null)
@@ -346,19 +346,15 @@ namespace PHM_Project_DockPanel.Services.Core
 
         /// <summary>
         /// AE 이상탐지 추론 — /predict 엔드포인트 사용.
-        /// · accel       : filterOp=false (전체 행 — Idle 포함 학습과 일치)
-        /// · torque/combined : filterOp=true (기동 구간만 평가)
-        ///   학습은 filter_op=None(전체)으로 norm_mean/std를 올바르게 계산하되,
-        ///   추론은 기동 구간만 사용해 Idle 구간의 false alarm 방지.
-        ///   기동 구간 데이터가 부족하면 window==null → 추론 생략 (Idle 중 무음).
+        /// 학습이 filter_op=None(Idle+Pos 전체)으로 수행되므로
+        /// 추론도 전체 행을 사용해야 threshold 기준이 일치함.
         /// </summary>
         private async Task RunAeInference(
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            // accel: 전체 행 (Idle+기동 모두 학습)
-            // torque/combined: 기동 구간(Op==Pos)만 평가 — Idle 중 false alarm 방지
-            bool filterOp = (sensorType != "accel");
+            // 학습: Idle+Pos 전체 → 추론도 전체 행 사용 (분포 일치)
+            bool filterOp = false;
             int ws = GetWindowSize(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
                 filterOp: filterOp);
