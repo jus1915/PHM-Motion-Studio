@@ -654,16 +654,21 @@ def predict(req: PredictRequest):
         )
 
     # ── 모델 기대 채널 수 검증 ────────────────────────────────────────────────
-    model_n_channels = meta.get("n_channels")
-    if model_n_channels and req.n_channels != model_n_channels:
+    # meta["n_channels"]: 증강 후 ONNX 모델 입력 채널 수 (add_fft/deriv 포함)
+    # meta["channels"]:   학습에 사용된 raw CSV 채널 목록 → 클라이언트가 보내는 채널 수
+    # 클라이언트는 항상 raw 채널을 전송하고 서버가 증강을 적용하므로
+    # raw 채널 수 기준으로 검증한다.
+    raw_channels     = meta.get("channels", [])
+    raw_n_channels   = len(raw_channels) if raw_channels else meta.get("n_channels")
+    if raw_n_channels and req.n_channels != raw_n_channels:
         # per-axis 요청인데 폴백 전역 모델(다채널)로 떨어진 경우:
         # 채널 수가 다른 더 적합한 모델을 재탐색하지 않고 에러 반환
         # (→ 해결책: Airflow per-axis 토크 학습 실행)
         raise HTTPException(
             status_code=400,
             detail=(
-                f"채널 수 불일치: 모델={model_n_channels}ch, 요청={req.n_channels}ch. "
-                f"모델 학습 채널: {meta.get('channels', '?')}. "
+                f"채널 수 불일치: 모델 raw={raw_n_channels}ch, 요청={req.n_channels}ch. "
+                f"모델 학습 채널: {raw_channels}. "
                 + (
                     f"per-axis 모델(ae_torque_ax{req.axis}.onnx)이 없어 전역 모델로 폴백됨. "
                     f"Airflow train_torque 태스크를 실행하세요."
