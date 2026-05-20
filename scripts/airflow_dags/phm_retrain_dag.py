@@ -540,11 +540,12 @@ def run_training_ae_combined_global(**context) -> None:
     """
     AE 이상탐지 — 가속도+토크 전역 모델 학습 (전 축 통합, 축 구분 없음).
 
-    · channels               = ["x","y","z","Ax0_Trq(%)","Ax1_Trq(%)", ...]
-    · filter_op_column       = None
-    · standardize_per_sample = True  (채널 간 가속도/토크 스케일 차이를 윈도우별 정규화로 흡수)
-    · augment_mode           = "standard"
-    · normalize              = True
+    · channels                = ["x","y","z","Ax0_Trq(%)","Ax1_Trq(%)", ...]
+    · filter_op_column        = None
+    · standardize_per_sample  = True  (채널 간 가속도/토크 스케일 차이를 윈도우별 정규화로 흡수)
+    · augment_mode            = "standard"
+    · normalize               = True
+    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 상태 오탐 감소)
     · 출력: ae_combined_global.onnx  (단일, 축 suffix 없음)
 
     [전처리 설명]
@@ -562,12 +563,13 @@ def run_training_ae_combined_global(**context) -> None:
     profile_dir = _get_profile_dir(conf)
 
     params = {**_DEFAULT_CONF, **conf}
-    params["session"]          = "AE"
-    params["sensor_type"]      = "combined"
-    params["channels"]         = ["x", "y", "z"] + [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
-    params["filter_op_column"] = None   # 전체 행 학습
-    params["augment_mode"]     = "standard"
-    params["normalize"]        = True
+    params["session"]                = "AE"
+    params["sensor_type"]            = "combined"
+    params["channels"]               = ["x", "y", "z"] + [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
+    params["filter_op_column"]       = None   # 전체 행 학습
+    params["augment_mode"]           = "standard"
+    params["normalize"]              = True
+    params["ae_threshold_percentile"]= 99.95  # 결합 전역: 99.9 → 99.95 오탐 감소
     params["output"] = str(profile_dir / "ae_combined_global.onnx")
     print(f"[PHM] AE 결합 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_combined_global")
@@ -578,11 +580,12 @@ def run_training_ae_combined(**context) -> None:
     """
     AE 이상탐지 — 가속도+토크 축별 모델 학습.
 
-    · channels               = ["x","y","z","Ax{n}_Trq(%)"]
-    · filter_op_column       = f"Op_Ax{n}"  (해당 축 기동 구간만 학습 — Idle 제외)
-    · standardize_per_sample = True          (채널 간 가속도/토크 스케일 차이를 윈도우별 정규화로 흡수)
-    · augment_mode           = "standard"
-    · normalize              = True
+    · channels                = ["x","y","z","Ax{n}_Trq(%)"]
+    · filter_op_column        = None  (Idle + 기동 전체 학습)
+    · standardize_per_sample  = True  (채널 간 가속도/토크 스케일 차이를 윈도우별 정규화로 흡수)
+    · augment_mode            = "standard"
+    · normalize               = True
+    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 상태 오탐 감소)
     · 출력: ae_combined_ax0.onnx, ae_combined_ax1.onnx, ...
 
     [전처리 설명]
@@ -603,12 +606,13 @@ def run_training_ae_combined(**context) -> None:
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ AE 결합 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["session"]          = "AE"
-        params["sensor_type"]      = "combined"
-        params["channels"]         = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"] = None   # Idle + 기동 전체 학습 (false alarm 방지)
-        params["augment_mode"]     = "standard"
-        params["normalize"]        = True
+        params["session"]                = "AE"
+        params["sensor_type"]            = "combined"
+        params["channels"]               = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
+        params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["augment_mode"]           = "standard"
+        params["normalize"]              = True
+        params["ae_threshold_percentile"]= 99.95  # 결합 축별: 99.9 → 99.95 오탐 감소
         params["output"] = str(profile_dir / f"ae_combined_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_combined_ax{ax}")
