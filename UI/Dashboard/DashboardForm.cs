@@ -474,7 +474,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // normScore ∈ [WarnMultiplier, DangerMultiplier) → 경고
         // normScore ≥ DangerMultiplier                   → 위험
         private const double WarnMultiplier   = 1.0;  // 임계값 초과 즉시 경고
-        private const double DangerMultiplier = 2.0;  // 임계값의 2배 이상이면 위험
+        private const double DangerMultiplier = 1.5;  // 임계값의 1.5배 이상이면 위험 (window 512→256 축소로 피크 MAE 감소 보정)
 
         // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
         // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
