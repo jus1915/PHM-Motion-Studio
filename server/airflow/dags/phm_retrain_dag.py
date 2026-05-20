@@ -421,7 +421,7 @@ def run_training_ae_accel(**context) -> None:
     · window_size             = 256   (512 → 256: 기동 1회 완전 포착, 이상 희석 방지)
     · add_fft_channels        = True  (주파수 영역 부하 변화 포착)
     · add_derivative_channels = True  (진동 변화율 포착)
-    · ae_threshold_percentile = 99.0  (99.9 → 99.0: 가속도 모델 전용 민감도 상향)
+    · ae_threshold_percentile = 90.0  (99.0 → 90.0: window 256 환경에서 이상 위험 감지 보정)
     · 출력: ae_accel.onnx  (단일, 축 suffix 없음)
     """
     conf = dict(context["dag_run"].conf or {})
@@ -441,7 +441,7 @@ def run_training_ae_accel(**context) -> None:
     params["window_size"]            = 256    # 512 → 256: 기동 1회 완전 포착
     params["add_fft_channels"]       = True   # 주파수 영역 부하 변화 포착 (핵심)
     params["add_derivative_channels"]= True   # 진동 변화율(jerk) 포착
-    params["ae_threshold_percentile"]= 99.0   # 가속도 전용: 99.9 → 99.0 민감도 상향
+    params["ae_threshold_percentile"]= 90.0   # 가속도 전용: 99.0 → 90.0 (window 256, 이상 위험 감지 보정)
     # 단일 모델: 축 suffix 없음
     profile_dir = _get_profile_dir(conf)
     params["output"] = str(profile_dir / "ae_accel.onnx")
