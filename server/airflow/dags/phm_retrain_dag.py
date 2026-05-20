@@ -458,7 +458,7 @@ def run_training_ae_torque(**context) -> None:
     · filter_op_column        = None  (Idle + 기동 전체 학습)
     · augment_mode            = "mixed"
     · normalize               = False
-    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 기동 오탐 감소)
+    · ae_threshold_percentile = 99.9
     · 출력: ae_torque_ax0.onnx, ae_torque_ax1.onnx, ...
 
     [전처리 설명]
@@ -488,7 +488,7 @@ def run_training_ae_torque(**context) -> None:
         params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
         params["augment_mode"]           = "mixed"
         params["normalize"]              = False
-        params["ae_threshold_percentile"]= 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
+        params["ae_threshold_percentile"]= 99.9   # 토크 축별
         params["output"] = str(profile_dir / f"ae_torque_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
@@ -505,7 +505,7 @@ def run_training_ae_torque_global(**context) -> None:
     · standardize_per_sample  = True  (윈도우별 독립 정규화, 스케일 무관 패턴 학습)
     · augment_mode            = "mixed"
     · normalize               = False
-    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 기동 오탐 감소)
+    · ae_threshold_percentile = 99.9
     · 출력: ae_torque_global.onnx  (단일, 축 suffix 없음)
 
     [전처리 설명]
@@ -529,7 +529,7 @@ def run_training_ae_torque_global(**context) -> None:
     params["filter_op_column"]       = None   # 전체 행 — 어느 축이 동작 중이어도 학습
     params["augment_mode"]           = "mixed"
     params["normalize"]              = False
-    params["ae_threshold_percentile"]= 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
+    params["ae_threshold_percentile"]= 99.9   # 토크 전역
     params["output"] = str(profile_dir / "ae_torque_global.onnx")
     print(f"[PHM] AE 토크 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_torque_global")
@@ -545,7 +545,7 @@ def run_training_ae_combined_global(**context) -> None:
     · standardize_per_sample  = True  (채널 간 가속도/토크 스케일 차이를 윈도우별 정규화로 흡수)
     · augment_mode            = "standard"
     · normalize               = True
-    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 상태 오탐 감소)
+    · ae_threshold_percentile = 99.9
     · 출력: ae_combined_global.onnx  (단일, 축 suffix 없음)
 
     [전처리 설명]
@@ -569,7 +569,7 @@ def run_training_ae_combined_global(**context) -> None:
     params["filter_op_column"]       = None   # 전체 행 학습
     params["augment_mode"]           = "standard"
     params["normalize"]              = True
-    params["ae_threshold_percentile"]= 99.95  # 결합 전역: 99.9 → 99.95 오탐 감소
+    params["ae_threshold_percentile"]= 99.9   # 결합 전역
     params["output"] = str(profile_dir / "ae_combined_global.onnx")
     print(f"[PHM] AE 결합 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_combined_global")
@@ -585,7 +585,7 @@ def run_training_ae_combined(**context) -> None:
     · standardize_per_sample  = True  (채널 간 가속도/토크 스케일 차이를 윈도우별 정규화로 흡수)
     · augment_mode            = "standard"
     · normalize               = True
-    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 상태 오탐 감소)
+    · ae_threshold_percentile = 99.9
     · 출력: ae_combined_ax0.onnx, ae_combined_ax1.onnx, ...
 
     [전처리 설명]
@@ -612,7 +612,7 @@ def run_training_ae_combined(**context) -> None:
         params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
         params["augment_mode"]           = "standard"
         params["normalize"]              = True
-        params["ae_threshold_percentile"]= 99.95  # 결합 축별: 99.9 → 99.95 오탐 감소
+        params["ae_threshold_percentile"]= 99.9   # 결합 축별
         params["output"] = str(profile_dir / f"ae_combined_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_combined_ax{ax}")
