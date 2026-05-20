@@ -363,7 +363,9 @@ def _augment_standard(raw: np.ndarray, meta: dict) -> np.ndarray:
         fft_raw   = np.abs(np.fft.rfft(raw, axis=0)).astype(np.float32)
         half      = fft_raw.shape[0]
         fft_tiled = np.tile(fft_raw, (math.ceil(T / half), 1))[:T]
-        parts.append(_zscore_ch(fft_tiled))
+        # 학습(train_dl_model.py _extract_windows)과 동일하게 raw magnitude 사용
+        # _zscore_ch 적용 시 이중 정규화(zscore → global_norm) 발생 → 스코어 폭증
+        parts.append(fft_tiled)
 
     if add_deriv:
         parts.append(np.diff(raw, axis=0, prepend=raw[:1]).astype(np.float32))
