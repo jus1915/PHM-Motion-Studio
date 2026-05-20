@@ -466,7 +466,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double ema, int count)>
             _scoreBaseline = new System.Collections.Concurrent.ConcurrentDictionary<string, (double, int)>();
         private const double SpikeEmaAlpha  = 0.1;  // EMA 감쇠율 (느릴수록 베이스라인 안정적)
-        private const double SpikeFactor    = 3.5;  // EMA 대비 이 배수 이상이면 spike 판정 (2.5 → 3.5: 정상 모션 가감속 spike 억제)
+        private const double SpikeFactor    = 2.5;  // EMA 대비 이 배수 이상이면 spike 판정 (v3 복원)
                                                     // 서버가 MAE+peak 혼합 스코어 반환하므로 충격 시 spike 폭 확대됨
         private const int    SpikeWarmup    = 30;   // 워밍업 후 spike 판정 시작 (충분한 베이스라인 수집)
 
@@ -474,7 +474,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // normScore ∈ [WarnMultiplier, DangerMultiplier) → 경고
         // normScore ≥ DangerMultiplier                   → 위험
         private const double WarnMultiplier   = 1.0;  // 임계값 초과 즉시 경고
-        private const double DangerMultiplier = 1.5;  // 임계값의 1.5배 이상이면 위험 (window 512→256 축소로 피크 MAE 감소 보정)
+        private const double DangerMultiplier = 2.0;  // 임계값의 2배 이상이면 위험 (v3 복원)
 
         // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
         // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
