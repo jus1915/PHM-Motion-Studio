@@ -348,30 +348,40 @@ def _augment_mixed(raw: np.ndarray, meta: dict) -> np.ndarray:
 # ── 헬퍼 — standard 채널 증강 (_add_feature_channels 와 동일 로직) ─────────────
 def _augment_standard(raw: np.ndarray, meta: dict) -> np.ndarray:
     """
-    augment_mode="standard" 전처리 (per-window z-score 정규화 후 호출).
+    augment_mode="standard" 전처리 — train_dl_model.py _extract_windows 와 동일한 순서/방식.
 
-    전채널 균일: FFT magnitude(채널별 z-score) + derivative + abs
+    채널 순서: [raw | abs(선택) | derivative(선택) | fft(선택)]
+    ※ 학습(abs→deriv→fft 순)과 반드시 일치해야 norm_mean/norm_std 인덱스가 맞음.
+
+    FFT 리사이징: np.interp 선형 보간 (학습과 동일, tile 아님).
     """
     add_fft   = bool(meta.get("add_fft_channels",        True))
     add_deriv = bool(meta.get("add_derivative_channels", True))
-    add_abs   = bool(meta.get("add_abs_channels",        True))
+    add_abs   = bool(meta.get("add_abs_channels",        False))
 
-    T, _ = raw.shape
+    T, C = raw.shape
     parts: List[np.ndarray] = [raw]
 
-    if add_fft:
-        fft_raw   = np.abs(np.fft.rfft(raw, axis=0)).astype(np.float32)
-        half      = fft_raw.shape[0]
-        fft_tiled = np.tile(fft_raw, (math.ceil(T / half), 1))[:T]
-        # 학습(train_dl_model.py _extract_windows)과 동일하게 raw magnitude 사용
-        # _zscore_ch 적용 시 이중 정규화(zscore → global_norm) 발생 → 스코어 폭증
-        parts.append(fft_tiled)
+    # ① abs — 학습 _extract_windows 와 동일한 첫 번째 extras
+    if add_abs:
+        parts.append(np.abs(raw).astype(np.float32))
 
+    # ② derivative — 두 번째 extras
     if add_deriv:
         parts.append(np.diff(raw, axis=0, prepend=raw[:1]).astype(np.float32))
 
-    if add_abs:
-        parts.append(np.abs(raw).astype(np.float32))
+    # ③ fft — 세 번째 extras (마지막)
+    #    선형 보간으로 T//2+1 → T 로 리사이즈 (학습과 동일, tile 아님)
+    if add_fft:
+        fft_mag = np.abs(np.fft.rfft(raw, axis=0)).astype(np.float32)  # (T//2+1, C)
+        fft_len = fft_mag.shape[0]
+        x_old   = np.linspace(0.0, 1.0, fft_len)
+        x_new   = np.linspace(0.0, 1.0, T)
+        fft_resized = np.stack(
+            [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C)],
+            axis=1,
+        ).astype(np.float32)
+        parts.append(fft_resized)
 
     return np.concatenate(parts, axis=1).astype(np.float32) if len(parts) > 1 else parts[0]
 
