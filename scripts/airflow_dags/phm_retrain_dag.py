@@ -414,10 +414,14 @@ def run_training_ae_accel(**context) -> None:
     """
     AE 이상탐지 — 가속도 단일 전역 모델 학습 (축 구분 없음).
 
-    · channels          = ["x", "y", "z"]
-    · filter_op_column  = None  (Idle/Pos 구분 없이 전체 학습)
-    · augment_mode      = "standard"
-    · normalize         = True
+    · channels                = ["x", "y", "z"]
+    · filter_op_column        = None  (Idle/Pos 구분 없이 전체 학습)
+    · augment_mode            = "standard"
+    · normalize               = True
+    · window_size             = 256   (512 → 256: 기동 1회 완전 포착, 이상 희석 방지)
+    · add_fft_channels        = True  (주파수 영역 부하 변화 포착)
+    · add_derivative_channels = True  (진동 변화율 포착)
+    · ae_threshold_percentile = 99.0  (99.9 → 99.0: 가속도 모델 전용 민감도 상향)
     · 출력: ae_accel.onnx  (단일, 축 suffix 없음)
     """
     conf = dict(context["dag_run"].conf or {})
@@ -428,12 +432,16 @@ def run_training_ae_accel(**context) -> None:
 
     run_id = str(context.get("run_id", "manual"))
     params = {**_DEFAULT_CONF, **conf}
-    params["session"]           = "AE"
-    params["sensor_type"]       = "accel"
-    params["channels"]          = ["x", "y", "z"]
-    params["filter_op_column"]  = None   # Op 컬럼 없는 CSV 도 허용, 전체 행 학습
-    params["augment_mode"]      = "standard"
-    params["normalize"]         = True
+    params["session"]                = "AE"
+    params["sensor_type"]            = "accel"
+    params["channels"]               = ["x", "y", "z"]
+    params["filter_op_column"]       = None
+    params["augment_mode"]           = "standard"
+    params["normalize"]              = True
+    params["window_size"]            = 256    # 512 → 256: 기동 1회 완전 포착
+    params["add_fft_channels"]       = True   # 주파수 영역 부하 변화 포착 (핵심)
+    params["add_derivative_channels"]= True   # 진동 변화율(jerk) 포착
+    params["ae_threshold_percentile"]= 99.0   # 가속도 전용: 99.9 → 99.0 민감도 상향
     # 단일 모델: 축 suffix 없음
     profile_dir = _get_profile_dir(conf)
     params["output"] = str(profile_dir / "ae_accel.onnx")
