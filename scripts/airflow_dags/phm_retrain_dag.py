@@ -454,10 +454,11 @@ def run_training_ae_torque(**context) -> None:
     """
     AE 이상탐지 — 토크 축별 모델 학습.
 
-    · channels          = ["Ax{n}_Trq(%)"]
-    · filter_op_column  = None  (Idle + 기동 전체 학습)
-    · augment_mode      = "mixed"
-    · normalize         = False
+    · channels                = ["Ax{n}_Trq(%)"]
+    · filter_op_column        = None  (Idle + 기동 전체 학습)
+    · augment_mode            = "mixed"
+    · normalize               = False
+    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 기동 오탐 감소)
     · 출력: ae_torque_ax0.onnx, ae_torque_ax1.onnx, ...
 
     [전처리 설명]
@@ -481,12 +482,13 @@ def run_training_ae_torque(**context) -> None:
     for ax in range(axis_count):
         print(f"\n[PHM] ━━━ AE 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
-        params["session"]          = "AE"
-        params["sensor_type"]      = "torque"
-        params["channels"]         = [f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"] = None   # Idle + 기동 전체 학습 (false alarm 방지)
-        params["augment_mode"]     = "mixed"
-        params["normalize"]        = False
+        params["session"]                = "AE"
+        params["sensor_type"]            = "torque"
+        params["channels"]               = [f"Ax{ax}_Trq(%)"]
+        params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["augment_mode"]           = "mixed"
+        params["normalize"]              = False
+        params["ae_threshold_percentile"]= 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
         params["output"] = str(profile_dir / f"ae_torque_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
@@ -498,11 +500,12 @@ def run_training_ae_torque_global(**context) -> None:
     """
     AE 이상탐지 — 토크 전역 모델 학습 (전 축 토크 채널 통합, 축 구분 없음).
 
-    · channels               = ["Ax0_Trq(%)", "Ax1_Trq(%)", ...]  (axis_count 자동 감지)
-    · filter_op_column       = None  (전체 행 학습 — 어느 축이든 움직이는 순간 모두 포함)
-    · standardize_per_sample = True  (윈도우별 독립 정규화, 스케일 무관 패턴 학습)
-    · augment_mode           = "mixed"
-    · normalize              = False
+    · channels                = ["Ax0_Trq(%)", "Ax1_Trq(%)", ...]  (axis_count 자동 감지)
+    · filter_op_column        = None  (전체 행 학습 — 어느 축이든 움직이는 순간 모두 포함)
+    · standardize_per_sample  = True  (윈도우별 독립 정규화, 스케일 무관 패턴 학습)
+    · augment_mode            = "mixed"
+    · normalize               = False
+    · ae_threshold_percentile = 99.95  (99.9 → 99.95: 정상 기동 오탐 감소)
     · 출력: ae_torque_global.onnx  (단일, 축 suffix 없음)
 
     [전처리 설명]
@@ -520,12 +523,13 @@ def run_training_ae_torque_global(**context) -> None:
     profile_dir = _get_profile_dir(conf)
 
     params = {**_DEFAULT_CONF, **conf}
-    params["session"]          = "AE"
-    params["sensor_type"]      = "torque"
-    params["channels"]         = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
-    params["filter_op_column"] = None   # 전체 행 — 어느 축이 동작 중이어도 학습
-    params["augment_mode"]     = "mixed"
-    params["normalize"]        = False
+    params["session"]                = "AE"
+    params["sensor_type"]            = "torque"
+    params["channels"]               = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
+    params["filter_op_column"]       = None   # 전체 행 — 어느 축이 동작 중이어도 학습
+    params["augment_mode"]           = "mixed"
+    params["normalize"]              = False
+    params["ae_threshold_percentile"]= 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
     params["output"] = str(profile_dir / "ae_torque_global.onnx")
     print(f"[PHM] AE 토크 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_torque_global")
