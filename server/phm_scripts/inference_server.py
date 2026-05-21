@@ -521,41 +521,57 @@ def reload_models():
 @app.get("/model_info")
 def model_info():
     """각 sensor_type의 모델 메타 정보(window_size 등)를 반환합니다.
-    모델 세션 캐시가 있으면 그 값을 우선 사용하고, 없으면 _meta.json 파일만 읽습니다.
+
+    전역 모델 + per-axis 모델 모두 스캔해 **최대 window_size** 를 반환합니다.
+    클라이언트는 이 값만큼 버퍼를 쌓아야 모든 축 모델에 충분한 데이터를 보낼 수 있습니다.
     (ONNX 모델을 새로 로드하지 않으므로 빠르게 응답합니다.)
     """
+    def _read_ws_from_meta(fname: str) -> Optional[int]:
+        """메타 파일에서 window_size 를 읽어 반환. 없으면 None."""
+        meta_path = _models_root() / fname.replace(".onnx", "_meta.json")
+        if not meta_path.exists():
+            return None
+        try:
+            return int(json.loads(meta_path.read_text(encoding="utf-8")).get("window_size", 0)) or None
+        except Exception:
+            return None
+
     result = {}
     all_sensor_types = list(_FALLBACK_CANDIDATES.keys())  # ["accel", "torque", ...]
 
     for sensor_type in all_sensor_types:
-        # ① 이미 캐시에 로드된 경우
-        key = _cache_key(sensor_type, None)
-        if key in _sessions:
-            _, meta = _sessions[key]
-            result[sensor_type] = {
-                "window_size": int(meta.get("window_size", 512)),
-                "source": "cache",
-            }
-            continue
+        max_ws: int = 0
+        source: str = "default"
 
-        # ② 메타 파일만 읽기 (모델 로드 없이)
-        found = False
+        # ① 캐시에 로드된 세션 스캔 (전역 + per-axis)
+        for key, (_, meta) in list(_sessions.items()):
+            if not key.startswith(sensor_type):
+                continue
+            ws = int(meta.get("window_size", 0))
+            if ws > max_ws:
+                max_ws = ws
+                source = "cache"
+
+        # ② 메타 파일 스캔 — 전역 폴백 후보
         for fname in _FALLBACK_CANDIDATES.get(sensor_type, []):
-            meta_path = _models_root() / fname.replace(".onnx", "_meta.json")
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    result[sensor_type] = {
-                        "window_size": int(meta.get("window_size", 512)),
-                        "source": "meta_file",
-                    }
-                    found = True
-                    break
-                except Exception:
-                    pass
+            ws = _read_ws_from_meta(fname)
+            if ws and ws > max_ws:
+                max_ws = ws
+                source = "meta_file"
 
-        if not found:
-            result[sensor_type] = {"window_size": 512, "source": "default"}
+        # ③ per-axis 메타 파일 스캔 (캐시 미로드 축 포함)
+        for ax in range(_MAX_AXIS_SCAN):
+            for fname in _per_axis_candidates(sensor_type, ax):
+                ws = _read_ws_from_meta(fname)
+                if ws and ws > max_ws:
+                    max_ws = ws
+                    source = "meta_file_peraxis"
+                break   # 해당 축의 최우선 후보만
+
+        result[sensor_type] = {
+            "window_size": max_ws if max_ws > 0 else 512,
+            "source": source if max_ws > 0 else "default",
+        }
 
     return result
 
