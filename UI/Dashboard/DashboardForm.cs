@@ -462,19 +462,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         // ── 외력 감지: EMA 베이스라인 대비 급증(spike) 감지 ─────────────────────
         // key → (EMA 베이스라인, 누적 샘플 수)
-        // 샘플이 충분히 쌓인 후(>= SpikeWarmup) 현재 스코어가 EMA의 SpikeFactor배 이상이면 anomaly
+        // 샘플이 충분히 쌓인 후(>= _spikeWarmup) 현재 스코어가 EMA의 _spikeFactor배 이상이면 anomaly
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double ema, int count)>
             _scoreBaseline = new System.Collections.Concurrent.ConcurrentDictionary<string, (double, int)>();
-        private const double SpikeEmaAlpha  = 0.1;  // EMA 감쇠율 (느릴수록 베이스라인 안정적)
-        private const double SpikeFactor    = 2.5;  // EMA 대비 이 배수 이상이면 spike 판정 (v3 복원)
-                                                    // 서버가 MAE+peak 혼합 스코어 반환하므로 충격 시 spike 폭 확대됨
-        private const int    SpikeWarmup    = 30;   // 워밍업 후 spike 판정 시작 (충분한 베이스라인 수집)
-
-        // ── 위험/경고 등급 임계 배수 (normScore = rawScore / threshold 기준) ──
-        // normScore ∈ [WarnMultiplier, DangerMultiplier) → 경고
-        // normScore ≥ DangerMultiplier                   → 위험
-        private const double WarnMultiplier   = 1.0;  // 임계값 초과 즉시 경고
-        private const double DangerMultiplier = 2.0;  // 임계값의 2배 이상이면 위험 (v3 복원)
+        // ── 이상탐지 파라미터 (런타임 튜닝 가능 — ⚙ 버튼 → anomaly_settings.json 영속화) ─
+        private double _spikeEmaAlpha      = 0.1;   // EMA 감쇠율
+        private double _spikeFactor        = 2.5;   // EMA 대비 급증 배수
+        private int    _spikeWarmup        = 30;    // 워밍업 샘플 수
+        private double _warnMultiplier     = 1.0;   // 경고 기준 (normScore ≥ 이 값)
+        private double _dangerMultiplier   = 2.0;   // 위험 기준 (normScore ≥ 이 값)
 
         // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
         // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
@@ -496,11 +492,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 상태 전환(정상→이상) 시 즉시, 이상 지속 시 쿨다운마다 1회씩만 로그
         private readonly Dictionary<string, bool>     _prevAnomalyState   = new Dictionary<string, bool>();
         private readonly Dictionary<string, DateTime> _lastAnomalyLogTime = new Dictionary<string, DateTime>();
-        private static readonly TimeSpan AnomalyLogCooldown = TimeSpan.FromSeconds(30);
+        private TimeSpan _anomalyLogCooldown = TimeSpan.FromSeconds(30);
 
         // ── 연속 이상 카운터 (N회 연속 threshold 초과 시 경보 확정) ──────────
-        // 256ms 간격 × 1회 = 즉시 확정 → 500ms 미만 단발 모션도 감지
-        private const int AnomalyConfirmCount = 1;
+        private int _anomalyConfirmCount = 1;  // 1=즉시 확정, 5≈1.3초 연속
+        private static readonly string AnomalySettingsFile =
+            Path.Combine(DefaultLogsPath, "anomaly_settings.json");
         private readonly Dictionary<string, int> _consecutiveAnomalyCount
             = new Dictionary<string, int>();
 
@@ -679,6 +676,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             this.Text = "실시간 대시보드";
             this.MinimumSize = new Size(1000, 600);
             LoadAxisThresholds();
+            LoadAnomalySettings();
             BuildUI();
             _notifier = new NotifyIcon
             {
@@ -708,6 +706,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             AppEvents.ClsInferenceResultReceived -= OnLiveClsInferenceResult;
             AppEvents.LoopCompleted              -= OnLoopCompleted;
             SaveAxisThresholds();
+            SaveAnomalySettings();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
             try { _profileClient?.Dispose(); } catch { }
@@ -1014,9 +1013,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _btnRetrain.FlatAppearance.BorderSize = 0;
             _btnRetrain.Click += OnRetrainButtonClick;
 
+            // ── 이상탐지 설정 버튼 ────────────────────────────────────────────
+            var btnAnomalySettings = new Button
+            {
+                Text = "⚙ 탐지설정", Width = 80, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                BackColor = Color.FromArgb(245, 246, 250), ForeColor = Color.FromArgb(55, 55, 70),
+                FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 8.5f)
+            };
+            btnAnomalySettings.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 215);
+            btnAnomalySettings.FlatAppearance.BorderSize  = 1;
+            btnAnomalySettings.Click += (s, e) => ShowAnomalySettingsDialog();
+
             toolbar.Controls.Add(btnStop);
             toolbar.Controls.Add(btnStart);
             toolbar.Controls.Add(_btnRetrain);
+            toolbar.Controls.Add(btnAnomalySettings);
             toolbar.Controls.Add(_btnProfileApply);
             toolbar.Controls.Add(_btnProfileRefresh);
             toolbar.Controls.Add(_cmbProfile);
@@ -1043,8 +1055,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _btnRetrain.Top  = cy;
                 _btnRetrain.Left = _cmbProfile.Left - _btnRetrain.Width - 8;
 
+                // 탐지설정 버튼: 재학습 버튼 왼쪽
+                btnAnomalySettings.Top  = cy;
+                btnAnomalySettings.Left = _btnRetrain.Left - btnAnomalySettings.Width - 6;
+
                 lblStatus.Top  = cy + 2;
-                lblStatus.Left = _btnRetrain.Left - lblStatus.PreferredWidth - 8;
+                lblStatus.Left = btnAnomalySettings.Left - lblStatus.PreferredWidth - 8;
             };
 
             // ── 모드 전환 시 소스 패널 교체 ──────────────────────────────────
@@ -4986,6 +5002,188 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             catch { }
         }
 
+        // ── 이상탐지 파라미터 설정 영속화 ─────────────────────────────────────
+
+        /// <summary>anomaly_settings.json 로드 (앱 시작 시 호출).</summary>
+        private void LoadAnomalySettings()
+        {
+            try
+            {
+                if (!File.Exists(AnomalySettingsFile)) return;
+                var txt = File.ReadAllText(AnomalySettingsFile);
+                var doc = System.Text.Json.JsonDocument.Parse(txt);
+                var root = doc.RootElement;
+                double d; int i;
+                if (root.TryGetProperty("warnMultiplier",     out var p0) && p0.TryGetDouble(out d)) _warnMultiplier     = d;
+                if (root.TryGetProperty("dangerMultiplier",   out var p1) && p1.TryGetDouble(out d)) _dangerMultiplier   = d;
+                if (root.TryGetProperty("spikeFactor",        out var p2) && p2.TryGetDouble(out d)) _spikeFactor        = d;
+                if (root.TryGetProperty("spikeEmaAlpha",      out var p3) && p3.TryGetDouble(out d)) _spikeEmaAlpha      = d;
+                if (root.TryGetProperty("spikeWarmup",        out var p4) && p4.TryGetInt32(out i))  _spikeWarmup        = i;
+                if (root.TryGetProperty("anomalyConfirmCount",out var p5) && p5.TryGetInt32(out i))  _anomalyConfirmCount= i;
+                if (root.TryGetProperty("cooldownSec",        out var p6) && p6.TryGetDouble(out d)) _anomalyLogCooldown = TimeSpan.FromSeconds(d);
+            }
+            catch { }
+        }
+
+        /// <summary>현재 파라미터를 anomaly_settings.json에 저장합니다.</summary>
+        private void SaveAnomalySettings()
+        {
+            try
+            {
+                Directory.CreateDirectory(DefaultLogsPath);
+                var obj = new
+                {
+                    warnMultiplier      = _warnMultiplier,
+                    dangerMultiplier    = _dangerMultiplier,
+                    spikeFactor         = _spikeFactor,
+                    spikeEmaAlpha       = _spikeEmaAlpha,
+                    spikeWarmup         = _spikeWarmup,
+                    anomalyConfirmCount = _anomalyConfirmCount,
+                    cooldownSec         = _anomalyLogCooldown.TotalSeconds
+                };
+                var json = System.Text.Json.JsonSerializer.Serialize(obj,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(AnomalySettingsFile, json);
+            }
+            catch { }
+        }
+
+        /// <summary>이상탐지 파라미터 튜닝 다이얼로그를 표시합니다.</summary>
+        private void ShowAnomalySettingsDialog()
+        {
+            var dlg = new Form
+            {
+                Text            = "이상탐지 파라미터 설정",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition   = FormStartPosition.CenterParent,
+                MaximizeBox     = false, MinimizeBox = false,
+                Width = 420, Height = 390,
+                BackColor = Color.White, Font = new Font("Segoe UI", 9f)
+            };
+
+            // ── 헬퍼: 라벨+NUD 한 행 생성 ──────────────────────────────────
+            int rowY = 18;
+            const int LBL_W = 190, NUD_W = 90, ROW_H = 32, LEFT = 16;
+
+            NumericUpDown MakeRow(string label, string hint,
+                                  double val, double min, double max, double inc, int decimals)
+            {
+                var lbl = new Label
+                {
+                    Text = label, Left = LEFT, Top = rowY + 4,
+                    Width = LBL_W, AutoSize = false,
+                    ForeColor = Color.FromArgb(40, 40, 50)
+                };
+                var nud = new NumericUpDown
+                {
+                    Left = LEFT + LBL_W + 8, Top = rowY,
+                    Width = NUD_W, Height = 24,
+                    Minimum = (decimal)min, Maximum = (decimal)max,
+                    Increment = (decimal)inc, DecimalPlaces = decimals,
+                    Value = (decimal)Math.Max(min, Math.Min(max, val))
+                };
+                var tip = new Label
+                {
+                    Text = hint, Left = LEFT + LBL_W + NUD_W + 16, Top = rowY + 6,
+                    AutoSize = true, ForeColor = Color.FromArgb(130, 130, 145),
+                    Font = new Font("Segoe UI", 7.5f)
+                };
+                dlg.Controls.AddRange(new Control[] { lbl, nud, tip });
+                rowY += ROW_H;
+                return nud;
+            }
+
+            void AddSeparator(string title)
+            {
+                rowY += 4;
+                dlg.Controls.Add(new Label
+                {
+                    Text = title, Left = LEFT, Top = rowY,
+                    AutoSize = true, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(0, 80, 160)
+                });
+                rowY += 22;
+            }
+
+            // ── 등급 판정 ────────────────────────────────────────────────────
+            AddSeparator("▌ 등급 판정  (normScore 기준)");
+            var nudWarn   = MakeRow("경고 기준  (WarnMultiplier)",
+                "≥ 이 값 → 🟡 경고",   _warnMultiplier,   0.1, 3.0, 0.1, 2);
+            var nudDanger = MakeRow("위험 기준  (DangerMultiplier)",
+                "≥ 이 값 → 🔴 위험",   _dangerMultiplier, 0.5, 6.0, 0.1, 2);
+
+            // ── 스파이크 감지 ─────────────────────────────────────────────────
+            AddSeparator("▌ EMA 스파이크 감지  (순간 외력)");
+            var nudFactor  = MakeRow("급증 배수  (SpikeFactor)",
+                "EMA × N배 이상 → 즉시 이상",   _spikeFactor,    1.2, 8.0,  0.1, 1);
+            var nudAlpha   = MakeRow("EMA 감쇠율  (SpikeEmaAlpha)",
+                "낮을수록 베이스라인 안정",       _spikeEmaAlpha,  0.01, 0.5, 0.01, 2);
+            var nudWarmup  = MakeRow("워밍업 샘플  (SpikeWarmup)",
+                "이 수 이후부터 판정",            _spikeWarmup,    5, 200, 1, 0);
+
+            // ── 확정 / 쿨다운 ─────────────────────────────────────────────────
+            AddSeparator("▌ 확정 / 쿨다운");
+            var nudConfirm  = MakeRow("연속 확정 횟수  (ConfirmCount)",
+                "1=즉시,  5≈1.3초",              _anomalyConfirmCount,       1, 30, 1, 0);
+            var nudCooldown = MakeRow("이벤트 쿨다운  (초)",
+                "같은 센서 재기록 최소 간격",     _anomalyLogCooldown.TotalSeconds, 5, 300, 5, 0);
+
+            // ── 버튼 ─────────────────────────────────────────────────────────
+            rowY += 6;
+            var btnReset = new Button
+            {
+                Text = "기본값 복원", Left = LEFT, Top = rowY, Width = 100, Height = 28,
+                BackColor = Color.FromArgb(240, 240, 245), FlatStyle = FlatStyle.Flat
+            };
+            btnReset.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 210);
+            btnReset.Click += (s, e) =>
+            {
+                nudWarn.Value    = 1.0m;   nudDanger.Value  = 2.0m;
+                nudFactor.Value  = 2.5m;   nudAlpha.Value   = 0.10m;
+                nudWarmup.Value  = 30;     nudConfirm.Value = 1;
+                nudCooldown.Value= 30;
+            };
+
+            var btnOk = new Button
+            {
+                Text = "적용", DialogResult = DialogResult.OK,
+                Left = dlg.Width - 100 - 16, Top = rowY, Width = 80, Height = 28,
+                BackColor = Color.FromArgb(0, 100, 180), ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            btnOk.FlatAppearance.BorderSize = 0;
+
+            var btnCancel = new Button
+            {
+                Text = "취소", DialogResult = DialogResult.Cancel,
+                Left = btnOk.Left - 84, Top = rowY, Width = 80, Height = 28,
+                FlatStyle = FlatStyle.Flat
+            };
+            btnCancel.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 210);
+
+            dlg.Controls.AddRange(new Control[] { btnReset, btnCancel, btnOk });
+            dlg.AcceptButton = btnOk;
+            dlg.CancelButton = btnCancel;
+            dlg.Height = rowY + 28 + 40;
+
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+            // ── 값 반영 ──────────────────────────────────────────────────────
+            _warnMultiplier      = (double)nudWarn.Value;
+            _dangerMultiplier    = (double)nudDanger.Value;
+            _spikeFactor         = (double)nudFactor.Value;
+            _spikeEmaAlpha       = (double)nudAlpha.Value;
+            _spikeWarmup         = (int)nudWarmup.Value;
+            _anomalyConfirmCount = (int)nudConfirm.Value;
+            _anomalyLogCooldown  = TimeSpan.FromSeconds((double)nudCooldown.Value);
+
+            SaveAnomalySettings();
+            AppEvents.RaiseLog(
+                $"[설정] 경고≥{_warnMultiplier:F2}  위험≥{_dangerMultiplier:F2}" +
+                $"  스파이크×{_spikeFactor:F1}  α={_spikeEmaAlpha:F2}" +
+                $"  워밍업={_spikeWarmup}  확정={_anomalyConfirmCount}  쿨다운={_anomalyLogCooldown.TotalSeconds}s");
+        }
+
         /// <summary>
         /// AppEvents.InferenceResultReceived 핸들러 — 서버 추론 결과를 UI에 반영합니다.
         /// </summary>
@@ -5080,15 +5278,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _consecutiveAnomalyCount.TryGetValue(key, out prevConsec);
                 int newConsec = threshAnomaly ? prevConsec + 1 : 0;
                 _consecutiveAnomalyCount[key] = newConsec;
-                bool confirmedThreshAnomaly = newConsec >= AnomalyConfirmCount;
+                bool confirmedThreshAnomaly = newConsec >= _anomalyConfirmCount;
 
                 // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상 — 즉시 반응) ──
                 var baseline = _scoreBaseline.GetOrAdd(key, (rawScore, 0));
                 double ema   = baseline.ema;
                 int    cnt   = baseline.count;
-                bool   spikeAnomaly = cnt >= SpikeWarmup && rawScore > ema * SpikeFactor;
+                bool   spikeAnomaly = cnt >= _spikeWarmup && rawScore > ema * _spikeFactor;
                 // EMA 업데이트: 항상 반영 (스파이크 구간만 제외하면 베이스라인이 낮게 고착됨)
-                double newEma = ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
+                double newEma = ema * (1 - _spikeEmaAlpha) + rawScore * _spikeEmaAlpha;
                 _scoreBaseline[key] = (newEma, cnt + 1);
 
                 // 최종 이상 판정: 연속 N회 초과(확정) 또는 급증 스파이크(즉시)
@@ -5151,11 +5349,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 // ── 이상/정상 이벤트 로그 (상태 전환 + 30초 쿨다운으로 홍수 방지) ──
                 bool wasAnomaly  = _prevAnomalyState.TryGetValue(key, out bool _pw) && _pw;
                 bool cooldownOk  = !_lastAnomalyLogTime.TryGetValue(key, out DateTime _lt)
-                                   || (DateTime.Now - _lt) >= AnomalyLogCooldown;
+                                   || (DateTime.Now - _lt) >= _anomalyLogCooldown;
 
                 if (anomaly)
                 {
-                    bool isDanger  = normScore >= DangerMultiplier;
+                    bool isDanger  = normScore >= _dangerMultiplier;
                     string spikeInfo = spikeAnomaly && !threshAnomaly
                         ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
                     string levelTag  = isDanger ? "🔴 위험" : "🟡 경고";
@@ -5268,13 +5466,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                       cThreshAnom = (double)combined.AnomalyScore >= cAxThr;
                       int nc = cThreshAnom ? prev + 1 : 0;
                       _consecutiveAnomalyCount[chipKey] = nc;
-                      cThreshAnom = nc >= AnomalyConfirmCount; }
+                      cThreshAnom = nc >= _anomalyConfirmCount; }
 
                     var cBase = _scoreBaseline.GetOrAdd(chipKey, ((double)combined.AnomalyScore, 0));
-                    bool cSpike = cBase.count >= SpikeWarmup
-                                  && (double)combined.AnomalyScore > cBase.ema * SpikeFactor;
-                    _scoreBaseline[chipKey] = (cBase.ema * (1 - SpikeEmaAlpha)
-                                               + (double)combined.AnomalyScore * SpikeEmaAlpha,
+                    bool cSpike = cBase.count >= _spikeWarmup
+                                  && (double)combined.AnomalyScore > cBase.ema * _spikeFactor;
+                    _scoreBaseline[chipKey] = (cBase.ema * (1 - _spikeEmaAlpha)
+                                               + (double)combined.AnomalyScore * _spikeEmaAlpha,
                                                cBase.count + 1);
 
                     bool cAnomaly = cThreshAnom || cSpike;
@@ -5291,10 +5489,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     // 이상 이벤트 기록 (쿨다운 + 이벤트 카운트)
                     if (cAnomaly)
                     {
-                        bool cIsDanger  = cNorm >= DangerMultiplier;
+                        bool cIsDanger  = cNorm >= _dangerMultiplier;
                         bool cWasAnom   = _prevAnomalyState.TryGetValue(chipKey, out bool _ca) && _ca;
                         bool cCooldownOk = !_lastAnomalyLogTime.TryGetValue(chipKey, out DateTime _ct)
-                                           || (DateTime.Now - _ct) >= AnomalyLogCooldown;
+                                           || (DateTime.Now - _ct) >= _anomalyLogCooldown;
                         if (!cWasAnom || cCooldownOk)
                         {
                             string cLevel = cIsDanger ? "🔴 위험" : "🟡 경고";
@@ -5858,8 +6056,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 Color bg, fg;
                 if (score <= 0)                            { bg = Color.FromArgb(245,245,248); fg = Color.Gray; }
-                else if (score >= DangerMultiplier)        { bg = Color.FromArgb(255,220,220); fg = Color.FromArgb(160,20,20); }
-                else if (score >= WarnMultiplier)          { bg = Color.FromArgb(255,248,210); fg = Color.FromArgb(150,100,0); }
+                else if (score >= _dangerMultiplier)        { bg = Color.FromArgb(255,220,220); fg = Color.FromArgb(160,20,20); }
+                else if (score >= _warnMultiplier)          { bg = Color.FromArgb(255,248,210); fg = Color.FromArgb(150,100,0); }
                 else                                       { bg = Color.FromArgb(220,248,228); fg = Color.FromArgb(20,110,50); }
 
                 e.CellStyle.BackColor          = bg;
@@ -5924,8 +6122,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 상태 텍스트
             string stateText;
             if (normScore <= 0)                     stateText = "-";
-            else if (normScore >= DangerMultiplier)  stateText = "🔴 위험";
-            else if (normScore >= WarnMultiplier)    stateText = "🟡 경고";
+            else if (normScore >= _dangerMultiplier)  stateText = "🔴 위험";
+            else if (normScore >= _warnMultiplier)    stateText = "🟡 경고";
             else                                     stateText = "✓ 정상";
 
             _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value     = normScore;
@@ -6044,12 +6242,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 stateText  = "—";
                 stateColor = Color.Gray;
             }
-            else if (normScore >= DangerMultiplier)
+            else if (normScore >= _dangerMultiplier)
             {
                 stateText  = "🔴 위험";
                 stateColor = Color.FromArgb(160, 20, 20);
             }
-            else if (normScore >= WarnMultiplier)
+            else if (normScore >= _warnMultiplier)
             {
                 stateText  = "🟡 경고";
                 stateColor = Color.FromArgb(150, 100, 0);
@@ -6072,8 +6270,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 _pnlAccelAeBar.BackColor = normScore <= 0
                     ? Color.FromArgb(245, 245, 248)
-                    : normScore >= DangerMultiplier ? Color.FromArgb(255, 220, 220)
-                    : normScore >= WarnMultiplier   ? Color.FromArgb(255, 248, 210)
+                    : normScore >= _dangerMultiplier ? Color.FromArgb(255, 220, 220)
+                    : normScore >= _warnMultiplier   ? Color.FromArgb(255, 248, 210)
                     : Color.FromArgb(220, 248, 228);
             }
         }
