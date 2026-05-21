@@ -127,7 +127,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private CheckBox         _dlChkOverload;
         private CheckBox         _dlChkLooseness;
         private CheckBox         _dlChkOverspeed;
-        private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
+        private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit, _dlThresholdPct;
         private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv, _dlBtnBatch;
         private RichTextBox      _dlLog;
         private ProgressBar      _dlProgress;
@@ -1636,6 +1636,29 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tl.Controls.Add(Lbl("검증 비율(%):"), 0, row);
             _dlValSplit = Nud(5, 50, 20); tl.Controls.Add(_dlValSplit, 1, row++);
 
+            // AE 임계값 퍼센타일 (AE 모드 전용)
+            var lblThrPct = Lbl("임계값 퍼센타일:");
+            tl.Controls.Add(lblThrPct, 0, row);
+            _dlThresholdPct = new NumericUpDown
+            {
+                Dock = DockStyle.Fill, Minimum = 90m, Maximum = 100m,
+                DecimalPlaces = 1, Increment = 0.5m, Value = 99.5m
+            };
+            var tipThrPct = new ToolTip();
+            tipThrPct.SetToolTip(_dlThresholdPct, "AE 정상 MAE의 N% → threshold 로 사용 (높을수록 민감도↓)");
+            tl.Controls.Add(_dlThresholdPct, 1, row++);
+            // AE/CLS 모드 전환 시 가시성 연동
+            Action syncThrPct = () =>
+            {
+                bool ae = _dlRdoAe?.Checked ?? true;
+                lblThrPct.Enabled        = ae;
+                _dlThresholdPct.Enabled  = ae;
+                lblThrPct.ForeColor      = ae ? SystemColors.ControlText : SystemColors.GrayText;
+            };
+            if (_dlRdoAe  != null) _dlRdoAe.CheckedChanged  += (s, e) => syncThrPct();
+            if (_dlRdoCls != null) _dlRdoCls.CheckedChanged += (s, e) => syncThrPct();
+            syncThrPct();
+
             // 출력 경로
             tl.Controls.Add(Lbl("출력 모델:"), 0, row);
             _dlOutputPath = new TextBox { Dock = DockStyle.Fill, Text = @"C:\Data\PHM_Logs\models\cnn1d_fd.onnx" };
@@ -1698,9 +1721,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     stride       = (int)(_dlStride?.Value     ?? 128),
                     epochs       = (int)(_dlEpochs?.Value     ?? 30),
                     batch        = (int)(_dlBatch?.Value      ?? 32),
-                    lr           = _dlLr?.Text           ?? "0.001",
-                    valSplit     = (int)(_dlValSplit?.Value   ?? 20),
-                    outputPath   = _dlOutputPath?.Text   ?? ""
+                    lr              = _dlLr?.Text           ?? "0.001",
+                    valSplit        = (int)(_dlValSplit?.Value      ?? 20),
+                    thresholdPct    = (double)(_dlThresholdPct?.Value ?? 99.5m),
+                    outputPath      = _dlOutputPath?.Text   ?? ""
                 };
                 var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
                 System.IO.File.WriteAllText(path, json, System.Text.Encoding.UTF8);
@@ -1755,11 +1779,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
                 void SetNud(NumericUpDown nud, int val)
                 { if (nud != null) nud.Value = Math.Max(nud.Minimum, Math.Min(nud.Maximum, val)); }
+                void SetNudD(NumericUpDown nud, double val)
+                { if (nud != null) nud.Value = (decimal)Math.Max((double)nud.Minimum, Math.Min((double)nud.Maximum, val)); }
                 SetNud(_dlWindowSize, Int("windowSize", 256));
                 SetNud(_dlStride,     Int("stride",     128));
                 SetNud(_dlEpochs,     Int("epochs",     30));
                 SetNud(_dlBatch,      Int("batch",      32));
                 SetNud(_dlValSplit,   Int("valSplit",   20));
+                double tpct = 99.5;
+                if (root.TryGetProperty("thresholdPct", out var tprop)) tprop.TryGetDouble(out tpct);
+                SetNudD(_dlThresholdPct, tpct);
             }
             catch { }
         }
@@ -1908,8 +1937,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // AE: 어떤 폴더를 "정상"으로 볼지 명시 + threshold percentile 상향
             if (isAe)
             {
-                p["normal_classes"]         = classNames.ToArray();
-                p["ae_threshold_percentile"] = 99.5;  // 99→99.5: 정상 동작 중 false alarm 감소
+                p["normal_classes"]          = classNames.ToArray();
+                p["ae_threshold_percentile"] = (double)(_dlThresholdPct?.Value ?? 99.5m);
             }
             return p;
         }
