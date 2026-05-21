@@ -986,22 +986,23 @@ class AE1DCNN(nn.Module):
     구조: Encoder(Conv × 3, MaxPool × 2) → interpolate(T 복원) → Decoder(Conv × 3)
     """
 
-    def __init__(self, n_channels: int) -> None:
+    def __init__(self, n_channels: int, base_filters: int = 32) -> None:
         super().__init__()
+        f = base_filters
         self.encoder = nn.Sequential(
-            nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
-            nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),
-            nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128), nn.ReLU(inplace=True),
+            nn.Conv1d(n_channels, f,   kernel_size=7, padding=3),
+            nn.BatchNorm1d(f),   nn.ReLU(inplace=True), nn.MaxPool1d(2),
+            nn.Conv1d(f,   f*2, kernel_size=5, padding=2),
+            nn.BatchNorm1d(f*2), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+            nn.Conv1d(f*2, f*4, kernel_size=3, padding=1),
+            nn.BatchNorm1d(f*4), nn.ReLU(inplace=True),
         )
         self.decoder = nn.Sequential(
-            nn.Conv1d(128, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64), nn.ReLU(inplace=True),
-            nn.Conv1d(64, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32), nn.ReLU(inplace=True),
-            nn.Conv1d(32, n_channels, kernel_size=7, padding=3),
+            nn.Conv1d(f*4, f*2, kernel_size=3, padding=1),
+            nn.BatchNorm1d(f*2), nn.ReLU(inplace=True),
+            nn.Conv1d(f*2, f,   kernel_size=5, padding=2),
+            nn.BatchNorm1d(f),   nn.ReLU(inplace=True),
+            nn.Conv1d(f, n_channels, kernel_size=7, padding=3),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1083,8 +1084,10 @@ def train_ae(
     val_loader   = DataLoader(Subset(dataset, val_idx),   batch_size=batch_size,
                               shuffle=False, num_workers=0, pin_memory=False)
 
+    base_filters = int(params.get("ae_base_filters", 32))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = AE1DCNN(n_channels=n_channels).to(device)
+    model  = AE1DCNN(n_channels=n_channels, base_filters=base_filters).to(device)
+    print(f"[train_ae] AE1DCNN base_filters={base_filters}  파라미터 수≈{sum(p.numel() for p in model.parameters()):,}", file=sys.stderr)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6

@@ -127,7 +127,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private CheckBox         _dlChkOverload;
         private CheckBox         _dlChkLooseness;
         private CheckBox         _dlChkOverspeed;
-        private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit, _dlThresholdPct;
+        private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit, _dlThresholdPct, _dlBaseFilters;
         private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv, _dlBtnBatch;
         private RichTextBox      _dlLog;
         private ProgressBar      _dlProgress;
@@ -1647,13 +1647,30 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             var tipThrPct = new ToolTip();
             tipThrPct.SetToolTip(_dlThresholdPct, "AE 정상 MAE의 N% → threshold 로 사용 (높을수록 민감도↓)");
             tl.Controls.Add(_dlThresholdPct, 1, row++);
-            // AE/CLS 모드 전환 시 가시성 연동
+            // 베이스 필터 수 (AE 모드 전용)
+            var lblBaseFilters = Lbl("베이스 필터  (복잡도):");
+            tl.Controls.Add(lblBaseFilters, 0, row);
+            _dlBaseFilters = new NumericUpDown
+            {
+                Dock = DockStyle.Fill, Minimum = 4m, Maximum = 128m,
+                DecimalPlaces = 0, Increment = 4m, Value = 32m
+            };
+            var tipBF = new ToolTip();
+            tipBF.SetToolTip(_dlBaseFilters,
+                "낮출수록 이상 패턴 재구성 실패 확률 ↑ (이상탐지 민감도 ↑)\n" +
+                "권장: 8(민감) / 16 / 32(기본) / 64(둔감)");
+            tl.Controls.Add(_dlBaseFilters, 1, row++);
+
+            // AE/CLS 모드 전환 시 가시성 연동 (임계값 + 베이스 필터 함께)
             Action syncThrPct = () =>
             {
                 bool ae = _dlRdoAe?.Checked ?? true;
                 lblThrPct.Enabled        = ae;
                 _dlThresholdPct.Enabled  = ae;
                 lblThrPct.ForeColor      = ae ? SystemColors.ControlText : SystemColors.GrayText;
+                lblBaseFilters.Enabled   = ae;
+                _dlBaseFilters.Enabled   = ae;
+                lblBaseFilters.ForeColor = ae ? SystemColors.ControlText : SystemColors.GrayText;
             };
             if (_dlRdoAe  != null) _dlRdoAe.CheckedChanged  += (s, e) => syncThrPct();
             if (_dlRdoCls != null) _dlRdoCls.CheckedChanged += (s, e) => syncThrPct();
@@ -1724,6 +1741,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     lr              = _dlLr?.Text           ?? "0.001",
                     valSplit        = (int)(_dlValSplit?.Value      ?? 20),
                     thresholdPct    = (double)(_dlThresholdPct?.Value ?? 99.5m),
+                    baseFilters     = (int)(_dlBaseFilters?.Value    ?? 32m),
                     outputPath      = _dlOutputPath?.Text   ?? ""
                 };
                 var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
@@ -1789,6 +1807,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 double tpct = 99.5;
                 if (root.TryGetProperty("thresholdPct", out var tprop)) tprop.TryGetDouble(out tpct);
                 SetNudD(_dlThresholdPct, tpct);
+                int bfilt = 32;
+                if (root.TryGetProperty("baseFilters", out var bfProp)) bfProp.TryGetInt32(out bfilt);
+                SetNud(_dlBaseFilters, bfilt);
             }
             catch { }
         }
@@ -1939,6 +1960,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             {
                 p["normal_classes"]          = classNames.ToArray();
                 p["ae_threshold_percentile"] = (double)(_dlThresholdPct?.Value ?? 99.5m);
+                p["ae_base_filters"]         = (int)(_dlBaseFilters?.Value ?? 32m);
             }
             return p;
         }
