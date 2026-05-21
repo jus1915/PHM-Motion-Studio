@@ -135,6 +135,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private System.Diagnostics.Process _dlProc;
         private RadioButton      _dlRdoCls, _dlRdoAe;   // DL 모델 유형: 분류(CLS) / AE
         private Label            _dlClassListLbl;        // "결함 클래스:" ↔ "정상 클래스:"
+        // ── DL 설정 영속화 ────────────────────────────────────────────────────
+        private ComboBox         _dlPresetCombo;
+        private static readonly string DlSettingsFile = @"C:\Data\PHM_Logs\dl_settings.json";
+        private static readonly string DlPresetsDir   = @"C:\Data\PHM_Logs\dl_presets";
 
         // ── Airflow 패널 ─────────────────────────────────────────────────────
         private TextBox  _aflUrl, _aflDagId;
@@ -1282,10 +1286,28 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _dlBtnBatch.Click += (s, e) => StartBatchTrainingAsync();
             _dlBtnStop.Click  += (s, e) => StopDlTraining();
             _dlBtnVenv.Click  += (s, e) => RunSetupVenv();
+
+            // ── 프리셋 저장 / 불러오기 ─────────────────────────────────────
+            var sep = new Label { Text = "|", AutoSize = true, ForeColor = Color.FromArgb(190, 190, 210),
+                Font = new Font("Segoe UI", 10f), Margin = new Padding(6, 2, 6, 0) };
+            var btnPresetSave = new Button { Text = "💾 프리셋 저장", Width = 100, Height = 24 };
+            btnPresetSave.Click += (s, e) => ShowSavePresetDialog();
+            _dlPresetCombo = new ComboBox { Width = 130, Height = 24, DropDownStyle = ComboBoxStyle.DropDownList };
+            var btnPresetLoad = new Button { Text = "📂 불러오기", Width = 85, Height = 24 };
+            btnPresetLoad.Click += (s, e) =>
+            {
+                if (_dlPresetCombo.SelectedItem is string name && !string.IsNullOrEmpty(name))
+                    LoadDlSettings(System.IO.Path.Combine(DlPresetsDir, name + ".json"));
+            };
+
             btnRow.Controls.Add(_dlBtnTrain);
             btnRow.Controls.Add(_dlBtnBatch);
             btnRow.Controls.Add(_dlBtnStop);
             btnRow.Controls.Add(_dlBtnVenv);
+            btnRow.Controls.Add(sep);
+            btnRow.Controls.Add(btnPresetSave);
+            btnRow.Controls.Add(_dlPresetCombo);
+            btnRow.Controls.Add(btnPresetLoad);
 
             // 로그
             _dlLog = new RichTextBox
@@ -1311,6 +1333,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 SyncAirflowPanel(s);
             };
             tab.Controls.Add(root);
+
+            // 컨트롤 생성 완료 후 마지막 설정 복원 (자동 저장된 dl_settings.json)
+            LoadDlSettings(DlSettingsFile);
+            RefreshPresetCombo();
+
             return tab;
         }
 
@@ -1630,6 +1657,176 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             grp.Controls.Add(tl);
             return grp;
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        //  DL 설정 영속화 — 자동 저장/복원 & 수동 프리셋
+        // ════════════════════════════════════════════════════════════════════
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            SaveDlSettings(DlSettingsFile);  // 항상 마지막 상태 자동 저장
+            StopDlTraining();
+            base.OnFormClosed(e);
+        }
+
+        /// <summary>현재 DL 탭 설정을 JSON 파일로 저장합니다.</summary>
+        private void SaveDlSettings(string path)
+        {
+            try
+            {
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));
+                bool isTorque  = _dlRdoTorque?.Checked == true;
+                bool isAe      = _dlRdoAe?.Checked     == true;
+                var trqChecked = _dlChTrq?.Select(c => c.Checked).ToArray() ?? new bool[0];
+
+                var obj = new
+                {
+                    dataDir      = _dlDataDir?.Text    ?? "",
+                    sensorType   = isTorque ? "torque" : "accel",
+                    chX          = _dlChX?.Checked     ?? true,
+                    chY          = _dlChY?.Checked     ?? true,
+                    chZ          = _dlChZ?.Checked     ?? true,
+                    chTrq        = trqChecked,
+                    labelColumn  = _dlLabelColumn?.Text ?? "Label",
+                    clsNormal    = _dlChkNormal?.Checked    ?? true,
+                    clsOverload  = _dlChkOverload?.Checked  ?? false,
+                    clsLooseness = _dlChkLooseness?.Checked ?? true,
+                    clsOverspeed = _dlChkOverspeed?.Checked ?? false,
+                    modelType    = isAe ? "AE" : "CLS",
+                    windowSize   = (int)(_dlWindowSize?.Value ?? 256),
+                    stride       = (int)(_dlStride?.Value     ?? 128),
+                    epochs       = (int)(_dlEpochs?.Value     ?? 30),
+                    batch        = (int)(_dlBatch?.Value      ?? 32),
+                    lr           = _dlLr?.Text           ?? "0.001",
+                    valSplit     = (int)(_dlValSplit?.Value   ?? 20),
+                    outputPath   = _dlOutputPath?.Text   ?? ""
+                };
+                var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
+                System.IO.File.WriteAllText(path, json, System.Text.Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        /// <summary>JSON 파일에서 DL 탭 설정을 복원합니다.</summary>
+        private void LoadDlSettings(string path)
+        {
+            try
+            {
+                if (!System.IO.File.Exists(path)) return;
+                var txt  = System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8);
+                var root = JsonDocument.Parse(txt).RootElement;
+
+                string Str(string key, string def)
+                { return root.TryGetProperty(key, out var v) ? v.GetString() ?? def : def; }
+                bool Bool(string key, bool def)
+                { return root.TryGetProperty(key, out var v) ? v.GetBoolean() : def; }
+                int Int(string key, int def)
+                { return root.TryGetProperty(key, out var v) && v.TryGetInt32(out int i) ? i : def; }
+
+                if (_dlDataDir    != null) _dlDataDir.Text    = Str("dataDir",     _dlDataDir.Text);
+                if (_dlLabelColumn!= null) _dlLabelColumn.Text= Str("labelColumn", "Label");
+                if (_dlLr         != null) _dlLr.Text         = Str("lr",          "0.001");
+                if (_dlOutputPath != null) _dlOutputPath.Text = Str("outputPath",  _dlOutputPath.Text);
+
+                bool isTorque = string.Equals(Str("sensorType", "accel"), "torque", StringComparison.OrdinalIgnoreCase);
+                if (_dlRdoAccel  != null) _dlRdoAccel.Checked  = !isTorque;
+                if (_dlRdoTorque != null) _dlRdoTorque.Checked = isTorque;
+
+                if (_dlChX != null) _dlChX.Checked = Bool("chX", true);
+                if (_dlChY != null) _dlChY.Checked = Bool("chY", true);
+                if (_dlChZ != null) _dlChZ.Checked = Bool("chZ", true);
+
+                if (_dlChTrq != null && root.TryGetProperty("chTrq", out var trqArr))
+                {
+                    var arr = trqArr.EnumerateArray().Select(v => v.GetBoolean()).ToArray();
+                    for (int i = 0; i < _dlChTrq.Length && i < arr.Length; i++)
+                        _dlChTrq[i].Checked = arr[i];
+                }
+
+                if (_dlChkNormal   != null) _dlChkNormal.Checked    = Bool("clsNormal",    true);
+                if (_dlChkOverload != null) _dlChkOverload.Checked  = Bool("clsOverload",  false);
+                if (_dlChkLooseness!= null) _dlChkLooseness.Checked = Bool("clsLooseness", true);
+                if (_dlChkOverspeed!= null) _dlChkOverspeed.Checked = Bool("clsOverspeed", false);
+
+                bool isAe = string.Equals(Str("modelType", "CLS"), "AE", StringComparison.OrdinalIgnoreCase);
+                if (_dlRdoCls != null) _dlRdoCls.Checked = !isAe;
+                if (_dlRdoAe  != null) _dlRdoAe.Checked  = isAe;
+
+                void SetNud(NumericUpDown nud, int val)
+                { if (nud != null) nud.Value = Math.Max(nud.Minimum, Math.Min(nud.Maximum, val)); }
+                SetNud(_dlWindowSize, Int("windowSize", 256));
+                SetNud(_dlStride,     Int("stride",     128));
+                SetNud(_dlEpochs,     Int("epochs",     30));
+                SetNud(_dlBatch,      Int("batch",      32));
+                SetNud(_dlValSplit,   Int("valSplit",   20));
+            }
+            catch { }
+        }
+
+        /// <summary>dl_presets 폴더의 프리셋 목록으로 콤보박스를 채웁니다.</summary>
+        private void RefreshPresetCombo()
+        {
+            if (_dlPresetCombo == null) return;
+            try
+            {
+                _dlPresetCombo.Items.Clear();
+                if (!System.IO.Directory.Exists(DlPresetsDir)) return;
+                foreach (var f in System.IO.Directory.GetFiles(DlPresetsDir, "*.json").OrderBy(x => x))
+                    _dlPresetCombo.Items.Add(System.IO.Path.GetFileNameWithoutExtension(f));
+                if (_dlPresetCombo.Items.Count > 0) _dlPresetCombo.SelectedIndex = 0;
+            }
+            catch { }
+        }
+
+        /// <summary>현재 설정을 이름 붙여 프리셋으로 저장합니다.</summary>
+        private void ShowSavePresetDialog()
+        {
+            // 이름 입력 미니 다이얼로그
+            var dlg = new Form
+            {
+                Text = "프리셋 저장", Width = 320, Height = 120,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false, MinimizeBox = false,
+                Font = new Font("Segoe UI", 9f), BackColor = Color.White
+            };
+            var lbl = new Label { Text = "프리셋 이름:", Left = 12, Top = 14, AutoSize = true };
+            var txt = new TextBox { Left = 12, Top = 32, Width = 276, Text = "preset_" + DateTime.Now.ToString("MMdd_HHmm") };
+            var btnOk = new Button
+            {
+                Text = "저장", DialogResult = DialogResult.OK,
+                Left = 128, Top = 58, Width = 76, Height = 26,
+                BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat
+            };
+            btnOk.FlatAppearance.BorderSize = 0;
+            var btnCancel = new Button
+            {
+                Text = "취소", DialogResult = DialogResult.Cancel,
+                Left = 212, Top = 58, Width = 76, Height = 26, FlatStyle = FlatStyle.Flat
+            };
+            dlg.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+            dlg.AcceptButton = btnOk; dlg.CancelButton = btnCancel;
+
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            string name = txt.Text.Trim();
+            if (string.IsNullOrEmpty(name)) return;
+            // 파일명에 사용 불가한 문자 제거
+            foreach (char c in System.IO.Path.GetInvalidFileNameChars())
+                name = name.Replace(c, '_');
+
+            try
+            {
+                System.IO.Directory.CreateDirectory(DlPresetsDir);
+                string presetPath = System.IO.Path.Combine(DlPresetsDir, name + ".json");
+                SaveDlSettings(presetPath);
+                RefreshPresetCombo();
+                // 방금 저장한 항목 선택
+                int idx = _dlPresetCombo.Items.IndexOf(name);
+                if (idx >= 0) _dlPresetCombo.SelectedIndex = idx;
+                AppendDlLog($"[프리셋] 저장 완료: {name}.json");
+            }
+            catch (Exception ex) { MessageBox.Show("저장 실패: " + ex.Message); }
         }
 
         /// <summary>모델 유형(CLS/AE) 전환 시 관련 UI를 동기화합니다.</summary>
