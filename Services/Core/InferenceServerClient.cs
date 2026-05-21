@@ -222,6 +222,37 @@ namespace PHM_Project_DockPanel.Services.Core
             catch { return false; }
         }
 
+        // ── 서버 스코어링 파라미터 조회/변경 ─────────────────────────────────
+
+        /// <summary>GET /config — 현재 서버 스코어링 파라미터를 반환합니다.</summary>
+        public async Task<ServerConfig> GetServerConfigAsync()
+        {
+            try
+            {
+                var resp = await _http.GetAsync("config").ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return null;
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonConvert.DeserializeObject<ServerConfig>(body);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>POST /config — 서버 스코어링 파라미터를 변경합니다.</summary>
+        public async Task<ServerConfig> SetServerConfigAsync(double? rmsWeight, double? anomalyThreshold)
+        {
+            try
+            {
+                var payload = new { rms_weight = rmsWeight, anomaly_threshold = anomalyThreshold };
+                string json    = JsonConvert.SerializeObject(payload);
+                var    content = new StringContent(json, Encoding.UTF8, "application/json");
+                var    resp    = await _http.PostAsync("config", content).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return null;
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonConvert.DeserializeObject<ServerConfig>(body);
+            }
+            catch { return null; }
+        }
+
         public void Dispose() => _http.Dispose();
     }
 
@@ -330,5 +361,14 @@ namespace PHM_Project_DockPanel.Services.Core
     {
         [JsonProperty("profiles")] public ProfileInfo[] Profiles { get; set; } = new ProfileInfo[0];
         [JsonProperty("active")]   public string        Active   { get; set; } = "";
+    }
+
+    // =========================================================================
+    //  ServerConfig — GET/POST /config 응답 DTO
+    // =========================================================================
+    public sealed class ServerConfig
+    {
+        [JsonProperty("rms_weight")]        public double RmsWeight        { get; set; } = 0.3;
+        [JsonProperty("anomaly_threshold")] public double AnomalyThreshold { get; set; } = 1.0;
     }
 }

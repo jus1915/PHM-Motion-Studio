@@ -5049,8 +5049,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         /// <summary>이상탐지 파라미터 튜닝 다이얼로그를 표시합니다.</summary>
-        private void ShowAnomalySettingsDialog()
+        private async void ShowAnomalySettingsDialog()
         {
+            // ── 서버 파라미터 사전 조회 (실패 시 기본값 사용) ──────────────────
+            PHM_Project_DockPanel.Services.Core.ServerConfig srvCfg = null;
+            if (_profileClient != null)
+            {
+                try { srvCfg = await _profileClient.GetServerConfigAsync().ConfigureAwait(true); }
+                catch { }
+            }
+            double initRmsWeight        = srvCfg?.RmsWeight        ?? 0.3;
+            double initAnomalyThreshold = srvCfg?.AnomalyThreshold ?? 1.0;
+            bool   serverReachable      = srvCfg != null;
+
             var dlg = new Form
             {
                 Text            = "이상탐지 파라미터 설정",
@@ -5128,6 +5139,28 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var nudCooldown = MakeRow("이벤트 쿨다운  (초)",
                 "같은 센서 재기록 최소 간격",     _anomalyLogCooldown.TotalSeconds, 5, 300, 5, 0);
 
+            // ── 서버 스코어링 파라미터 ────────────────────────────────────────
+            rowY += 4;
+            string srvStatus = serverReachable ? "서버 연결됨" : "서버 미연결 — 기본값 표시";
+            var lblSrvStatus = new Label
+            {
+                Text = srvStatus, Left = LEFT + 192, Top = rowY + 1,
+                AutoSize = true,
+                ForeColor = serverReachable ? Color.FromArgb(0, 140, 60) : Color.FromArgb(180, 60, 60),
+                Font = new Font("Segoe UI", 7.5f)
+            };
+            dlg.Controls.Add(lblSrvStatus);
+            AddSeparator("▌ 서버 스코어링  (inference_server)");
+            var nudRmsWeight       = MakeRow("RMS 기여 가중치  (RMS_WEIGHT)",
+                "score = MAE + W×RMS", initRmsWeight,        0.0, 1.0,  0.05, 2);
+            var nudAnomalyThr      = MakeRow("이상 판정 기준  (ANOMALY_THR)",
+                "log₂score ≥ 이 값 → 이상",   initAnomalyThreshold, 0.1, 5.0,  0.1,  2);
+            if (!serverReachable)
+            {
+                nudRmsWeight.Enabled  = false;
+                nudAnomalyThr.Enabled = false;
+            }
+
             // ── 버튼 ─────────────────────────────────────────────────────────
             rowY += 6;
             var btnReset = new Button
@@ -5142,6 +5175,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 nudFactor.Value  = 2.5m;   nudAlpha.Value   = 0.10m;
                 nudWarmup.Value  = 30;     nudConfirm.Value = 1;
                 nudCooldown.Value= 30;
+                if (serverReachable) { nudRmsWeight.Value = 0.30m; nudAnomalyThr.Value = 1.0m; }
             };
 
             var btnOk = new Button
@@ -5168,7 +5202,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-            // ── 값 반영 ──────────────────────────────────────────────────────
+            // ── C# 파라미터 반영 ─────────────────────────────────────────────
             _warnMultiplier      = (double)nudWarn.Value;
             _dangerMultiplier    = (double)nudDanger.Value;
             _spikeFactor         = (double)nudFactor.Value;
@@ -5182,6 +5216,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 $"[설정] 경고≥{_warnMultiplier:F2}  위험≥{_dangerMultiplier:F2}" +
                 $"  스파이크×{_spikeFactor:F1}  α={_spikeEmaAlpha:F2}" +
                 $"  워밍업={_spikeWarmup}  확정={_anomalyConfirmCount}  쿨다운={_anomalyLogCooldown.TotalSeconds}s");
+
+            // ── 서버 파라미터 반영 (연결된 경우에만) ─────────────────────────
+            if (serverReachable && _profileClient != null)
+            {
+                double newRms = (double)nudRmsWeight.Value;
+                double newThr = (double)nudAnomalyThr.Value;
+                // 변경된 경우에만 POST
+                if (Math.Abs(newRms - initRmsWeight) > 1e-9 || Math.Abs(newThr - initAnomalyThreshold) > 1e-9)
+                {
+                    _ = _profileClient.SetServerConfigAsync(newRms, newThr).ContinueWith(t =>
+                    {
+                        if (t.Result != null)
+                            AppEvents.RaiseLog($"[서버설정] RMS_WEIGHT={t.Result.RmsWeight:F2}  ANOMALY_THR={t.Result.AnomalyThreshold:F2}");
+                        else
+                            AppEvents.RaiseLog("[서버설정] POST /config 실패 (서버 응답 없음)");
+                    }, TaskScheduler.FromCurrentSynchronizationContext());
+                }
+            }
         }
 
         /// <summary>

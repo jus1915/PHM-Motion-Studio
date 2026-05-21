@@ -62,6 +62,11 @@ from pydantic import BaseModel
 _MODELS_BASE    = Path(os.getenv("PHM__models_root()", "/opt/phm/models"))
 _active_profile: str = "default"
 
+# ── 런타임 튜닝 가능 스코어링 파라미터 ────────────────────────────────────────
+# GET /config 로 조회, POST /config 로 변경 가능
+_RMS_WEIGHT:        float = 0.3   # RMS 기여 가중치 (0.0 ~ 1.0)
+_ANOMALY_THRESHOLD: float = 1.0   # 이상 판정 기준값 (log₂ 스코어 ≥ 이 값 → 이상)
+
 def _models_root() -> Path:
     """현재 활성 프로파일의 모델 디렉토리.
     profile 서브디렉토리가 있으면 그것을, 없으면 베이스 경로 반환 (하위호환)."""
@@ -839,11 +844,8 @@ def _ae_score(
     # rms 기여도도 동일 스케일로 압축
     score_rms = math.log2(1.0 + rms_norm) if rms_norm > 0.0 else 0.0
 
-    RMS_WEIGHT        = 0.3
-    ANOMALY_THRESHOLD = 1.0
-
-    score_normed = score_mae + RMS_WEIGHT * score_rms
-    is_anomaly   = score_normed >= ANOMALY_THRESHOLD
+    score_normed = score_mae + _RMS_WEIGHT * score_rms
+    is_anomaly   = score_normed >= _ANOMALY_THRESHOLD
     return is_anomaly, score_normed, mae, thr
 
 
@@ -1070,6 +1072,42 @@ def predict_combined(req: CombinedPredictRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"추론 실패: {type(e).__name__}: {e}")
+
+
+# ── /config  (런타임 스코어링 파라미터 조회/변경) ────────────────────────────
+
+class ServerConfigRequest(BaseModel):
+    rms_weight:        Optional[float] = None   # None 이면 변경 안 함
+    anomaly_threshold: Optional[float] = None
+
+
+@app.get("/config")
+def get_config():
+    """현재 스코어링 파라미터를 반환합니다."""
+    return {
+        "rms_weight":        _RMS_WEIGHT,
+        "anomaly_threshold": _ANOMALY_THRESHOLD,
+    }
+
+
+@app.post("/config")
+def set_config(req: ServerConfigRequest):
+    """스코어링 파라미터를 변경합니다 (재시작 전까지 유효).
+
+    - rms_weight:        RMS 기여 가중치 (0.0 ~ 1.0)
+    - anomaly_threshold: 이상 판정 기준값 (log₂ 스코어 ≥ 이 값 → 이상)
+    """
+    global _RMS_WEIGHT, _ANOMALY_THRESHOLD
+    changed = []
+    if req.rms_weight is not None:
+        _RMS_WEIGHT = float(req.rms_weight)
+        changed.append(f"rms_weight={_RMS_WEIGHT}")
+    if req.anomaly_threshold is not None:
+        _ANOMALY_THRESHOLD = float(req.anomaly_threshold)
+        changed.append(f"anomaly_threshold={_ANOMALY_THRESHOLD}")
+    if changed:
+        print(f"[config] 변경: {', '.join(changed)}", flush=True)
+    return get_config()
 
 
 # ── 엔트리포인트 ──────────────────────────────────────────────────────────────
