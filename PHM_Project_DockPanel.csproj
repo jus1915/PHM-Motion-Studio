@@ -194,6 +194,9 @@
     <Compile Include="UI\Dashboard\DashboardForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UI\Dashboard\RealtimeMonitorForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="UI\Dashboard\ProbGaugeControl.cs">
       <SubType>UserControl</SubType>
     </Compile>
