@@ -167,10 +167,21 @@
     <Compile Include="DebugTools\AxisConfigDebugger.cs" />
     <Compile Include="Services\Core\AppEvents.cs" />
     <Compile Include="Services\Core\AppState.cs" />
+    <Compile Include="Services\Core\AirflowClient.cs" />
+    <Compile Include="Services\Core\InferenceServerClient.cs" />
+    <Compile Include="Services\Core\ContinuousInferenceService.cs" />
+    <Compile Include="Services\Core\ServerSettings.cs" />
+    <Compile Include="UI\DataCollection\ServerSettingsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Services\Core\AxisConfig.cs" />
     <Compile Include="Services\Core\AxisMonitor.cs" />
+    <Compile Include="Services\Core\SegmentValidator.cs" />
     <Compile Include="Services\Core\SignalFeatures.cs" />
+    <Compile Include="Services\DAQ\AccelInfluxPublisher.cs" />
+    <Compile Include="Services\DAQ\InfluxDbDataSource.cs" />
     <Compile Include="Services\DAQ\DaqAccelCsvLogger.cs" />
+    <Compile Include="Services\DAQ\CombinedCsvLogger.cs" />
     <Compile Include="Services\DAQ\DaqAccelHttpSender.cs" />
     <Compile Include="Services\DAQ\DaqSensorConfig.cs" />
     <Compile Include="Services\DAQ\EventTrigger.cs" />
@@ -236,7 +247,13 @@
     <Compile Include="UI\DataCollection\TeachingForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UI\DataCollection\RealtimeSignalForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Controller\WMX3Controller.cs" />
+    <Compile Include="Services\LLM\ClaudeApiClient.cs" />
+    <Compile Include="Services\LLM\AppToolProvider.cs" />
+    <Compile Include="UI\Chat\LlmChatPanel.cs" />
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
@@ -262,6 +279,35 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="scripts\train_model.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\train_dl_model.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\requirements.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\params\train_fd_params.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\params\train_ad_params.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\params\train_dl_params.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\setup_venv.bat">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\setup_docker_gpu.bat">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\requirements_dl.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>

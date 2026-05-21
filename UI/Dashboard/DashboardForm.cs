@@ -58,7 +58,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         #region 상수/필드
         private const bool WatchSubdirectories = true;
-        private const int ChartKeepPoints = 300;
+        private const int ChartKeepPoints = 3000;  // ~6분 분량 (7.8 pt/s × 360s)
         private double MotionEps { get; set; } = 0.010;  // 움직임 판정(Δpos) 기본값
         private double DefaultThreshold { get; set; } = 1.000; // 기본 임계값(필요 시)
         private const string DefaultLogsPath = @"C:\Data\PHM_Logs";
@@ -82,6 +82,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public string InputName = "input";
             public string OutputName = "logits"; // 분류기일 때
             public bool StandardizePerSample = true;
+
+            // AE 전역 정규화 파라미터 (_meta.json 의 norm_mean / norm_std)
+            // null 이면 StandardizePerSample 분기 사용, 있으면 전역 정규화 우선
+            public double[] NormMean = null;
+            public double[] NormStd  = null;
 
             public bool IsAutoencoder;          // AE 여부
             public string ReconOutputName = "recon"; // (T,C) 또는 (1,T,C)
@@ -339,14 +344,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         // UI
         private KpiCard cardDanger, cardWarning, cardCycles;
+#pragma warning disable CS0649, CS0169  // 레거시 필드: null-guard 코드에서 사용되거나 미사용 (의도적 미초기화)
         private Chart chartLine;
         private DataGridView grid;
         private Button btnLoadSklModel, btnLoadOnnxModelSingle, btnLoadModelFolder, btnSelectFolder, btnQuickFolder, btnStart, btnStop;
         private Label lblFolder, lblStatus;
-        private static readonly string MruFile = Path.Combine(DefaultLogsPath, "recent_watch_folders.txt");
-        private const int MruMaxCount = 5;
         private DataGridView gridModelPaths;
         private TableLayoutPanel sampleGrid;                       // rightBottom 안에서 그리드 역할
+#pragma warning restore CS0649, CS0169
+        private static readonly string MruFile = Path.Combine(DefaultLogsPath, "recent_watch_folders.txt");
+        private const int MruMaxCount = 5;
         private readonly Dictionary<int, Chart> sampleCharts =     // 축별 Chart 캐시
             new Dictionary<int, Chart>();
         private TextBox txtEventLog;
@@ -380,19 +387,131 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 데이터 테이블
         private BindingList<EventRow> rows = new BindingList<EventRow>();
         private enum XMode { Numeric, DateTime, Index }
+#pragma warning disable CS0649
         private FlowLayoutPanel axisGaugeFlow;
+        private Button btnTestProbs;
+#pragma warning restore CS0649, CS0169
         private readonly Dictionary<int, ProbGaugeControl> _axisGauges = new Dictionary<int, ProbGaugeControl>();
         private string[] _clsLabels = { "0. 정상", "1. 벨트 결함", "2. 볼트 풀림", "3. 바디 불평형" };
         private readonly Dictionary<int, float[]> _axisGaugePrev = new Dictionary<int, float[]>();
         private const bool GAUGE_SORT_DESC = false;   // true면 확률 내림차순으로 정렬해 보여줌
-        private Button btnTestProbs;              // ← 추가
-        private readonly Random _rng = new Random(); // ← 추가
+        private readonly Random _rng = new Random();
 
         // ── 서버 실시간 추론 UI ──────────────────────────────────────────────────
-        private Label _lblLiveAccelStatus, _lblLiveTorqueStatus;
-        private Label _lblLiveAccelScore,  _lblLiveTorqueScore;
+        // key = "{sensorType}_ax{n}" (예: "accel_ax0", "torque_ax2", "combined_ax0")
+        private Chart _chartAccel;                  // 가속도 서버 추론 스코어 차트
+        private Chart _chartTorque;                 // 토크 서버 추론 스코어 차트
+        private Chart _chartCombined;               // 결합(Combined) 서버 추론 스코어 차트
+        private bool  _liveChartFirstData = true;   // 첫 실데이터 수신 시 스켈레톤 제거 플래그
+        private Label _lblAccelModelInfo;           // 가속도 차트 모델 정보 라벨
+        private Label _lblTorqueModelInfo;          // 토크 차트 모델 정보 라벨
+        private Label _lblCombinedModelInfo;        // 결합 차트 모델 정보 라벨
+        private TableLayoutPanel _dualChartPanel;   // 이상 스코어 차트 컨테이너 (동적 열 너비 조정용)
+        private Panel _accelChartWrap;              // 가속도 차트 래퍼 패널
+        private Panel _torqueChartWrap;             // 토크 차트 래퍼 패널
+        private Panel _combinedChartWrap;           // 결합 차트 래퍼 패널
+        private readonly System.Collections.Generic.HashSet<string> _seenAccelModels    = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Generic.HashSet<string> _seenTorqueModels   = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Generic.HashSet<string> _seenCombinedModels = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private FlowLayoutPanel _statusFlow;        // 상단 상태 바 칩 컨테이너
+
+        // ── 센서 표시 필터 체크박스 ──────────────────────────────────────────
+        private CheckBox _chkShowAccel;             // 가속도 결과 표시 여부
+        private CheckBox _chkShowTorque;            // 토크 결과 표시 여부
+        private CheckBox _chkShowCombined;          // 결합 결과 표시 여부
+
+        // ── 실시간 이상탐지 현황 매트릭스 ────────────────────────────────────
+        // 행=센서 (axis: -1=가속도 전역, -10=토크 전역, 0~N=토크 AxN)
+        // 열=AE 점수/판정 (CLS 열은 정의만 하고 숨김)
+        private DataGridView _classMatrixDgv;
+        private readonly Dictionary<int, int> _classMatrixAxisRow = new Dictionary<int, int>(); // axis key → rowIdx
+        // ── AE 이상탐지 열 ───────────────────────────────
+        private const int CMG_COL_AXIS     = 0;
+        private const int CMG_COL_TS       = 1;  // [AE] 점수
+        private const int CMG_COL_TSTATE   = 2;  // [AE] 판정
+        // ── CLS 결함진단 열 ─────────────────────────────
+        private const int CMG_COL_TCLS     = 3;  // [CLS] 토크 결함명
+        private const int CMG_COL_TCLSCONF = 4;  // [CLS] 토크 신뢰도
+        private const int CMG_COL_CCLS     = 5;  // [CLS] 결합 결함명
+        private const int CMG_COL_CCLSCONF = 6;  // [CLS] 결합 신뢰도
+
+        // ── 이벤트 카운트 표 (축별 위험/경고 누적 건수) ─────────────────────
+        private DataGridView _eventCountDgv;
+        private readonly Dictionary<int, int> _eventCountRowIdx  = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _warnEventCounts   = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _dangerEventCounts = new Dictionary<int, int>();
+
+        // ── 가속도 AE 전역 표시 패널 (단일 모델 — per-axis 없음) ─────────
+        private Panel  _pnlAccelAeBar;
+        private Label  _lblAccelAeScore;
+        private Label  _lblAccelAeState;
+        private double _accelAeNormScore;
+        // 마지막 스코어 보관 (색 재계산용)
+        private readonly Dictionary<string, double> _classMatrixLastScore = new Dictionary<string, double>();
+        private readonly Dictionary<string, Panel>  _statusChips      = new Dictionary<string, Panel>();
+        private readonly Dictionary<string, Label>  _liveStatusLabels = new Dictionary<string, Label>();
+        private readonly Dictionary<string, Label>  _liveScoreLabels  = new Dictionary<string, Label>();
+        private readonly ToolTip                    _chipToolTip      = new ToolTip();
+        // 축별 임계값: key → threshold (서버값으로 자동 초기화, UI에서 재설정 가능)
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
+            _axisThresholds = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        private static readonly string ThresholdsFile =
+            Path.Combine(DefaultLogsPath, "axis_thresholds.txt");
         private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveScoreQueue
             = new ConcurrentQueue<Tuple<string, DateTime, double>>();
+
+        // ── 외력 감지: EMA 베이스라인 대비 급증(spike) 감지 ─────────────────────
+        // key → (EMA 베이스라인, 누적 샘플 수)
+        // 샘플이 충분히 쌓인 후(>= SpikeWarmup) 현재 스코어가 EMA의 SpikeFactor배 이상이면 anomaly
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double ema, int count)>
+            _scoreBaseline = new System.Collections.Concurrent.ConcurrentDictionary<string, (double, int)>();
+        private const double SpikeEmaAlpha  = 0.1;  // EMA 감쇠율 (느릴수록 베이스라인 안정적)
+        private const double SpikeFactor    = 2.5;  // EMA 대비 이 배수 이상이면 spike 판정 (v3 복원)
+                                                    // 서버가 MAE+peak 혼합 스코어 반환하므로 충격 시 spike 폭 확대됨
+        private const int    SpikeWarmup    = 30;   // 워밍업 후 spike 판정 시작 (충분한 베이스라인 수집)
+
+        // ── 위험/경고 등급 임계 배수 (normScore = rawScore / threshold 기준) ──
+        // normScore ∈ [WarnMultiplier, DangerMultiplier) → 경고
+        // normScore ≥ DangerMultiplier                   → 위험
+        private const double WarnMultiplier   = 1.0;  // 임계값 초과 즉시 경고
+        private const double DangerMultiplier = 2.0;  // 임계값의 2배 이상이면 위험 (v3 복원)
+
+        // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
+        // 128ms 간격의 per-window 스코어 노이즈를 줄여 차트를 부드럽게 표시.
+        // 이상 판정(threshAnomaly/spikeAnomaly)은 raw score 기반으로 유지.
+        // alpha=0.15: 약 12샘플(~1.5초) 수렴, 차트 노이즈 감소
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
+            _chartEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        private const double ChartEmaAlpha = 0.15;
+
+        // ── 이동평균선 (MA선) ──────────────────────────────────────────────────
+        // alpha=0.05: 약 40샘플(~10초) 수렴 — 단기 노이즈 제거, 추세 확인용
+        private readonly ConcurrentQueue<Tuple<string, DateTime, double>> _liveMaQueue
+            = new ConcurrentQueue<Tuple<string, DateTime, double>>();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, double>
+            _chartMaEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        private const double ChartMaAlpha = 0.05;
+
+        // ── 이상 이벤트 로그 중복 방지 ──────────────────────────────────────
+        // 상태 전환(정상→이상) 시 즉시, 이상 지속 시 쿨다운마다 1회씩만 로그
+        private readonly Dictionary<string, bool>     _prevAnomalyState   = new Dictionary<string, bool>();
+        private readonly Dictionary<string, DateTime> _lastAnomalyLogTime = new Dictionary<string, DateTime>();
+        private static readonly TimeSpan AnomalyLogCooldown = TimeSpan.FromSeconds(30);
+
+        // ── 연속 이상 카운터 (N회 연속 threshold 초과 시 경보 확정) ──────────
+        // 256ms 간격 × 1회 = 즉시 확정 → 500ms 미만 단발 모션도 감지
+        private const int AnomalyConfirmCount = 1;
+        private readonly Dictionary<string, int> _consecutiveAnomalyCount
+            = new Dictionary<string, int>();
+
+        // 프로파일 관리
+        private ComboBox _cmbProfile;
+        private Button   _btnProfileApply, _btnProfileRefresh;
+        private PHM_Project_DockPanel.Services.Core.InferenceServerClient _profileClient;
+
+        // 재학습 트리거
+        private Button _btnRetrain;
+        private string _lastRetrainRunId;
 
         // DB 모드 UI 컨트롤
         private RadioButton rbtnCsvMode, rbtnDbMode;
@@ -559,24 +678,131 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             this.Text = "실시간 대시보드";
             this.MinimumSize = new Size(1000, 600);
+            LoadAxisThresholds();
             BuildUI();
             _notifier = new NotifyIcon
             {
                 Visible = true,
-                Icon = SystemIcons.Warning, // 필요시 커스텀 아이콘 가능
+                Icon = SystemIcons.Warning,
                 Text = "PHM 알림"
             };
 
-            // 서버 실시간 추론 결과 구독
-            AppEvents.InferenceResultReceived += OnLiveInferenceResult;
+            // 서버 실시간 추론 결과 구독 (AE 이상탐지 + CLS 결함진단)
+            AppEvents.InferenceResultReceived    += OnLiveInferenceResult;
+            AppEvents.ClsInferenceResultReceived += OnLiveClsInferenceResult;
+            AppEvents.LoopCompleted              += OnLoopCompleted;
+
+            // 프로파일 클라이언트 초기화 + 목록 로드
+            string inferUrl = PHM_Project_DockPanel.Services.ServerSettings.Current.InferenceServerUrl;
+            if (!string.IsNullOrWhiteSpace(inferUrl))
+            {
+                _profileClient = new PHM_Project_DockPanel.Services.Core.InferenceServerClient(inferUrl);
+                // 비동기 로드 (UI 스레드 블로킹 없이)
+                _ = RefreshProfilesAsync();
+            }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            AppEvents.InferenceResultReceived -= OnLiveInferenceResult;
+            AppEvents.InferenceResultReceived    -= OnLiveInferenceResult;
+            AppEvents.ClsInferenceResultReceived -= OnLiveClsInferenceResult;
+            AppEvents.LoopCompleted              -= OnLoopCompleted;
+            SaveAxisThresholds();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
             try { DisposeOnnxSessions(); } catch { }
+            try { _profileClient?.Dispose(); } catch { }
             base.OnFormClosing(e);
+        }
+
+        // ── 프로파일 관리 ─────────────────────────────────────────────────────
+        private async System.Threading.Tasks.Task RefreshProfilesAsync()
+        {
+            if (_profileClient == null) return;
+            var result = await _profileClient.GetProfilesAsync().ConfigureAwait(false);
+            if (result == null) return;
+
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                string prevSelected = _cmbProfile.SelectedItem?.ToString();
+                _cmbProfile.Items.Clear();
+                foreach (var p in result.Profiles)
+                {
+                    string display = string.IsNullOrEmpty(p.Label) || p.Label == p.Name
+                        ? p.Name
+                        : $"{p.Label} ({p.Name})";
+                    _cmbProfile.Items.Add(new ProfileComboItem(p.Name, display, p.ModelCount));
+                }
+
+                // 현재 활성 프로파일 선택
+                string active = result.Active ?? "default";
+                int idx = -1;
+                for (int i = 0; i < _cmbProfile.Items.Count; i++)
+                {
+                    if (_cmbProfile.Items[i] is ProfileComboItem pi && pi.Name == active)
+                    { idx = i; break; }
+                }
+                if (idx >= 0) _cmbProfile.SelectedIndex = idx;
+                else if (_cmbProfile.Items.Count > 0) _cmbProfile.SelectedIndex = 0;
+            }));
+        }
+
+        private async System.Threading.Tasks.Task ApplyProfileAsync()
+        {
+            if (_profileClient == null || _cmbProfile.SelectedItem == null) return;
+            if (!(_cmbProfile.SelectedItem is ProfileComboItem item)) return;
+
+            _btnProfileApply.Enabled = false;
+            _btnProfileApply.Text    = "...";
+            try
+            {
+                bool ok = await _profileClient.ActivateProfileAsync(item.Name).ConfigureAwait(false);
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    if (ok)
+                    {
+                        AppEvents.RaiseLog($"[프로파일] 전환 완료: {item.Name}  ({item.ModelCount}개 모델)");
+                        // 칩/EMA/차트 상태 리셋
+                        _chartEma.Clear();
+                        _chartMaEma.Clear();
+                        _scoreBaseline.Clear();
+                        _consecutiveAnomalyCount.Clear();
+                        _seenAccelModels.Clear();
+                        _seenTorqueModels.Clear();
+                        _seenCombinedModels.Clear();
+                        if (_lblAccelModelInfo    != null) _lblAccelModelInfo.Text    = "모델: 수신 대기 중...";
+                        if (_lblTorqueModelInfo   != null) _lblTorqueModelInfo.Text   = "모델: 수신 대기 중...";
+                        if (_lblCombinedModelInfo != null) _lblCombinedModelInfo.Text = "모델: 수신 대기 중...";
+                    }
+                    else
+                    {
+                        AppEvents.RaiseLog($"[프로파일] 전환 실패: {item.Name}");
+                        MessageBox.Show($"프로파일 '{item.Name}' 전환에 실패했습니다.\n서버 로그를 확인하세요.",
+                            "프로파일 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }));
+            }
+            finally
+            {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke(new Action(() =>
+                    {
+                        _btnProfileApply.Enabled = true;
+                        _btnProfileApply.Text    = "적용";
+                    }));
+            }
+        }
+
+        /// <summary>ComboBox 아이템 — 프로파일 이름과 표시 텍스트를 분리합니다.</summary>
+        private sealed class ProfileComboItem
+        {
+            public string Name       { get; }
+            public int    ModelCount { get; }
+            private readonly string _display;
+            public ProfileComboItem(string name, string display, int modelCount)
+            { Name = name; _display = display; ModelCount = modelCount; }
+            public override string ToString() => _display;
         }
 
         private static void DownsampleMinMax(IList<double> xs, IList<double> ys, int maxPoints,
@@ -631,531 +857,505 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         #region UI 구성
         private void BuildUI()
         {
-            // ====== Root ======
-            var root = new TableLayoutPanel
+            SuspendLayout();
+            const int BtnH = 28;
+            BackColor = Color.FromArgb(245, 247, 250);
+
+            // ══════════════════════════════════════════════════
+            //  콘텐츠 패널 (전체 — 사이드바 없음)
+            // ══════════════════════════════════════════════════
+            // ══════════════════════════════════════════════════
+            //  Content Area (툴바 + 상태바 + 2×2 메인 그리드)
+            // ══════════════════════════════════════════════════
+            var contentPanel = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 2,
-                BackColor = Color.White,
-                Padding = new Padding(0, 8, 12, 12)
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
+                Padding = Padding.Empty, Margin = Padding.Empty
             };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 상단
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); // 하단 
+            // DPI 스케일을 먼저 계산해서 행 높이에 반영
+            float _dpiScaleEarly;
+            using (var _dg = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
+                _dpiScaleEarly = _dg.DpiX / 96.0f;
+            int statusBarH = Math.Max(76, (int)(76 * _dpiScaleEarly));  // 상태 바 (칩) 높이
 
-            // ====== Left Sidebar ======
-            var leftWrap = new Panel { Dock = DockStyle.Left, Width = 250 };
-            var left = new FlowLayoutPanel
+            contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));          // 툴바
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, statusBarH));  // 상태 바 (칩)
+            contentPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));          // 2×2 메인 그리드
+
+            // ── Row 0: 상단 툴바 ──────────────────────────────────────────────
+            var toolbar = new Panel
             {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoScroll = false,
-                Padding = new Padding(4, 4, 4, 30),
-                Margin = Padding.Empty
+                Dock = DockStyle.Fill, BackColor = Color.White,
+                Padding = new Padding(8, 0, 8, 0)
             };
-            left.SuspendLayout();
-            // left.Padding.Horizontal(=8) + 컨트롤 Margin.Horizontal(=4) 를 빼서 수평 스크롤 없음
-            int ctrlWidth = leftWrap.Width - 12;
-            int btnH = 28;
-
-            // ── [A] 모델 로드 GroupBox ──────────────────────────────────────────
-            var gbModels = new GroupBox
+            toolbar.Paint += (s, e) =>
             {
-                Text = "모델 로드", Width = ctrlWidth,
-                Padding = new Padding(6, 4, 6, 6),
-                Margin = new Padding(2, 2, 2, 4),
-                AutoSize = true
+                using (var pen = new Pen(Color.FromArgb(215, 215, 222)))
+                    e.Graphics.DrawLine(pen, 0, toolbar.Height - 1, toolbar.Width, toolbar.Height - 1);
             };
-            var tlModels = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3,
-                AutoSize = true, Margin = Padding.Empty
-            };
-            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            tlModels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            for (int i = 0; i < 2; i++) tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
-            tlModels.RowStyles.Add(new RowStyle(SizeType.Absolute, btnH + 4));
 
-            btnLoadSklModel        = new Button { Text = "SKL ONNX",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 235, 255) };
-            btnLoadOnnxModelSingle = new Button { Text = "DL ONNX",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
-            btnLoadModelFolder     = new Button { Text = "폴더 일괄",  Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1) };
-            var btnGlobalKnn       = new Button { Text = "전역 KNN",   Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
-            var btnGlobalAe        = new Button { Text = "전역 AE",    Dock = DockStyle.Fill, Height = btnH, Margin = new Padding(1), BackColor = Color.FromArgb(220, 255, 220) };
-
-            btnLoadSklModel.Click        += (s, e) => LoadSklOnnxModel();
-            btnLoadOnnxModelSingle.Click += (s, e) => LoadOnnxModelSingle();
-            btnLoadModelFolder.Click     += (s, e) => LoadAxisModelsFromFolder();
-            btnGlobalKnn.Click           += (s, e) => LoadGlobalKnnModel();
-            btnGlobalAe.Click            += (s, e) => LoadGlobalOnnxAeModel();
-
-            tlModels.Controls.Add(btnLoadSklModel,        0, 0);
-            tlModels.Controls.Add(btnLoadOnnxModelSingle, 1, 0);
-            tlModels.Controls.Add(btnLoadModelFolder,     0, 1);
-            tlModels.Controls.Add(btnGlobalKnn,           1, 1);
-            tlModels.SetColumnSpan(btnGlobalAe, 2);
-            tlModels.Controls.Add(btnGlobalAe,            0, 2);
-            gbModels.Controls.Add(tlModels);
-
-            // ── [B] 데이터 소스 GroupBox ────────────────────────────────────────
-            var gbSource = new GroupBox
-            {
-                Text = "데이터 소스", Width = ctrlWidth,
-                Padding = new Padding(6, 4, 6, 6),
-                Margin = new Padding(2, 4, 2, 4),
-                AutoSize = true
-            };
-            var tlSource = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 1,
-                AutoSize = true, Margin = Padding.Empty
-            };
-            tlSource.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-            // 모드 선택 행
-            int rbW = ctrlWidth / 2 - 2;
-            rbtnCsvMode = new RadioButton { Text = "CSV 폴더 감시",  Checked = true,  Width = rbW, Height = 22, Left = 0,        Top = 2, AutoSize = false };
-            rbtnDbMode  = new RadioButton { Text = "DB 모니터링",    Checked = false, Width = rbW, Height = 22, Left = rbW + 4,  Top = 2, AutoSize = false };
-            var pnlMode = new Panel { Height = 26, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
-            pnlMode.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode });
+            // 데이터 소스 모드
+            rbtnCsvMode = new RadioButton { Text = "CSV 폴더 감시", Checked = true, AutoSize = true };
+            rbtnDbMode  = new RadioButton { Text = "DB 모니터링",   Checked = false, AutoSize = true };
             rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourceMode(false); };
             rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourceMode(true);  };
 
-            // CSV 소스
-            pnlCsvSource = new Panel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
-            int folderBtnW = ctrlWidth - 38;
-            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = folderBtnW, Height = btnH, Left = 0, Top = 0 };
+            // CSV 폴더 컨트롤
+            pnlCsvSource = new Panel { AutoSize = true, Visible = true };
+            btnSelectFolder = new Button { Text = "📁 폴더 선택", Width = 110, Height = BtnH };
             btnSelectFolder.Click += (s, e) => SelectFolder();
-            btnQuickFolder = new Button { Text = "▾", Width = 24, Height = btnH, Left = folderBtnW + 2, Top = 0 };
+            btnQuickFolder = new Button { Text = "▾", Width = 24, Height = BtnH };
             btnQuickFolder.Click += (s, e) => ShowFolderQuickMenu();
-            lblFolder = new Label { AutoSize = true, MaximumSize = new Size(ctrlWidth - 12, 0), Top = btnH + 4, Left = 0, ForeColor = Color.Gray };
-            pnlCsvSource.Height = btnH + 24;
-            pnlCsvSource.Controls.AddRange(new Control[] { btnSelectFolder, btnQuickFolder, lblFolder });
+            lblFolder = new Label
+            {
+                AutoSize = true, ForeColor = Color.Gray,
+                TextAlign = ContentAlignment.MiddleLeft,
+                MaximumSize = new Size(400, 0)
+            };
+            var folderFlow = new FlowLayoutPanel
+            {
+                AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, Padding = Padding.Empty
+            };
+            folderFlow.Controls.AddRange(new Control[] { btnSelectFolder, btnQuickFolder, lblFolder });
+            pnlCsvSource.Controls.Add(folderFlow);
 
-            // DB 소스
-            int lblW = 52, dbH = 24, dbGap = 4, dbY = 0;
-            pnlDbSource = new Panel { Width = ctrlWidth - 12, Margin = Padding.Empty, Visible = false };
-
-            var lblDevice = new Label  { Text = "장치:",  AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            cmbDbDevice   = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
-            btnDbRefresh  = new Button { Text = "↺", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
+            // DB 소스 컨트롤 (인라인)
+            pnlDbSource = new Panel { AutoSize = true, Visible = false };
+            var dbFlow = new FlowLayoutPanel
+            {
+                AutoSize = true, FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, Padding = Padding.Empty
+            };
+            var lblDevice  = new Label  { Text = "장치:",  AutoSize = false, Width = 38, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbDevice    = new ComboBox { Width = 160, Height = BtnH, DropDownStyle = ComboBoxStyle.DropDown };
+            btnDbRefresh   = new Button { Text = "↺", Width = 28, Height = BtnH };
             btnDbRefresh.Click += (s, e) => RefreshDbDevices();
-            dbY += dbH + dbGap;
-
-            var lblLabelDb = new Label { Text = "레이블:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            cmbDbLabel = new ComboBox { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, DropDownStyle = ComboBoxStyle.DropDown };
-            dbY += dbH + dbGap;
-
-            var lblFrom = new Label { Text = "시작:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            dtpDbFrom = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 28, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now.AddHours(-1) };
-            btnDbFullRange = new Button { Text = "↔", Left = ctrlWidth - 12 - 24, Top = dbY, Width = 24, Height = dbH };
+            var lblLabelDb = new Label { Text = "레이블:", AutoSize = false, Width = 48, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            cmbDbLabel     = new ComboBox { Width = 120, Height = BtnH, DropDownStyle = ComboBoxStyle.DropDown };
+            var lblFrom    = new Label { Text = "시작:", AutoSize = false, Width = 36, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbFrom      = new DateTimePicker { Width = 140, Height = BtnH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now.AddHours(-1) };
+            btnDbFullRange = new Button { Text = "↔", Width = 28, Height = BtnH };
             btnDbFullRange.Click += async (s, e) => await FillDbFullRangeAsync();
-            dbY += dbH + dbGap;
-
-            var lblTo = new Label { Text = "종료:", AutoSize = false, Width = lblW, Height = dbH, Left = 0, Top = dbY + 2, TextAlign = ContentAlignment.MiddleLeft };
-            dtpDbTo = new DateTimePicker { Left = lblW + 2, Top = dbY, Width = ctrlWidth - 12 - lblW - 2, Height = dbH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now };
-            dbY += dbH + dbGap;
-
-            pnlDbSource.Height = dbY + 2;
-            pnlDbSource.Controls.AddRange(new Control[] {
+            var lblTo      = new Label { Text = "종료:", AutoSize = false, Width = 36, Height = BtnH, TextAlign = ContentAlignment.MiddleLeft };
+            dtpDbTo        = new DateTimePicker { Width = 140, Height = BtnH, Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd HH:mm", Value = DateTime.Now };
+            dbFlow.Controls.AddRange(new Control[] {
                 lblDevice, cmbDbDevice, btnDbRefresh,
                 lblLabelDb, cmbDbLabel,
                 lblFrom, dtpDbFrom, btnDbFullRange,
-                lblTo, dtpDbTo,
+                lblTo, dtpDbTo
             });
+            pnlDbSource.Controls.Add(dbFlow);
 
-            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 모드 선택
-            tlSource.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 소스 패널
-            tlSource.Controls.Add(pnlMode,      0, 0);
-            tlSource.Controls.Add(pnlCsvSource, 0, 1);
-            tlSource.Controls.Add(pnlDbSource,  0, 1);
-            gbSource.Controls.Add(tlSource);
-
-            // ── [C] 시작/중지 ───────────────────────────────────────────────────
+            // 시작/중지 버튼 (오른쪽 앵커)
+            btnStop = new Button
+            {
+                Text = "■  중지", Width = 90, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right, Enabled = false,
+                BackColor = Color.FromArgb(196, 43, 28), ForeColor = Color.White, FlatStyle = FlatStyle.Flat
+            };
             btnStart = new Button
             {
-                Text = "▶  진단 시작", Width = ctrlWidth, Height = btnH + 2,
-                Margin = new Padding(2, 6, 2, 2),
+                Text = "▶  진단 시작", Width = 110, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
                 BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
                 Font = new Font(this.Font, FontStyle.Bold)
             };
-            btnStop = new Button
+            lblStatus = new Label
             {
-                Text = "■  중지", Width = ctrlWidth, Height = btnH,
-                Margin = new Padding(2, 0, 2, 2), Enabled = false,
-                BackColor = Color.FromArgb(196, 43, 28), ForeColor = Color.White, FlatStyle = FlatStyle.Flat
+                AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                ForeColor = Color.Gray, MaximumSize = new Size(200, 0)
             };
             btnStart.Click += (s, e) => StartWatch();
             btnStop.Click  += (s, e) => StopWatch();
 
-            lblStatus = new Label
+            // ── 프로파일 선택 컨트롤 ─────────────────────────────────────────
+            _cmbProfile = new ComboBox
             {
-                AutoSize = true, MaximumSize = new Size(ctrlWidth, 0),
-                Margin = new Padding(2, 2, 2, 6), ForeColor = Color.Gray
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 160, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Font = new Font("Segoe UI", 8.5f),
+            };
+            _btnProfileRefresh = new Button
+            {
+                Text = "↺", Width = 26, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9f),
+                ForeColor = Color.FromArgb(60, 60, 60),
+            };
+            _btnProfileApply = new Button
+            {
+                Text = "적용", Width = 46, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White,
+            };
+            _btnProfileRefresh.Click += async (s, e) => await RefreshProfilesAsync();
+            _btnProfileApply.Click   += async (s, e) => await ApplyProfileAsync();
+
+            // 왼쪽 소스 Flow
+            var toolbarLeft = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, Padding = Padding.Empty, Margin = Padding.Empty
+            };
+            toolbarLeft.Controls.AddRange(new Control[] { rbtnCsvMode, rbtnDbMode, pnlCsvSource, pnlDbSource });
+
+            // ── 재학습 버튼 ──────────────────────────────────────────────────
+            _btnRetrain = new Button
+            {
+                Text = "⟳ 재학습", Width = 80, Height = BtnH,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                BackColor = Color.FromArgb(34, 100, 175), ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 8.5f)
+            };
+            _btnRetrain.FlatAppearance.BorderSize = 0;
+            _btnRetrain.Click += OnRetrainButtonClick;
+
+            toolbar.Controls.Add(btnStop);
+            toolbar.Controls.Add(btnStart);
+            toolbar.Controls.Add(_btnRetrain);
+            toolbar.Controls.Add(_btnProfileApply);
+            toolbar.Controls.Add(_btnProfileRefresh);
+            toolbar.Controls.Add(_cmbProfile);
+            toolbar.Controls.Add(lblStatus);
+            toolbar.Controls.Add(toolbarLeft);
+
+            toolbar.Resize += (s, e) =>
+            {
+                int cy    = (toolbar.ClientSize.Height - BtnH) / 2;
+                int right = toolbar.ClientSize.Width - toolbar.Padding.Right;
+                btnStop.Top  = btnStart.Top  = cy;
+                btnStop.Left  = right - btnStop.Width;
+                btnStart.Left = btnStop.Left - btnStart.Width - 4;
+
+                // 프로파일 컨트롤: 진단 시작 버튼 왼쪽
+                _btnProfileApply.Top   = cy;
+                _btnProfileApply.Left  = btnStart.Left - _btnProfileApply.Width - 6;
+                _btnProfileRefresh.Top  = cy;
+                _btnProfileRefresh.Left = _btnProfileApply.Left - _btnProfileRefresh.Width - 2;
+                _cmbProfile.Top  = cy;
+                _cmbProfile.Left = _btnProfileRefresh.Left - _cmbProfile.Width - 4;
+
+                // 재학습 버튼: 프로파일 콤보박스 왼쪽
+                _btnRetrain.Top  = cy;
+                _btnRetrain.Left = _cmbProfile.Left - _btnRetrain.Width - 8;
+
+                lblStatus.Top  = cy + 2;
+                lblStatus.Left = _btnRetrain.Left - lblStatus.PreferredWidth - 8;
             };
 
-            // ── [D] 축별 모델 경로 ─────────────────────────────────────────────
-            var gbModelPaths = new GroupBox
+            // ── 모드 전환 시 소스 패널 교체 ──────────────────────────────────
+            void SwitchSourcePanel(bool isDb)
             {
-                Text = "로드된 모델", Width = ctrlWidth,
-                Padding = new Padding(6), Margin = new Padding(2, 4, 2, 4),
-                MinimumSize = new Size(120, 80)
+                pnlCsvSource.Visible = !isDb;
+                pnlDbSource.Visible  =  isDb;
+                toolbarLeft.PerformLayout();
+            }
+            rbtnCsvMode.CheckedChanged += (s, e) => { if (rbtnCsvMode.Checked) SwitchSourcePanel(false); };
+            rbtnDbMode.CheckedChanged  += (s, e) => { if (rbtnDbMode.Checked)  SwitchSourcePanel(true);  };
+
+            // ── Row 0: Live Status Bar ─────────────────────────────────────────
+            var statusBarPanel = new Panel
+            {
+                Dock = DockStyle.Fill, BackColor = Color.White,
+                Padding = new Padding(10, 7, 8, 5)
             };
-            gridModelPaths = new DataGridView
+            statusBarPanel.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(Color.FromArgb(215, 215, 222)))
+                    e.Graphics.DrawLine(pen, 0, statusBarPanel.Height - 1,
+                                        statusBarPanel.Width, statusBarPanel.Height - 1);
+            };
+            var lblStatusTitle = new Label
+            {
+                Text = "실시간 추론 상태",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                AutoSize = true, Dock = DockStyle.Left,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 2, 12, 2),
+                ForeColor = Color.FromArgb(55, 55, 65)
+            };
+            _statusFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false, AutoScroll = false, Padding = Padding.Empty
+            };
+            // 칩이 많아 넘칠 때 마우스휠로 좌우 스크롤 (스크롤바 없이)
+            _statusFlow.MouseWheel += (s, e) =>
+            {
+                var hScroll = _statusFlow.HorizontalScroll;
+                int delta   = -e.Delta / 3;
+                int newVal  = Math.Max(hScroll.Minimum, Math.Min(hScroll.Maximum, hScroll.Value + delta));
+                _statusFlow.HorizontalScroll.Value = newVal;
+                _statusFlow.PerformLayout();
+            };
+            // ── 센서 표시 필터 체크박스 (상태 바 오른쪽) ──────────────────────
+            _chkShowAccel    = new CheckBox { Text = "가속도", Checked = true,  AutoSize = true,
+                Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(30, 100, 200),
+                Padding = new Padding(0, 0, 4, 0) };
+            _chkShowTorque   = new CheckBox { Text = "토크",   Checked = false, AutoSize = true,
+                Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(160, 80, 0),
+                Padding = new Padding(0, 0, 4, 0) };
+            _chkShowCombined = new CheckBox { Text = "결합",   Checked = false, AutoSize = true,
+                Font = new Font("Segoe UI", 8f), ForeColor = Color.FromArgb(60, 140, 60),
+                Padding = new Padding(0, 0, 4, 0) };
+            // 체크박스 변경 시 차트 레이아웃 + 상태 칩/컨트롤 동시 갱신
+            _chkShowAccel.CheckedChanged    += (s, e) => { ApplySensorVisibility("accel",    _chkShowAccel.Checked);    _UpdateChartLayout(); };
+            _chkShowTorque.CheckedChanged   += (s, e) => { ApplySensorVisibility("torque",   _chkShowTorque.Checked);   _UpdateChartLayout(); };
+            _chkShowCombined.CheckedChanged += (s, e) => { ApplySensorVisibility("combined", _chkShowCombined.Checked); _UpdateChartLayout(); };
+
+            var lblFilter = new Label { Text = "표시:", AutoSize = true,
+                Font = new Font("Segoe UI", 8f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(55, 55, 65),
+                Padding = new Padding(8, 0, 4, 0) };
+
+            var filterFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Right, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Padding = new Padding(0, 3, 6, 0)
+            };
+            filterFlow.Controls.AddRange(new Control[] { lblFilter, _chkShowAccel, _chkShowTorque, _chkShowCombined });
+
+            // Right dock → Fill 순으로 Controls.Add (Right이 먼저여야 Fill이 남은 공간 차지)
+            statusBarPanel.Controls.Add(filterFlow);
+            statusBarPanel.Controls.Add(_statusFlow);
+            statusBarPanel.Controls.Add(lblStatusTitle);
+
+            // ── DPI 스케일 (앞서 계산한 값 재사용) ───────────────────────────
+            float _dpiScale = _dpiScaleEarly;
+            int kpiRowH   = Math.Max(140, (int)(140 * _dpiScale));
+            int accelBarH = Math.Max(38,  (int)(38  * _dpiScale));
+
+            // ── 2×2 메인 그리드 ───────────────────────────────────────────────
+            // ┌──────────────────────┬──────────────────────┐
+            // │ (0,0) 설비 상태 현황  │ (1,0) 실시간 분류 현황│
+            // ├──────────────────────┼──────────────────────┤
+            // │ (0,1) 이상 스코어 차트│ (1,1) 발생 이벤트    │
+            // └──────────────────────┴──────────────────────┘
+            var mainPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2,
+                Padding = new Padding(6, 4, 6, 6), Margin = Padding.Empty,
+                BackColor = Color.FromArgb(245, 247, 250)
+            };
+            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 57));
+            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 43));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 38));   // 상단 행 (KPI + 분류 현황)
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 62));   // 하단 행 (차트 + 이벤트)
+
+            // ── (0,0) 상단-좌: 설비 상태 현황 ────────────────────────────────
+            var leftTopPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
+                Margin = new Padding(0, 0, 4, 4), Padding = Padding.Empty
+            };
+            leftTopPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));         // 섹션 제목
+            leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));         // KPI 카드 (flex)
+            leftTopPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, accelBarH));  // 가속도 AE 바
+
+            var lblKpiTitle = new Label
+            {
+                Text = "설비 상태 현황",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, 0, 0, 0), ForeColor = Color.FromArgb(30, 30, 40)
+            };
+            var kpiPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1,
+                Padding = new Padding(2), Margin = new Padding(0, 0, 0, 4), MinimumSize = new Size(60, 60)
+            };
+            kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            int cardMinH = Math.Max(110, (int)(110 * _dpiScale));
+            cardDanger  = new KpiCard { Title = "위험 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, cardMinH) };
+            cardWarning = new KpiCard { Title = "경고 건수",   ValueText = "0 건", DeltaText = "—", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, cardMinH) };
+            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(3, 3, 3, 8), MinimumSize = new Size(50, cardMinH) };
+            kpiPanel.Controls.Add(cardDanger,  0, 0);
+            kpiPanel.Controls.Add(cardWarning, 1, 0);
+            kpiPanel.Controls.Add(cardCycles,  2, 0);
+
+            // 가속도 AE 전역 스코어 패널
+            _pnlAccelAeBar = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(245, 245, 248),
+                Padding = new Padding(10, 0, 10, 0)
+            };
+            _pnlAccelAeBar.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(Color.FromArgb(210, 210, 220)))
+                    e.Graphics.DrawRectangle(pen, 0, 0, _pnlAccelAeBar.Width - 1, _pnlAccelAeBar.Height - 1);
+            };
+            var lblAccelAeTitle = new Label
+            {
+                Text = "가속도 AE (전역 단일 모델):",
+                AutoSize = true, Dock = DockStyle.Left,
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(30, 80, 180),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 0, 12, 0)
+            };
+            _lblAccelAeScore = new Label
+            {
+                Text = "—", AutoSize = true, Dock = DockStyle.Left,
+                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(50, 50, 60),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 0, 10, 0)
+            };
+            _lblAccelAeState = new Label
+            {
+                Text = "—", AutoSize = true, Dock = DockStyle.Left,
+                Font = new Font("Segoe UI", 9f),
+                ForeColor = Color.Gray,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            _pnlAccelAeBar.Controls.Add(_lblAccelAeState);
+            _pnlAccelAeBar.Controls.Add(_lblAccelAeScore);
+            _pnlAccelAeBar.Controls.Add(lblAccelAeTitle);
+
+            leftTopPanel.SuspendLayout();
+            leftTopPanel.Controls.Add(lblKpiTitle,    0, 0);
+            leftTopPanel.Controls.Add(kpiPanel,       0, 1);
+            leftTopPanel.Controls.Add(_pnlAccelAeBar, 0, 2);
+            leftTopPanel.ResumeLayout(false);
+
+            // ── (1,0) 상단-우: 실시간 분류 현황 ──────────────────────────────
+            var classMatrixPanel = BuildClassMatrixPanel();
+
+            // ── (0,1) 하단-좌: 이상 스코어 차트 ─────────────────────────────
+            _dualChartPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1,
+                Padding = new Padding(0, 2, 2, 0), Margin = Padding.Empty,
+                BackColor = Color.FromArgb(245, 247, 250)
+            };
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34f));
+            _dualChartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            _chartAccel    = BuildLiveInferenceChart(isAccel: true);
+            _chartTorque   = BuildLiveInferenceChart(isAccel: false);
+            _chartCombined = BuildLiveInferenceChart(isAccel: false);
+            _dualChartPanel.SuspendLayout();
+            _accelChartWrap    = WrapChartInPanel("가속도 이상 스코어  [서버 추론]",    _chartAccel,    Color.FromArgb(0, 84, 166),   out _lblAccelModelInfo);
+            _torqueChartWrap   = WrapChartInPanel("토크 이상 스코어  [서버 추론]",      _chartTorque,   Color.FromArgb(165, 45, 15),  out _lblTorqueModelInfo);
+            _combinedChartWrap = WrapChartInPanel("결합 이상 스코어  [전역/축별 모델]", _chartCombined, Color.FromArgb(70, 120, 40),   out _lblCombinedModelInfo);
+            _dualChartPanel.Controls.Add(_accelChartWrap,    0, 0);
+            _dualChartPanel.Controls.Add(_torqueChartWrap,   1, 0);
+            _dualChartPanel.Controls.Add(_combinedChartWrap, 2, 0);
+            _dualChartPanel.ResumeLayout(false);
+
+            // ── (1,1) 하단-우: 발생 이벤트 ───────────────────────────────────
+            var rightColPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+                Margin = new Padding(4, 0, 0, 0), Padding = Padding.Empty
+            };
+            rightColPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // 섹션 제목
+            rightColPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // 이벤트 로그 + 그리드
+
+            var lblEvents = new Label
+            {
+                Text = "발생 이벤트",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, 0, 0, 0), ForeColor = Color.FromArgb(30, 30, 40)
+            };
+            var eventsLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+                Margin = Padding.Empty, Padding = Padding.Empty
+            };
+            eventsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 35));
+            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 65));
+
+            txtEventLog = new TextBox
+            {
+                Multiline = true, ReadOnly = true, Dock = DockStyle.Fill,
+                ScrollBars = ScrollBars.Vertical,
+                BackColor = Color.FromArgb(251, 252, 253),
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Consolas", 8.5f), WordWrap = false
+            };
+            grid = new DataGridView
             {
                 Dock = DockStyle.Fill, ReadOnly = true,
                 AllowUserToAddRows = false, AllowUserToDeleteRows = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                RowHeadersVisible = false, BorderStyle = BorderStyle.None,
-                ColumnHeadersHeight = 22, RowTemplate = { Height = 20 }
-            };
-            var colAxis = new DataGridViewTextBoxColumn { Name = "Axis", HeaderText = "축", FillWeight = 20, ReadOnly = true };
-            var colPath = new DataGridViewTextBoxColumn { Name = "Path", HeaderText = "모델 파일", FillWeight = 80, ReadOnly = true };
-            gridModelPaths.Columns.AddRange(new DataGridViewColumn[] { colAxis, colPath });
-            gbModelPaths.Controls.Add(gridModelPaths);
-
-            // ── [E] 서버 실시간 추론 현황 ────────────────────────────────────────
-            var gbLive = new GroupBox
-            {
-                Text = "서버 실시간 추론", Width = ctrlWidth,
-                Padding = new Padding(6, 4, 6, 6),
-                Margin = new Padding(2, 4, 2, 4),
-                AutoSize = true
-            };
-            var tlLive = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2,
-                AutoSize = true, Margin = Padding.Empty
-            };
-            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 50));   // 센서명
-            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));   // 상태
-            tlLive.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 점수/클래스
-            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-            tlLive.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-
-            var lblAccelTag  = new Label { Text = "가속도",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
-            var lblTorqueTag = new Label { Text = "토크",    Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,  Font = new Font(Font, FontStyle.Bold) };
-            _lblLiveAccelStatus  = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
-            _lblLiveTorqueStatus = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
-            _lblLiveAccelScore   = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-            _lblLiveTorqueScore  = new Label { Text = "",  Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-
-            tlLive.Controls.Add(lblAccelTag,           0, 0);
-            tlLive.Controls.Add(_lblLiveAccelStatus,   1, 0);
-            tlLive.Controls.Add(_lblLiveAccelScore,    2, 0);
-            tlLive.Controls.Add(lblTorqueTag,          0, 1);
-            tlLive.Controls.Add(_lblLiveTorqueStatus,  1, 1);
-            tlLive.Controls.Add(_lblLiveTorqueScore,   2, 1);
-            gbLive.Controls.Add(tlLive);
-
-            left.Controls.AddRange(new Control[] {
-                gbModels, gbSource,
-                btnStart, btnStop, lblStatus,
-                gbLive,
-                gbModelPaths
-            });
-            left.ResumeLayout(false);
-
-            // 초기 표시
-            RefreshModelPathList();
-
-            leftWrap.Controls.Add(left);
-
-            // ====== KPI 패널 + 최근 샘플(좌측 상단 2열) ======
-            var leftTop = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty,
-                MinimumSize = new Size(120, 120)
-            };
-
-            // 2열 그리드 (좌: KPI, 우: 샘플 차트)
-            var leftTopGrid = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 2,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty
-            };
-            // 헤더 라벨 행이 0이 되지 않도록 고정 높이
-            leftTopGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32f));
-            leftTopGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            leftTopGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55f));
-            leftTopGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45f));
-
-            // 좌측: KPI 라벨 + 카드
-            var lblKpi = new Label
-            {
-                Text = "설비 상태 현황",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Left,
-                Padding = new Padding(12, 6, 0, 0),
-                AutoSize = true
-            };
-            var kpiPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 3,
-                RowCount = 1,
-                Padding = new Padding(2),
-                Margin = new Padding(0, 0, 6, 0),
-                MinimumSize = new Size(80, 80)
-            };
-            kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-            kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-            kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-
-            cardDanger  = new KpiCard { Title = "위험 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
-            cardWarning = new KpiCard { Title = "경고 건수",  ValueText = "0 건", DeltaText = "—",    Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
-            cardCycles  = new KpiCard { Title = "설비 사용률", ValueText = "0 회", DeltaText = "0.0%", Footnote = "2시간 전 대비", Dock = DockStyle.Fill, Margin = new Padding(6), MinimumSize = new Size(80, 140) };
-            kpiPanel.Controls.Add(cardDanger, 0, 0);
-            kpiPanel.Controls.Add(cardWarning, 1, 0);
-            kpiPanel.Controls.Add(cardCycles, 2, 0);
-
-            var lblDefect = new Label
-            {
-                Text = "결함 분류 결과",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Left,
-                Padding = new Padding(12, 8, 0, 4),
-                AutoSize = true
-            };
-
-            btnTestProbs = new Button
-            {
-                Text = "확률 랜덤",
-                AutoSize = true,
-                Anchor = AnchorStyles.Right,
-                Margin = new Padding(0, 4, 8, 4)
-            };
-            btnTestProbs.Click += (s, e) => RandomizeClassProbsForAllAxes(); // 클릭 이벤트 연결
-
-            var defectHeader = new Panel { Dock = DockStyle.Fill, Height = 32, Padding = new Padding(0) };
-            defectHeader.Controls.Add(btnTestProbs);
-            defectHeader.Controls.Add(lblDefect);
-
-            // 버튼을 오른쪽 정렬
-            btnTestProbs.Dock = DockStyle.Right;
-            lblDefect.Dock = DockStyle.Left;
-
-            var gaugeHostPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 4, 6, 0) };
-            axisGaugeFlow = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoScroll = true,
-                Padding = new Padding(0, 2, 6, 2),   // ← 좌우/상하 패딩 축소
-                Margin = Padding.Empty
-            };
-            gaugeHostPanel.Controls.Add(axisGaugeFlow);
-            axisGaugeFlow.Resize += (s, e) =>
-            {
-                int w = Math.Max(axisGaugeFlow.ClientSize.Width - 12, 240);
-                foreach (Control c in axisGaugeFlow.Controls)
-                    if (c is GroupBox gb) gb.Width = w;
-
-                // 높이도 재분배
-                ReflowGaugeHeights();
-            };
-
-            // 그리드 배치
-            leftTopGrid.Controls.Add(lblKpi, 0, 0);
-            leftTopGrid.Controls.Add(defectHeader, 1, 0);
-            leftTopGrid.Controls.Add(kpiPanel, 0, 1);
-            leftTopGrid.Controls.Add(gaugeHostPanel, 1, 1);
-
-            leftTop.Controls.Add(leftTopGrid);
-
-            // ====== 라인차트 ======
-            var rightTop = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, MinimumSize = new Size(120, 120)
-            };
-            var lblchart = new Label { Text = "Anomaly Score", Font = new Font("Segoe UI", 12, FontStyle.Bold), Dock = DockStyle.Top, Padding = new Padding(12, 8, 0, 4), AutoSize = true };
-            chartLine = new Chart { Dock = DockStyle.Fill, Margin = Padding.Empty };
-            var ca = new ChartArea("a");
-            ca.AxisX.LabelStyle.Format = "HH:mm:ss";
-            ca.AxisX.IntervalAutoMode = IntervalAutoMode.VariableCount;
-            ca.AxisX.MajorGrid.Enabled = true;
-            ca.AxisY.MajorGrid.Enabled = true;
-            ca.AxisX.MajorGrid.LineColor = Color.Gainsboro;
-            ca.AxisY.MajorGrid.LineColor = Color.Gainsboro;
-            ca.AxisY.LabelStyle.Format = "0.0";
-            chartLine.ChartAreas.Add(ca);
-
-            chartLine.Legends.Clear();
-            chartLine.Legends.Add(new Legend
-            {
-                Docking = Docking.Top,
-                Alignment = StringAlignment.Near
-            });
-
-            var now = DateTime.Now;
-            var dummy = new Series(SkeletonSeriesName)
-            {
-                ChartType = SeriesChartType.FastLine,
-                XValueType = ChartValueType.DateTime,
-                IsVisibleInLegend = false,
-                Color = Color.Transparent   // 화면에는 안 보임
-            };
-
-            dummy.Points.AddXY(now.AddMinutes(-5), 0);
-            dummy.Points.AddXY(now, 0);
-            chartLine.Series.Add(dummy);
-            
-            rightTop.Controls.Add(chartLine);
-            rightTop.Controls.Add(lblchart);
-
-            // ====== 하단: 이벤트 ======
-            var leftBottom = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, MinimumSize = new Size(120, 120) };
-
-            // 상단 제목 라벨
-            var lblEvents = new Label
-            {
-                Text = "발생한 이벤트",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Top,
-                Padding = new Padding(12, 8, 0, 4),
-                AutoSize = true
-            };
-
-            // 상단 로그 + 하단 그리드 배치용 레이아웃
-            var eventsLayout = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty
-            };
-            eventsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));          // 제목
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));     // 실시간 로그 영역 높이
-            eventsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));     // 그리드
-
-            // 상단: 실시간 로그 텍스트박스(읽기전용)
-            txtEventLog = new TextBox
-            {
-                Multiline = true,
-                ReadOnly = true,
-                Dock = DockStyle.Fill,
-                ScrollBars = ScrollBars.Vertical,
-                BackColor = Color.WhiteSmoke,
-                BorderStyle = BorderStyle.FixedSingle,
-                Font = new Font("Consolas", 9f),
-                WordWrap = false
-            };
-
-            // 하단: 경고/위험만 남길 그리드
-            grid = new DataGridView
-            {
-                Dock = DockStyle.Fill,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 DataSource = rows
             };
+            eventsLayout.Controls.Add(txtEventLog, 0, 0);
+            eventsLayout.Controls.Add(grid,        0, 1);
 
-            // 배치
-            eventsLayout.Controls.Add(lblEvents, 0, 0);
-            eventsLayout.Controls.Add(txtEventLog, 0, 1);
-            eventsLayout.Controls.Add(grid, 0, 2);
+            rightColPanel.SuspendLayout();
+            rightColPanel.Controls.Add(lblEvents,    0, 0);
+            rightColPanel.Controls.Add(eventsLayout, 0, 1);
+            rightColPanel.ResumeLayout(false);
 
-            leftBottom.Controls.Add(eventsLayout);
+            // 2×2 조립
+            mainPanel.SuspendLayout();
+            mainPanel.Controls.Add(leftTopPanel,    0, 0);
+            mainPanel.Controls.Add(classMatrixPanel, 1, 0);
+            mainPanel.Controls.Add(_dualChartPanel, 0, 1);
+            mainPanel.Controls.Add(rightColPanel,   1, 1);
+            mainPanel.ResumeLayout(false);
 
-            // ====== 하단: 샘플(축별 그리드) ======
-            var rightBottom = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Margin = Padding.Empty,
-                Padding = Padding.Empty,
-                MinimumSize = new Size(120, 120)
-            };
-            var lblSample = new Label
-            {
-                Text = "최근 감지 샘플 (축별)",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Dock = DockStyle.Top,
-                Padding = new Padding(12, 8, 0, 4),
-                AutoSize = true
-            };
+            contentPanel.SuspendLayout();
+            contentPanel.Controls.Add(toolbar,        0, 0);
+            contentPanel.Controls.Add(statusBarPanel, 0, 1);
+            contentPanel.Controls.Add(mainPanel,      0, 2);
+            contentPanel.ResumeLayout(false);
 
-            // 축별 차트를 담을 그리드(동적으로 행/열 재배치)
-            sampleGrid = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 1,
-                Margin = new Padding(6),
-                Padding = Padding.Empty,
-                AutoScroll = false,
-                GrowStyle = TableLayoutPanelGrowStyle.AddRows
-            };
-            sampleGrid.ColumnStyles.Clear();
-            sampleGrid.RowStyles.Clear();
-            sampleGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            sampleGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            Controls.Add(contentPanel);
 
-            // 사이즈 변할 때마다 레이아웃 재계산(창/도킹 영역 리사이즈 대응)
-            sampleGrid.Resize += (s, e) => UpdateSampleGridLayout();
+            // ── 초기 센서 visibility 적용 (기본: 토크/결합 숨김) ─────────────
+            _UpdateChartLayout();
+            ApplySensorVisibility("torque",   false);
+            ApplySensorVisibility("combined", false);
 
-            rightBottom.Controls.Add(sampleGrid);
-            rightBottom.Controls.Add(lblSample);
-
-            // ====== 컨트롤 추가 ======
-            Controls.Add(root);
-            Controls.Add(leftWrap);
-
-            root.Controls.Add(leftTop, 0, 0);
-            root.Controls.Add(rightTop, 1, 0);
-            root.Controls.Add(leftBottom, 0, 1);
-            root.Controls.Add(rightBottom, 1, 1);
-
-            // ====== 타이머 ======
+            // ── 타이머 ────────────────────────────────────────────────────────
             var timer = new System.Windows.Forms.Timer { Interval = 300 };
             timer.Tick += (s, e) =>
             {
                 FlushLineChart();
 
-                // 1분에 한 번 스냅샷
                 if ((DateTime.Now - _lastSnap).TotalSeconds >= 60)
                 {
                     _lastSnap = DateTime.Now;
                     _history.AddLast(new Snapshot { T = _lastSnap, D = cntDanger, W = cntWarning, C = cycles });
-                    // 3시간보다 오래된 스냅샷 정리
                     while (_history.First != null && (DateTime.Now - _history.First.Value.T).TotalHours > 3)
                         _history.RemoveFirst();
                 }
-
-                // 2시간 전 기준 찾기 (가장 가까운 과거)
                 DateTime anchor = DateTime.Now.AddHours(-2);
                 Snapshot? baseSnap = null;
                 for (var node = _history.Last; node != null; node = node.Previous)
-                {
                     if (node.Value.T <= anchor) { baseSnap = node.Value; break; }
-                }
+
                 if (baseSnap.HasValue)
                 {
-                    int dD = cntDanger - baseSnap.Value.D;
+                    int dD = cntDanger  - baseSnap.Value.D;
                     int dW = cntWarning - baseSnap.Value.W;
-                    int dC = cycles - baseSnap.Value.C;
-
-                    cardDanger.DeltaText = (dD >= 0 ? "+" : "") + dD + "건";
+                    int dC = cycles     - baseSnap.Value.C;
+                    cardDanger.DeltaText  = (dD >= 0 ? "+" : "") + dD + "건";
                     cardWarning.DeltaText = (dW >= 0 ? "+" : "") + dW + "건";
-                    cardCycles.DeltaText = (dC >= 0 ? "+" : "") + dC + " 회";
-
-                    cardDanger.Footnote = "2시간 전 대비";
-                    cardWarning.Footnote = "2시간 전 대비";
-                    cardCycles.Footnote = "2시간 전 대비";
+                    cardCycles.DeltaText  = (dC >= 0 ? "+" : "") + dC + " 회";
+                    cardDanger.Footnote = cardWarning.Footnote = cardCycles.Footnote = "2시간 전 대비";
                 }
                 else
                 {
-                    cardDanger.DeltaText = "—";
-                    cardWarning.DeltaText = "—";
+                    cardDanger.DeltaText = cardWarning.DeltaText = "—";
                     cardCycles.DeltaText = "—";
                     cardDanger.Footnote = cardWarning.Footnote = cardCycles.Footnote = "2시간 전 대비";
                 }
@@ -1169,99 +1369,129 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             this.Shown += (s, e) =>
             {
-                foreach (Control c in axisGaugeFlow.Controls)
-                    if (c is GroupBox gb)
-                    {
-                        int w = Math.Max(axisGaugeFlow.ClientSize.Width
-                                         - axisGaugeFlow.Padding.Horizontal
-                                         - gb.Margin.Horizontal, 240);
-                        gb.Width = w;
-                    }
-                axisGaugeFlow.PerformLayout();
-                axisGaugeFlow.Refresh();
-            };
-
-            void LayoutLeftAuto()
-            {
-                if (leftWrap == null || left == null) return;
-
-                // 고정 높이 컨트롤 합산
-                int fixedH = 0;
-                Control[] fixedControls = { gbModels, gbSource, btnStart, btnStop, lblStatus };
-                foreach (var c in fixedControls)
+                if (axisGaugeFlow != null && !axisGaugeFlow.IsDisposed)
                 {
-                    if (c == null || !c.Visible) continue;
-                    fixedH += c.Height + c.Margin.Vertical;
+                    foreach (Control c in axisGaugeFlow.Controls)
+                        if (c is GroupBox gb)
+                        {
+                            int w = Math.Max(axisGaugeFlow.ClientSize.Width
+                                             - axisGaugeFlow.Padding.Horizontal
+                                             - gb.Margin.Horizontal, 160);
+                            gb.Width = w;
+                        }
+                    axisGaugeFlow.PerformLayout();
+                    axisGaugeFlow.Refresh();
                 }
-                fixedH += left.Padding.Vertical;
-
-                // 남은 공간을 gbModelPaths에 할당
-                int availH = Math.Max(gbModelPaths.MinimumSize.Height,
-                                      leftWrap.ClientSize.Height - fixedH);
-                gbModelPaths.Height = availH;
-
-                int w = Math.Max(160, leftWrap.ClientSize.Width - left.Padding.Horizontal);
-                gbModelPaths.Width = w;
-
-                left.PerformLayout();
-            }
-
-            leftWrap.Resize += (s, e) =>
-            {
-                int w = Math.Max(180, leftWrap.ClientSize.Width - 12);
-
-                // 최상위 컨트롤 폭 조정
-                foreach (Control c in new Control[] { gbModels, gbSource, btnStart, btnStop, gbModelPaths })
-                    if (c != null) c.Width = w;
-
-                // pnlCsvSource 내부
-                if (btnSelectFolder != null)
-                {
-                    btnSelectFolder.Width = w - 38;
-                    if (btnQuickFolder != null) btnQuickFolder.Left = btnSelectFolder.Right + 2;
-                    lblFolder.MaximumSize = new Size(w - 12, 0);
-                }
-
-                // pnlDbSource 내부 너비 조정
-                if (pnlDbSource != null)
-                {
-                    int lw = 52, inner = w - 12;
-                    if (cmbDbDevice  != null) { cmbDbDevice.Width  = inner - lw - 28; btnDbRefresh.Left  = inner - 24; }
-                    if (cmbDbLabel   != null)   cmbDbLabel.Width   = inner - lw - 2;
-                    if (dtpDbFrom    != null) { dtpDbFrom.Width    = inner - lw - 28; btnDbFullRange.Left = inner - 24; }
-                    if (dtpDbTo      != null)   dtpDbTo.Width      = inner - lw - 2;
-                }
-
-                LayoutLeftAuto();
-            };
-            this.Resize += (s, e) => LayoutLeftAuto();
-
-            LayoutLeftAuto();
-
-            this.HandleCreated += (s, e) =>
-            {
-                BeginInvoke((Action)(() =>
-                {
-                    LayoutLeftAuto();
-                    left.PerformLayout();
-                    left.Refresh();
-                }));
             };
 
-            // 폼이 실제 표시된 뒤에도 한 번 더 안전하게
-            this.Shown += (s, e) =>
-            {
-                BeginInvoke((Action)(() =>
-                {
-                    LayoutLeftAuto();
-                    left.PerformLayout();
-                    left.Refresh();
-                }));
-            };
+            ResumeLayout(false);
+        }
 
-            // 사이즈 변화 때마다 재분배 (이미 있다면 유지)
-            this.Resize += (s, e) => LayoutLeftAuto();
-            leftWrap.Resize += (s, e) => LayoutLeftAuto();
+        /// <summary>서버 추론 전용 차트를 생성합니다 (임계값 1.0 점선 포함).</summary>
+        private Chart BuildLiveInferenceChart(bool isAccel)
+        {
+            var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White, MinimumSize = new Size(1, 1) };
+            var ca = new ChartArea("a") { BackColor = Color.White };
+            // 플롯 영역 여백 — Y축 라벨/눈금 공간 확보
+            ca.Position          = new ElementPosition(0, 0, 100, 100);
+            ca.InnerPlotPosition = new ElementPosition(11, 3, 87, 86);
+
+            // ── X 축 ─────────────────────────────────────────────────────────
+            ca.AxisX.LabelStyle.Format   = "HH:mm:ss";
+            ca.AxisX.LabelStyle.Font     = new Font("Segoe UI", 8f);
+            ca.AxisX.LabelStyle.ForeColor= Color.FromArgb(70, 70, 80);
+            ca.AxisX.IntervalAutoMode    = IntervalAutoMode.VariableCount;
+            ca.AxisX.MajorGrid.Enabled   = true;
+            ca.AxisX.MajorGrid.LineColor = Color.FromArgb(210, 210, 220);
+            ca.AxisX.MajorGrid.LineDashStyle = ChartDashStyle.Dot;
+            ca.AxisX.MajorTickMark.Enabled   = true;
+            ca.AxisX.MajorTickMark.LineColor = Color.FromArgb(150, 150, 165);
+            ca.AxisX.MajorTickMark.Size      = 3;
+            ca.AxisX.LineColor               = Color.FromArgb(180, 180, 195);
+
+            // ── Y 축 ─────────────────────────────────────────────────────────
+            ca.AxisY.MajorGrid.Enabled   = true;
+            ca.AxisY.MajorGrid.LineColor = Color.FromArgb(210, 210, 220);
+            ca.AxisY.MajorGrid.LineDashStyle = ChartDashStyle.Dot;
+            ca.AxisY.LabelStyle.Format   = "0.0";
+            ca.AxisY.LabelStyle.Font     = new Font("Segoe UI", 8.5f);
+            ca.AxisY.LabelStyle.ForeColor= Color.FromArgb(55, 55, 70);
+            ca.AxisY.MajorTickMark.Enabled   = true;
+            ca.AxisY.MajorTickMark.LineColor = Color.FromArgb(140, 140, 160);
+            ca.AxisY.MajorTickMark.Size      = 4;
+            ca.AxisY.LineColor               = Color.FromArgb(180, 180, 195);
+            ca.AxisY.IntervalAutoMode    = IntervalAutoMode.VariableCount;
+            ca.AxisY.Minimum             = 0;
+            // 임계값 점선 (서버 결과 수신 시 IntervalOffset 동적 갱신)
+            ca.AxisY.StripLines.Add(new StripLine
+            {
+                IntervalOffset  = 1.0,
+                StripWidth      = 0,
+                BorderColor     = Color.FromArgb(215, 50, 60),
+                BorderWidth     = 1,
+                BorderDashStyle = ChartDashStyle.Dash,
+                Text            = "임계값",
+                ForeColor       = Color.FromArgb(215, 50, 60),
+                Font            = new Font("Segoe UI", 7f)
+            });
+            chart.ChartAreas.Add(ca);
+            chart.Legends.Clear();
+            chart.Legends.Add(new Legend
+            {
+                Docking   = Docking.Top,
+                Alignment = StringAlignment.Near,
+                Font      = new Font("Segoe UI", 7.5f)
+            });
+            // 스켈레톤 (X축 초기화용)
+            var now3 = DateTime.Now;
+            var sk = new Series("_sk_")
+            {
+                ChartType = SeriesChartType.FastLine, XValueType = ChartValueType.DateTime,
+                IsVisibleInLegend = false, Color = Color.Transparent
+            };
+            sk.Points.AddXY(now3.AddMinutes(-5), 0);
+            sk.Points.AddXY(now3, 0);
+            chart.Series.Add(sk);
+            return chart;
+        }
+
+        /// <summary>차트를 제목 라벨과 함께 패널에 감쌉니다.</summary>
+        private Panel WrapChartInPanel(string title, Chart chart, Color titleColor, out Label modelInfoLabel)
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Fill, BackColor = Color.White,
+                Margin = new Padding(2), Padding = Padding.Empty,
+                MinimumSize = new Size(1, 10)
+            };
+            panel.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(Color.FromArgb(210, 210, 220)))
+                    e.Graphics.DrawRectangle(pen, 0, 0, panel.Width - 1, panel.Height - 1);
+            };
+            var lbl = new Label
+            {
+                Text      = title,
+                Font      = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                Dock      = DockStyle.Top, Height = 22,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding   = new Padding(8, 0, 0, 0),
+                ForeColor = titleColor, BackColor = Color.White
+            };
+            // 모델 정보 라벨 (제목 바로 아래, 추론 결과 수신 시 갱신)
+            modelInfoLabel = new Label
+            {
+                Text      = "모델: 수신 대기 중...",
+                Font      = new Font("Segoe UI", 7.5f),
+                Dock      = DockStyle.Top, Height = 17,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding   = new Padding(10, 0, 0, 0),
+                ForeColor = Color.FromArgb(120, 120, 140), BackColor = Color.White
+            };
+            panel.Controls.Add(chart);
+            panel.Controls.Add(modelInfoLabel);
+            panel.Controls.Add(lbl);
+            return panel;
         }
         #endregion
 
@@ -1472,7 +1702,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public double   Threshold   = -1;   // -1 = 없음(기본값 사용)
             public double   RmsMean     = -1;   // AE 정상 RMS 평균
             public double   RmsThr      = -1;   // AE RMS 임계값
-            public int      WindowSize  = 256;   // 학습 시 슬라이딩 윈도우 크기
+            public int      WindowSize  = 256;  // 학습 시 슬라이딩 윈도우 크기
+            // 전역 정규화 파라미터 (norm_mean / norm_std)
+            public double[] NormMean    = null;
+            public double[] NormStd     = null;
+            public bool     StandardizePerSample = true;
         }
 
         private static OnnxMeta TryParseOnnxMeta(string onnxPath)
@@ -1528,6 +1762,25 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         int wv;
                         if (wp.TryGetInt32(out wv) && wv > 0) m.WindowSize = wv;
                     }
+                    // 전역 정규화 파라미터
+                    if (root.TryGetProperty("norm_mean", out var nmp) &&
+                        nmp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var arr = new System.Collections.Generic.List<double>();
+                        foreach (var v in nmp.EnumerateArray())
+                        { double dv; if (v.TryGetDouble(out dv)) arr.Add(dv); }
+                        if (arr.Count > 0) m.NormMean = arr.ToArray();
+                    }
+                    if (root.TryGetProperty("norm_std", out var nsp) &&
+                        nsp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    {
+                        var arr = new System.Collections.Generic.List<double>();
+                        foreach (var v in nsp.EnumerateArray())
+                        { double dv; if (v.TryGetDouble(out dv)) arr.Add(dv); }
+                        if (arr.Count > 0) m.NormStd = arr.ToArray();
+                    }
+                    if (root.TryGetProperty("standardize_per_sample", out var spp))
+                        m.StandardizePerSample = spp.GetBoolean();
                     return m;
                 }
             }
@@ -1690,23 +1943,44 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 try { session = new InferenceSession(onnxPath); }
                 catch (Exception ex) { MessageBox.Show("ONNX 로드 실패: " + ex.Message); return; }
 
+                // meta.json 에서 전역 정규화 파라미터 로드
+                double[] normMean = null;
+                double[] normStd  = null;
+                bool standardizePerSample = true;  // 기본: per-sample z-score
+                if (isAe && meta != null)
+                {
+                    if (meta.NormMean != null && meta.NormMean.Length > 0)
+                    {
+                        normMean = meta.NormMean;
+                        normStd  = meta.NormStd;
+                        standardizePerSample = false;  // 전역 정규화 사용
+                    }
+                    else
+                    {
+                        // meta.json 의 standardize_per_sample 값 우선 사용
+                        standardizePerSample = meta.StandardizePerSample;
+                    }
+                }
+
                 var om = new OnnxAxisModel
                 {
-                    AxisId              = axis,
-                    ModelPath           = onnxPath,
-                    YColumn             = yCol,
-                    C                   = C,
-                    Kind                = kind,
-                    InputName           = "input",
-                    OutputName          = isAe ? null    : "logits",
-                    ReconOutputName     = isAe ? "recon" : null,
-                    IsAutoencoder       = isAe,
-                    StandardizePerSample = true,   // AE도 per-sample z-score 사용 (형태 학습)
-                    RmsMean             = (isAe && meta != null) ? meta.RmsMean : -1,
-                    RmsThr              = (isAe && meta != null) ? meta.RmsThr  : -1,
-                    WindowSize          = (isAe && meta != null && meta.WindowSize > 0) ? meta.WindowSize : 256,
-                    Threshold           = threshold,
-                    Session             = session,
+                    AxisId               = axis,
+                    ModelPath            = onnxPath,
+                    YColumn              = yCol,
+                    C                    = C,
+                    Kind                 = kind,
+                    InputName            = "input",
+                    OutputName           = isAe ? null    : "logits",
+                    ReconOutputName      = isAe ? "recon" : null,
+                    IsAutoencoder        = isAe,
+                    StandardizePerSample = standardizePerSample,
+                    NormMean             = normMean,
+                    NormStd              = normStd,
+                    RmsMean              = (isAe && meta != null) ? meta.RmsMean : -1,
+                    RmsThr               = (isAe && meta != null) ? meta.RmsThr  : -1,
+                    WindowSize           = (isAe && meta != null && meta.WindowSize > 0) ? meta.WindowSize : 256,
+                    Threshold            = threshold,
+                    Session              = session,
                 };
 
                 if (isAe)
@@ -1930,7 +2204,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             if (T < W)
             {
                 double rawRms = ComputeRms(seq, 0, T);
-                if (om.StandardizePerSample) ZScoreInPlace(seq);
+                if (om.NormMean != null && om.NormStd != null)
+                    GlobalNormalizeInPlace(seq, om.NormMean, om.NormStd);
+                else if (om.StandardizePerSample)
+                    ZScoreInPlace(seq);
                 double mae = AeInferWindow(om, seq, 0, T);
                 score = CompositeAeScore(mae, rawRms, om);
                 info  = string.Format("AE W={0} single", T);
@@ -1945,8 +2222,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 double rawRms = ComputeRms(seq, start, W);
                 if (rawRms > windowRmsMax) windowRmsMax = rawRms;
 
-                // z-score 슬라이스 복사 후 추론
-                double mae = AeInferWindowZScore(om, seq, start, W);
+                // 전처리 분기: 전역 정규화 우선, 없으면 per-sample z-score
+                double mae;
+                if (om.NormMean != null && om.NormStd != null)
+                    mae = AeInferWindowGlobalNorm(om, seq, start, W);
+                else if (om.StandardizePerSample)
+                    mae = AeInferWindowZScore(om, seq, start, W);
+                else
+                    mae = AeInferWindow(om, seq, start, W);
                 if (mae < 0) continue;
                 if (mae > maxMae) maxMae = mae;
                 wCount++;
@@ -1992,13 +2275,24 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private double AeInferWindowZScore(OnnxAxisModel om, float[,] seq, int start, int length)
         {
             int C = seq.GetLength(1);
-            // 슬라이스 복사 + z-score
+            // 슬라이스 복사 + per-sample z-score
             float[,] win = new float[length, C];
             for (int t = 0; t < length; t++)
                 for (int c = 0; c < C; c++)
                     win[t, c] = seq[start + t, c];
             ZScoreInPlace(win);
+            return AeInferWindow(om, win, 0, length);
+        }
 
+        /// <summary>슬라이스 복사 후 전역 정규화(norm_mean/norm_std) 적용해 MAE를 반환합니다.</summary>
+        private double AeInferWindowGlobalNorm(OnnxAxisModel om, float[,] seq, int start, int length)
+        {
+            int C = seq.GetLength(1);
+            float[,] win = new float[length, C];
+            for (int t = 0; t < length; t++)
+                for (int c = 0; c < C; c++)
+                    win[t, c] = seq[start + t, c];
+            GlobalNormalizeInPlace(win, om.NormMean, om.NormStd);
             return AeInferWindow(om, win, 0, length);
         }
 
@@ -2404,10 +2698,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             box.Controls.Add(ch);
             sampleCharts[axis] = ch;
 
-            // 기존 + 새 컨트롤로 재배치 (예외 없음)
-            var list = sampleGrid.Controls.Cast<Control>().ToList();
-            list.Add(box);
-            RebuildSampleGrid(list);
+            // 기존 + 새 컨트롤로 재배치 (sampleGrid 없으면 무시)
+            if (sampleGrid != null)
+            {
+                var list = sampleGrid.Controls.Cast<Control>().ToList();
+                list.Add(box);
+                RebuildSampleGrid(list);
+            }
 
             return ch;
         }
@@ -2450,29 +2747,31 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         private void UpdateSampleGridLayout()
         {
+            if (sampleGrid == null) return;
             RebuildSampleGrid(sampleGrid.Controls.Cast<Control>().ToList());
         }
 
         private void ShowToast(AlarmLevel level, int axis, double score)
+            => ShowToast(level, $"Ax{axis}", score);
+
+        /// <summary>센서 표시명(예: "가속도", "Ax0 토크")으로 토스트를 띄웁니다.</summary>
+        private void ShowToast(AlarmLevel level, string sensorLabel, double score)
         {
             if (_notifier == null) return;
-            if (level != AlarmLevel.Danger) return; // ⚠️ 위험일 때만 풍선 표시
+            if (level != AlarmLevel.Danger) return;
 
-            string title = "위험 감지";
-            string text = $"Axis {axis} · Score {Math.Round(score, 1)}";
-
-            _notifier.BalloonTipTitle = title;
-            _notifier.BalloonTipText = text;
-            _notifier.ShowBalloonTip(1000); // 1초 (원래 주석엔 3초였음)
+            _notifier.BalloonTipTitle = "⚠ 위험 감지";
+            _notifier.BalloonTipText  = $"{sensorLabel}  {DateTime.Now:HH:mm:ss}  Score {score:F2}";
+            _notifier.ShowBalloonTip(3000);
         }
         #region KPI/이벤트
         private class EventRow
         {
-            public string TimeLine { get; set; }
-            public int Axis { get; set; }
+            public string TimeLine    { get; set; }
+            public string Sensor      { get; set; }   // "가속도", "토크 Ax0" 등
             public double AnomalyScore { get; set; }
-            public double Threshold { get; set; }
-            public string Alarm { get; set; }
+            public double Threshold   { get; set; }
+            public string Alarm       { get; set; }
         }
 
         private enum AlarmLevel { Normal, Warning, Danger }
@@ -3724,7 +4023,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 rows.Add(new EventRow
                 {
                     TimeLine     = timestamp.ToLocalTime().ToString("yyyy.MM.dd HH:mm:ss"),
-                    Axis         = axis,
+                    Sensor       = $"Ax{axis}",
                     AnomalyScore = Math.Round(score, 4),
                     Threshold    = Math.Round(thr, 4),
                     Alarm        = level == AlarmLevel.Danger ? "위험" : "경고"
@@ -3734,7 +4033,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             }
 
             scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, score));
-            while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+            while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
         }
 
         private static string AlarmText(AlarmLevel l)
@@ -3883,11 +4182,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                             ShowToast(level, axis, scoreAe);
                             rows.Add(new EventRow
                             {
-                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
-                                Axis = axis,
+                                TimeLine     = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Sensor       = $"가속도 Ax{axis}",
                                 AnomalyScore = Math.Round(scoreAe, 4),
-                                Threshold = Math.Round(thrAe, 4),
-                                Alarm = (level == AlarmLevel.Danger) ? "위험" : "경고"
+                                Threshold    = Math.Round(thrAe, 4),
+                                Alarm        = (level == AlarmLevel.Danger) ? "위험" : "경고"
                             });
                             if (grid.Rows.Count > 0)
                                 try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
@@ -3895,7 +4194,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                         // 라인 차트에 AE 점수 반영
                         scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, scoreAe));
-                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (AE axis {axis}, {Path.GetFileName(path)})";
                     }));
 
@@ -4004,11 +4303,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         {
                             rows.Add(new EventRow
                             {
-                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
-                                Axis = axis,
+                                TimeLine     = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Sensor       = $"분류 Ax{axis}",
                                 AnomalyScore = Math.Round(score, 1),
-                                Threshold = Math.Round(thr, 1),
-                                Alarm = (level == AlarmLevel.Danger) ? "위험" : "경고"
+                                Threshold    = Math.Round(thr, 1),
+                                Alarm        = (level == AlarmLevel.Danger) ? "위험" : "경고"
                             });
 
                             if (grid.Rows.Count > 0)
@@ -4019,7 +4318,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                         // 라인차트 큐
                         scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, score));
-                        while (scoreSeries.Count > 600)
+                        while (scoreSeries.Count > 3000)
                         {
                             Tuple<int, DateTime, double> dump;
                             scoreSeries.TryDequeue(out dump);
@@ -4103,18 +4402,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                             ShowToast(level, axis, rawScore);
                             rows.Add(new EventRow
                             {
-                                TimeLine = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
-                                Axis = axis,
+                                TimeLine     = DateTime.Now.ToString("yyyy.MM.dd HH:mm:ss"),
+                                Sensor       = $"SKL Ax{axis}",
                                 AnomalyScore = Math.Round(rawScore, 4),
-                                Threshold = Math.Round(useScoreThreshold ? thr : skl.Threshold, 4),
-                                Alarm = level == AlarmLevel.Danger ? "위험" : "경고"
+                                Threshold    = Math.Round(useScoreThreshold ? thr : skl.Threshold, 4),
+                                Alarm        = level == AlarmLevel.Danger ? "위험" : "경고"
                             });
                             if (grid.Rows.Count > 0)
                                 try { grid.FirstDisplayedScrollingRowIndex = grid.Rows.Count - 1; } catch { }
                         }
 
                         scoreSeries.Enqueue(Tuple.Create(axis, DateTime.Now, rawScore));
-                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (SKL axis {axis}, {Path.GetFileName(path)})";
                     }));
                 }
@@ -4162,7 +4461,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                         AppendEventLog($"[G-KNN] axis {captAxis}  score={captScore:F2}  thr={captThr:F2}  => {alarmText}  ({Path.GetFileName(path)})");
                                         if (captLevel != AlarmLevel.Normal) ShowToast(captLevel, captAxis, captScore);
                                         scoreSeries.Enqueue(Tuple.Create(captAxis, DateTime.Now, captScore));
-                                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (G-KNN axis {captAxis}, {Path.GetFileName(path)})";
                                     }));
                                 }
@@ -4194,7 +4493,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                         AppendEventLog($"[G-AE] axis {captAxis}  mae={captScore:F4}  thr={captThr:F4}  => {alarmText}  ({Path.GetFileName(path)})");
                                         if (captLevel != AlarmLevel.Normal) ShowToast(captLevel, captAxis, captScore);
                                         scoreSeries.Enqueue(Tuple.Create(captAxis, DateTime.Now, captScore));
-                                        while (scoreSeries.Count > 600) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
+                                        while (scoreSeries.Count > 3000) { Tuple<int, DateTime, double> dump; scoreSeries.TryDequeue(out dump); }
                                         lblStatus.Text = $"상태: 처리완료 {DateTime.Now:HH:mm:ss} (G-AE axis {captAxis}, {Path.GetFileName(path)})";
                                     }));
                                 }
@@ -4288,53 +4587,145 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
         private void FlushLineChart()
         {
-            if (chartLine.IsDisposed) return;
-            if (scoreSeries.IsEmpty) return;
-
-            // --- 첫 Flush: 더미 제거 + 자동 스케일 복귀 ---
-            if (_lineFirstFlush)
+            // ─ 로컬 진단 스코어 (chartLine이 있을 때만) ──────────────────────
+            if (chartLine != null && !chartLine.IsDisposed && !scoreSeries.IsEmpty)
             {
-                var dmy = chartLine.Series.FindByName(SkeletonSeriesName);
-                if (dmy != null) chartLine.Series.Remove(dmy);
-
-                var area = chartLine.ChartAreas["a"];
-                area.AxisX.Minimum = double.NaN;
-                area.AxisX.Maximum = double.NaN;
-                area.AxisY.Minimum = double.NaN;
-                area.AxisY.Maximum = double.NaN;
-
-                _lineFirstFlush = false;
+                if (_lineFirstFlush)
+                {
+                    var dmy = chartLine.Series.FindByName(SkeletonSeriesName);
+                    if (dmy != null) chartLine.Series.Remove(dmy);
+                    var area = chartLine.ChartAreas["a"];
+                    area.AxisX.Minimum = area.AxisX.Maximum = double.NaN;
+                    area.AxisY.Minimum = area.AxisY.Maximum = double.NaN;
+                    _lineFirstFlush = false;
+                }
+                Tuple<int, DateTime, double> item;
+                while (scoreSeries.TryDequeue(out item))
+                {
+                    var s = EnsureAxisSeries(item.Item1);
+                    s.Points.AddXY(item.Item2.ToOADate(), item.Item3);
+                }
+                foreach (Series s in chartLine.Series)
+                {
+                    if (s.Name == SkeletonSeriesName) continue;
+                    while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
+                }
+                chartLine.ChartAreas["a"].RecalculateAxesScale();
             }
 
-            // --- 큐 비우면서 축별로 포인트 추가 ---
-            Tuple<int, DateTime, double> item;
-            while (scoreSeries.TryDequeue(out item))
-            {
-                int ax = item.Item1;
-                DateTime t = item.Item2;
-                double y = item.Item3;
+            // ─ 서버 추론 스코어 → _chartAccel / _chartTorque / _chartCombined ──
+            if (_chartAccel == null || _chartTorque == null || _chartCombined == null) return;
+            if (_liveScoreQueue.IsEmpty) return;
 
-                var s = EnsureAxisSeries(ax);
-                s.Points.AddXY(t.ToOADate(), y);
+            // 첫 실데이터 수신 시 스켈레톤 시리즈 제거 (X축 고정 방지)
+            if (_liveChartFirstData)
+            {
+                foreach (var ch in new[] { _chartAccel, _chartTorque, _chartCombined })
+                {
+                    var sk = ch.Series.FindByName("_sk_");
+                    if (sk != null) ch.Series.Remove(sk);
+                }
+                _liveChartFirstData = false;
             }
 
-            // --- 서버 실시간 추론 점수 추가 ---
+            var latestTime = DateTime.MinValue;
             Tuple<string, DateTime, double> liveItem;
             while (_liveScoreQueue.TryDequeue(out liveItem))
             {
-                var ls = EnsureLiveSeries(liveItem.Item1);
+                bool isCombined = liveItem.Item1.StartsWith("combined", StringComparison.OrdinalIgnoreCase);
+                bool isAccel    = !isCombined && liveItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
+                Chart target = isCombined ? _chartCombined : (isAccel ? _chartAccel : _chartTorque);
+                var ls = EnsureLiveSeries(target, liveItem.Item1, isAccel, isCombined);
                 ls.Points.AddXY(liveItem.Item2.ToOADate(), liveItem.Item3);
+                if (liveItem.Item2 > latestTime) latestTime = liveItem.Item2;
             }
+            // 체크박스 상태에 따라 각 차트 래퍼 Visible 동기화 (히스토리 즉시 표시용)
+            // (실제 show/hide는 _UpdateChartLayout이 담당하므로 여기선 패스)
 
-            // --- 오래된 포인트 정리(시리즈별) ---
-            foreach (Series s in chartLine.Series)
+            if (latestTime == DateTime.MinValue) latestTime = DateTime.Now;
+            double xMax = latestTime.AddSeconds(10).ToOADate();
+
+            // X 최솟값: 실제 데이터 첫 포인트와 10분 롤링 창 중 더 최근 값 사용
+            // → 막 시작했을 때는 데이터 시작점에 맞게 좁히고, 10분 이상 쌓이면 롤링 창으로 전환
+            double xMinRolling = latestTime.AddMinutes(-10).ToOADate();
+            double xMinData    = double.MaxValue;
+            foreach (Chart _ch in new[] { _chartAccel, _chartTorque, _chartCombined })
             {
-                if (s.Name == SkeletonSeriesName) continue;
-                var pts = s.Points;
-                while (pts.Count > ChartKeepPoints) pts.RemoveAt(0);
+                if (_ch == null || _ch.IsDisposed) continue;
+                foreach (Series _s in _ch.Series)
+                    if (!_s.Name.StartsWith("_") && _s.Points.Count > 0
+                        && _s.Points[0].XValue < xMinData)
+                        xMinData = _s.Points[0].XValue;
+            }
+            const double PadOA = 10.0 / 86400.0;  // 10초 여백 (OADate 단위)
+            double xMin = (xMinData < double.MaxValue && xMinData > xMinRolling)
+                ? xMinData - PadOA   // 데이터 시작 10초 전 (짧은 구간)
+                : xMinRolling;       // 10분 롤링 창 (긴 구간)
+
+            foreach (Chart ch in new[] { _chartAccel, _chartTorque, _chartCombined })
+            {
+                if (ch == null || ch.IsDisposed || ch.ChartAreas.Count == 0) continue;
+                foreach (Series s in ch.Series)
+                    while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
+
+                // 가시 구간(xMin~xMax) 내 최댓값 계산 → Y축 자동 맞춤
+                double yMax = 0;
+                foreach (Series s in ch.Series)
+                {
+                    if (s.Name.StartsWith("_")) continue;
+                    foreach (DataPoint p in s.Points)
+                        if (p.XValue >= xMin && p.YValues[0] > yMax)
+                            yMax = p.YValues[0];
+                }
+
+                var area = ch.ChartAreas[0];
+                area.AxisX.Minimum = xMin;
+                area.AxisX.Maximum = xMax;
+                area.AxisY.Minimum = 0;
+                if (yMax > 0)
+                {
+                    double top = yMax * 1.15;
+                    area.AxisY.Maximum = top;
+                    // nice-number 눈금 간격: 4~6개 눈금
+                    // raw를 [1,10) 정규화 후 nice 배열에서 선택
+                    double raw     = top / 5.0;
+                    double mag     = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+                    double rawNorm = raw / mag;                 // [1, 10)
+                    double[] nice  = { 1.0, 2.0, 2.5, 5.0, 10.0 };
+                    double step    = mag * 10.0;                // 폴백
+                    foreach (double n in nice)
+                        if (n >= rawNorm) { step = n * mag; break; }
+                    area.AxisY.Interval = step;
+                    // 라벨 포맷: step 크기에 맞게 소수 자릿수 조정
+                    area.AxisY.LabelStyle.Format =
+                        step < 0.095 ? "0.00" : step < 0.95 ? "0.0" : "0";
+                }
+                else
+                {
+                    area.AxisY.Maximum  = double.NaN;
+                    area.AxisY.Interval = double.NaN;
+                    area.AxisY.LabelStyle.Format = "0.0";
+                }
             }
 
-            chartLine.ChartAreas["a"].RecalculateAxesScale();
+            // ── MA 이평선 업데이트 ────────────────────────────────────────────
+            Tuple<string, DateTime, double> maItem;
+            while (_liveMaQueue.TryDequeue(out maItem))
+            {
+                bool isCombinedMa = maItem.Item1.StartsWith("combined", StringComparison.OrdinalIgnoreCase);
+                bool isAccelMa    = !isCombinedMa && maItem.Item1.StartsWith("accel", StringComparison.OrdinalIgnoreCase);
+                Chart tgtMa = isCombinedMa ? _chartCombined : (isAccelMa ? _chartAccel : _chartTorque);
+                if (tgtMa == null || tgtMa.IsDisposed) continue;
+                var mas = EnsureLiveMaSeries(tgtMa, maItem.Item1, isAccelMa, isCombinedMa);
+                mas.Points.AddXY(maItem.Item2.ToOADate(), maItem.Item3);
+            }
+            foreach (Chart ch in new[] { _chartAccel, _chartTorque, _chartCombined })
+            {
+                if (ch == null || ch.IsDisposed) continue;
+                foreach (Series s in ch.Series)
+                    if (s.Name.StartsWith("ma-"))
+                        while (s.Points.Count > ChartKeepPoints) s.Points.RemoveAt(0);
+            }
         }
 
         private Series EnsureAxisSeries(int axis)
@@ -4354,25 +4745,245 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             return s;
         }
 
-        /// <summary>서버 실시간 추론 전용 차트 시리즈를 반환 (없으면 생성).</summary>
-        private Series EnsureLiveSeries(string sensorType)
+        /// <summary>서버 추론 전용 시리즈를 chart 에서 찾거나 생성합니다.</summary>
+        /// <param name="chart">대상 차트 (_chartAccel / _chartTorque / _chartCombined)</param>
+        /// <param name="key">예: "accel_ax0", "torque_ax2", "combined_ax0"</param>
+        /// <param name="isAccel">가속도 여부</param>
+        /// <param name="isCombined">결합 모델 여부</param>
+        private Series EnsureLiveSeries(Chart chart, string key, bool isAccel, bool isCombined = false)
         {
-            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
-            string name = isAccel ? "서버-가속도" : "서버-토크";
-            var s = chartLine.Series.FindByName(name);
+            string seriesName = "srv-" + key;
+            var s = chart.Series.FindByName(seriesName);
             if (s != null) return s;
 
-            s = new Series(name)
+            int axIdx = -1;  // -1 = 전역(global) 모델
+            int ux = key.LastIndexOf("_ax", StringComparison.OrdinalIgnoreCase);
+            if (ux >= 0) int.TryParse(key.Substring(ux + 3), out axIdx);
+            bool isGlobal = axIdx < 0;
+            if (isGlobal) axIdx = 0;  // 색상 인덱스용
+
+            Color[] accelColors    = { Color.FromArgb(0, 112, 204),   Color.FromArgb(0, 170, 230),  Color.FromArgb(70, 130, 210),  Color.FromArgb(100, 160, 240) };
+            Color[] torqueColors   = { Color.FromArgb(210, 55, 20),   Color.FromArgb(240, 100, 40), Color.FromArgb(255, 150, 0),   Color.FromArgb(200, 75, 55)  };
+            Color[] combinedColors = { Color.FromArgb(60, 150, 40),   Color.FromArgb(90, 190, 60),  Color.FromArgb(130, 200, 80),  Color.FromArgb(160, 220, 100) };
+            Color c = isCombined ? combinedColors[axIdx % combinedColors.Length]
+                     : isAccel   ? accelColors[axIdx % accelColors.Length]
+                                 : torqueColors[axIdx % torqueColors.Length];
+
+            string legendText;
+            if (isCombined)
+                legendText = isGlobal ? "결합 (전역)" : string.Format("Ax{0} 결합", axIdx);
+            else if (isAccel)
+                legendText = isGlobal ? "가속도 (전역)" : string.Format("Ax{0} 가속", axIdx);
+            else
+                legendText = isGlobal ? "토크 (전역)" : string.Format("Ax{0} 토크", axIdx);
+
+            s = new Series(seriesName)
             {
                 ChartType   = SeriesChartType.FastLine,
                 XValueType  = ChartValueType.DateTime,
                 BorderWidth = 2,
-                LegendText  = name,
-                Color       = isAccel ? Color.DodgerBlue : Color.OrangeRed,
-                BorderDashStyle = ChartDashStyle.Dot,
+                LegendText  = legendText,
+                Color       = c
             };
-            chartLine.Series.Add(s);
+            // 스켈레톤 제거 (첫 실제 시리즈 추가 시)
+            var sk = chart.Series.FindByName("_sk_");
+            if (sk != null) chart.Series.Remove(sk);
+            chart.Series.Add(s);
             return s;
+        }
+
+        /// <summary>MA(이동평균)선 시리즈를 chart 에서 찾거나 생성합니다.</summary>
+        private Series EnsureLiveMaSeries(Chart chart, string key, bool isAccel, bool isCombined = false)
+        {
+            string seriesName = "ma-" + key;
+            var s = chart.Series.FindByName(seriesName);
+            if (s != null) return s;
+
+            int axIdx = 0;
+            int ux = key.LastIndexOf("_ax", StringComparison.OrdinalIgnoreCase);
+            if (ux >= 0) int.TryParse(key.Substring(ux + 3), out axIdx);
+
+            // raw선보다 밝고 굵게 — 추세선임을 시각적으로 구분
+            Color[] accelMa    = { Color.FromArgb(0, 170, 255),   Color.FromArgb(80, 210, 255),  Color.FromArgb(120, 180, 255), Color.FromArgb(160, 200, 255) };
+            Color[] torqueMa   = { Color.FromArgb(255, 100, 50),  Color.FromArgb(255, 150, 70),  Color.FromArgb(255, 190, 30),  Color.FromArgb(240, 120, 100) };
+            Color[] combinedMa = { Color.FromArgb(100, 210, 80),  Color.FromArgb(140, 230, 110), Color.FromArgb(180, 240, 140), Color.FromArgb(200, 250, 160) };
+            Color c = isCombined ? combinedMa[axIdx % combinedMa.Length]
+                     : isAccel   ? accelMa[axIdx % accelMa.Length]
+                                 : torqueMa[axIdx % torqueMa.Length];
+
+            string maLabel = isCombined ? "결합 이평" : (isAccel ? "가속도 이평" : "토크 이평");
+            s = new Series(seriesName)
+            {
+                ChartType   = SeriesChartType.FastLine,
+                XValueType  = ChartValueType.DateTime,
+                BorderWidth = 3,
+                LegendText  = maLabel,
+                Color       = c,
+            };
+            chart.Series.Add(s);
+            return s;
+        }
+
+        /// <summary>
+        /// 센서+축 조합 칩이 _statusFlow 에 없으면 동적으로 추가합니다.
+        /// UI 스레드에서만 호출해야 합니다.
+        /// </summary>
+        private void EnsureLiveChip(string key, string displayName)
+        {
+            if (_statusChips.ContainsKey(key) || _statusFlow == null) return;
+
+            var chip = new Panel
+            {
+                Width = 128, Height = 42,
+                Margin = new Padding(0, 4, 8, 4),
+                BackColor = Color.FromArgb(243, 244, 246),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            var lblName = new Label
+            {
+                Text = displayName,
+                Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+                Left = 5, Top = 4, Width = 118, Height = 15,
+                ForeColor = Color.FromArgb(55, 55, 65)
+            };
+            var lblState = new Label
+            {
+                Text = "—",
+                Font = new Font("Segoe UI", 8f),
+                Left = 5, Top = 21, Width = 70, Height = 16,
+                ForeColor = Color.Gray
+            };
+            var lblScore = new Label
+            {
+                Text = "",
+                Font = new Font("Segoe UI", 7.5f),
+                Left = 74, Top = 23, Width = 50, Height = 14,
+                ForeColor = Color.FromArgb(80, 80, 90),
+                TextAlign = ContentAlignment.MiddleRight
+            };
+            // 우클릭 컨텍스트 메뉴: 임계값 설정
+            var cms = new ContextMenuStrip();
+            var miSet = new ToolStripMenuItem("임계값 설정...");
+            string capturedKey = key;
+            miSet.Click += (s, e) => ShowThresholdDialog(capturedKey);
+            cms.Items.Add(miSet);
+            chip.ContextMenuStrip = cms;
+            foreach (Control c in new Control[] { lblName, lblState, lblScore })
+                c.ContextMenuStrip = cms;
+
+            chip.Controls.AddRange(new Control[] { lblName, lblState, lblScore });
+
+            // 체크박스 상태에 따라 초기 Visible 결정
+            // key = "accel_ax0" / "torque_ax1" / "combined_ax0" — 첫 번째 '_' 앞이 sensorType
+            string chipSensor = key.Contains("_") ? key.Substring(0, key.IndexOf('_')) : key;
+            chip.Visible = _IsSensorEnabled(chipSensor);
+
+            _statusFlow.Controls.Add(chip);
+
+            _statusChips[key]      = chip;
+            _liveStatusLabels[key] = lblState;
+            _liveScoreLabels[key]  = lblScore;
+        }
+
+        /// <summary>
+        /// 축별 임계값을 설정하는 다이얼로그를 표시합니다.
+        /// </summary>
+        private void ShowThresholdDialog(string key)
+        {
+            double current = _axisThresholds.TryGetValue(key, out double v) ? v : 1.0;
+
+            using (var dlg = new Form
+            {
+                Text            = $"임계값 설정 — {key}",
+                Size            = new Size(300, 145),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition   = FormStartPosition.CenterParent,
+                MaximizeBox     = false, MinimizeBox = false
+            })
+            {
+                var lbl = new Label
+                {
+                    Text     = $"[{key}] 이상 판정 임계값:",
+                    Left = 12, Top = 14, Width = 270, Height = 18,
+                    Font = new Font("Segoe UI", 9f)
+                };
+                var nud = new NumericUpDown
+                {
+                    Left = 12, Top = 36, Width = 120, Height = 26,
+                    Minimum = 0.001M, Maximum = 9999M,
+                    DecimalPlaces = 3, Increment = 0.1M,
+                    Value = (decimal)Math.Max(0.001, Math.Min(9999, current)),
+                    Font = new Font("Segoe UI", 10f)
+                };
+                var lblNote = new Label
+                {
+                    Text      = "차트에는 score ÷ threshold 정규화 값이 표시됩니다.",
+                    Left = 12, Top = 68, Width = 270, Height = 16,
+                    Font = new Font("Segoe UI", 7.5f), ForeColor = Color.Gray
+                };
+                var btnOk = new Button
+                {
+                    Text = "확인", Left = 140, Top = 88, Width = 70, Height = 26,
+                    DialogResult = DialogResult.OK
+                };
+                var btnCancel = new Button
+                {
+                    Text = "취소", Left = 218, Top = 88, Width = 60, Height = 26,
+                    DialogResult = DialogResult.Cancel
+                };
+                dlg.AcceptButton = btnOk;
+                dlg.CancelButton = btnCancel;
+                dlg.Controls.AddRange(new Control[] { lbl, nud, lblNote, btnOk, btnCancel });
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    _axisThresholds[key] = (double)nud.Value;
+                    SaveAxisThresholds();
+                    // 툴팁 즉시 갱신
+                    if (_statusChips.TryGetValue(key, out Panel chip))
+                        _chipToolTip.SetToolTip(chip, $"임계값: {nud.Value:F3}  (우클릭 → 변경)");
+                    AppEvents.RaiseLog($"[임계값] {key} = {nud.Value:F3} 설정됨");
+                }
+            }
+        }
+
+        /// <summary>
+        /// 축별 임계값을 파일에서 읽어옵니다 (앱 시작 시 호출).
+        /// 파일 형식: key=value (한 줄에 하나)
+        /// </summary>
+        private void LoadAxisThresholds()
+        {
+            try
+            {
+                if (!File.Exists(ThresholdsFile)) return;
+                foreach (string line in File.ReadAllLines(ThresholdsFile))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = line.Substring(0, eq).Trim();
+                    if (double.TryParse(line.Substring(eq + 1).Trim(),
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out double val) && val > 0)
+                        _axisThresholds[k] = val;
+                }
+            }
+            catch { /* 무시 — 파일 없으면 서버 전달값으로 자동 초기화 */ }
+        }
+
+        /// <summary>
+        /// 현재 축별 임계값을 파일에 저장합니다 (폼 닫힐 때 + 설정 변경 시 호출).
+        /// </summary>
+        private void SaveAxisThresholds()
+        {
+            try
+            {
+                Directory.CreateDirectory(DefaultLogsPath);
+                var lines = _axisThresholds
+                    .OrderBy(kv => kv.Key)
+                    .Select(kv => $"{kv.Key}={kv.Value.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}");
+                File.WriteAllLines(ThresholdsFile, lines);
+            }
+            catch { }
         }
 
         /// <summary>
@@ -4382,59 +4993,1089 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             if (result == null) return;
 
-            // 차트에 넣을 점수를 큐에 추가 (스레드 안전)
-            _liveScoreQueue.Enqueue(Tuple.Create(sensorType, DateTime.Now, (double)result.AnomalyScore));
-            while (_liveScoreQueue.Count > 600)
+            // 서버 오류 응답: 칩에 오류 상태 표시 후 즉시 반환 (센서 표시 여부 무관)
+            if (result.IsError)
+            {
+                if (!_IsSensorEnabled(sensorType)) return;
+                string errKey = sensorType;
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    if (_statusChips.TryGetValue(errKey, out Panel chip) && chip != null)
+                        chip.BackColor = Color.FromArgb(254, 240, 200); // 연노랑 = 오류
+                    if (_liveStatusLabels.TryGetValue(errKey, out Label lblErr) && lblErr != null)
+                    {
+                        lblErr.Text     = "⚠ 오류";
+                        lblErr.ForeColor = Color.FromArgb(160, 80, 0);
+                    }
+                    if (_liveScoreLabels.TryGetValue(errKey, out Label lblScoreErr) && lblScoreErr != null)
+                        lblScoreErr.Text = "---";
+                }));
+                return;
+            }
+
+            bool isAccel    = string.Equals(sensorType, "accel",    StringComparison.OrdinalIgnoreCase);
+            bool isCombined = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
+            // 키: "accel_ax0", "torque_ax2", "combined_ax0" 등 (axis 없으면 sensorType 그대로)
+            string key = result.Axis.HasValue
+                         ? $"{sensorType}_ax{result.Axis.Value}"
+                         : sensorType;
+
+            // ── 차트 큐 적재: 체크박스 상태와 무관하게 항상 실행 ──────────────
+            // (체크박스는 UI 표시 여부만 제어. 나중에 활성화 시 즉시 데이터 표시 가능)
+            if (result.Threshold > 0)
+                _axisThresholds.TryAdd(key, result.Threshold);
+
+            double axThr      = _axisThresholds.TryGetValue(key, out double t) ? t : 1.0;
+            double normScore  = axThr > 0 ? (double)result.AnomalyScore / axThr : (double)result.AnomalyScore;
+
+            double prevEma    = _chartEma.GetOrAdd(key, normScore);
+            double smoothed   = ChartEmaAlpha * normScore + (1.0 - ChartEmaAlpha) * prevEma;
+            _chartEma[key]    = smoothed;
+
+            _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, smoothed));
+            while (_liveScoreQueue.Count > 6000)
             {
                 Tuple<string, DateTime, double> _discard;
                 _liveScoreQueue.TryDequeue(out _discard);
             }
 
-            // UI 컨트롤 업데이트는 UI 스레드에서
+            double prevMa  = _chartMaEma.GetOrAdd(key, normScore);
+            double maScore = ChartMaAlpha * normScore + (1.0 - ChartMaAlpha) * prevMa;
+            _chartMaEma[key] = maScore;
+
+            _liveMaQueue.Enqueue(Tuple.Create(key, DateTime.Now, maScore));
+            while (_liveMaQueue.Count > 6000)
+            {
+                Tuple<string, DateTime, double> _discardMa;
+                _liveMaQueue.TryDequeue(out _discardMa);
+            }
+
+            // ── UI 칩/이벤트 업데이트: 체크박스 활성화 시에만 ────────────────
+            if (!_IsSensorEnabled(sensorType)) return;
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
-                bool isAccel   = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
-                var lblStatus  = isAccel ? _lblLiveAccelStatus  : _lblLiveTorqueStatus;
-                var lblScore   = isAccel ? _lblLiveAccelScore   : _lblLiveTorqueScore;
-                if (lblStatus == null || lblScore == null) return;
+                string axLabel     = result.Axis.HasValue ? $" Ax{result.Axis.Value}" : "";
+                string sensorLabel = isAccel ? "가속도"
+                                   : string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase) ? "결합"
+                                   : "토크";
+                string displayName = sensorLabel + axLabel;
 
-                string stateText = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
-                Color  stateClr  = result.IsAnomaly ? Color.Red : Color.Green;
+                // 칩이 없으면 상태 바에 동적 추가
+                EnsureLiveChip(key, displayName);
+
+                _liveStatusLabels.TryGetValue(key, out Label lblStatus);
+                _liveScoreLabels.TryGetValue(key, out Label lblScore);
+                _statusChips.TryGetValue(key, out Panel chip);
+                if (lblStatus == null) return;
+
+                // 클라이언트 임계값 기준 이상 판정 (per-axis threshold 반영)
+                double clientThr = _axisThresholds.TryGetValue(key, out double ct) ? ct : 1.0;
+                double rawScore  = (double)result.AnomalyScore;
+                bool   threshAnomaly = rawScore >= clientThr;
+
+                // ── 연속 카운터: N회 연속 초과 시 확정 (단발 노이즈 제거) ──────────
+                int prevConsec;
+                _consecutiveAnomalyCount.TryGetValue(key, out prevConsec);
+                int newConsec = threshAnomaly ? prevConsec + 1 : 0;
+                _consecutiveAnomalyCount[key] = newConsec;
+                bool confirmedThreshAnomaly = newConsec >= AnomalyConfirmCount;
+
+                // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상 — 즉시 반응) ──
+                var baseline = _scoreBaseline.GetOrAdd(key, (rawScore, 0));
+                double ema   = baseline.ema;
+                int    cnt   = baseline.count;
+                bool   spikeAnomaly = cnt >= SpikeWarmup && rawScore > ema * SpikeFactor;
+                // EMA 업데이트: 항상 반영 (스파이크 구간만 제외하면 베이스라인이 낮게 고착됨)
+                double newEma = ema * (1 - SpikeEmaAlpha) + rawScore * SpikeEmaAlpha;
+                _scoreBaseline[key] = (newEma, cnt + 1);
+
+                // 최종 이상 판정: 연속 N회 초과(확정) 또는 급증 스파이크(즉시)
+                bool   anomaly    = confirmedThreshAnomaly || spikeAnomaly;
+                string spikeTag   = (spikeAnomaly && !threshAnomaly) ? " ↑급증" : "";
+                string stateText  = anomaly ? "⚠ 이상" : "✓ 정상";
+                Color  stateClr   = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
 
                 lblStatus.Text      = stateText;
                 lblStatus.ForeColor = stateClr;
-                lblStatus.Font      = new Font(Font, FontStyle.Bold);
 
-                string cls = !string.IsNullOrEmpty(result.ClassName) &&
-                             !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
-                             !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase)
-                             ? $" {result.ClassName}" : "";
-                lblScore.Text = $"{result.AnomalyScore:F3}{cls}";
+                // 점수 표시: RawMae+RawThreshold가 있으면 uncapped 정규화 점수 사용
+                // (서버가 anomaly_score를 1.0으로 cap하는 경우 raw 값으로 보정)
+                float displayScore = (result.RawMae.HasValue && result.RawThreshold.HasValue
+                                      && result.RawThreshold.Value > 0)
+                    ? result.RawMae.Value / result.RawThreshold.Value
+                    : result.AnomalyScore;
+                if (lblScore != null) lblScore.Text = $"{displayScore:F3}";
+
+                // 칩 툴팁: 현재 임계값 표시
+                _chipToolTip.SetToolTip(chip, $"임계값: {clientThr:F3}  (우클릭 → 변경)");
+
+                // 칩 배경 색상 (이상=연빨강, 정상=연초록, 처음=연회색)
+                if (chip != null)
+                    chip.BackColor = anomaly
+                        ? Color.FromArgb(254, 226, 226)
+                        : Color.FromArgb(220, 252, 231);
+
+                // 실시간 이상탐지 현황 매트릭스 갱신 (모든 센서·모델 DGV에 반영)
+                if (isAccel && !result.Axis.HasValue)
+                {
+                    UpdateAccelAeDisplay(normScore);        // 상단 가속도 바 패널 (기존 유지)
+                    UpdateClassMatrix(-1, normScore);        // DGV: 가속도 전역 행
+                }
+                else if (!isAccel && !isCombined && !result.Axis.HasValue)
+                    UpdateClassMatrix(-10, normScore);       // DGV: 토크 전역 행
+                else if (!isAccel && result.Axis.HasValue)
+                    UpdateClassMatrix(result.Axis.Value, normScore); // DGV: 토크 Ax{N} 행
+
+                // 사용 모델 파일명 라벨 갱신
+                if (!string.IsNullOrEmpty(result.ModelFile))
+                    UpdateModelInfoLabel(isAccel, result.ModelFile, null, isCombined);
+
+                bool hasCls = !string.IsNullOrEmpty(result.ClassName) &&
+                              !string.Equals(result.ClassName, "normal", StringComparison.OrdinalIgnoreCase) &&
+                              !string.Equals(result.ClassName, "anomaly", StringComparison.OrdinalIgnoreCase);
+                string cls = hasCls ? $" ({result.ClassName})" : "";
+
+                // /predict fallback 경로: ClassName이 있으면 CLS 매트릭스도 갱신
+                // (/predict/combined 성공 시에는 OnLiveClsInferenceResult에서 처리되므로 중복 업데이트 방지)
+                if (hasCls && result.Axis.HasValue)
+                {
+                    object confVal = result.Confidence.HasValue
+                        ? (object)result.Confidence.Value
+                        : (object)"-";
+                    UpdateClassMatrixCls(result.Axis.Value, sensorType, result.ClassName, confVal);
+                }
 
                 // 이상 감지 시 KPI / 이벤트 로그 갱신
-                if (result.IsAnomaly)
+                // ── 이상/정상 이벤트 로그 (상태 전환 + 30초 쿨다운으로 홍수 방지) ──
+                bool wasAnomaly  = _prevAnomalyState.TryGetValue(key, out bool _pw) && _pw;
+                bool cooldownOk  = !_lastAnomalyLogTime.TryGetValue(key, out DateTime _lt)
+                                   || (DateTime.Now - _lt) >= AnomalyLogCooldown;
+
+                if (anomaly)
                 {
-                    cntDanger++;
-                    cardDanger.ValueText = cntDanger + " 건";
+                    bool isDanger  = normScore >= DangerMultiplier;
+                    string spikeInfo = spikeAnomaly && !threshAnomaly
+                        ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
+                    string levelTag  = isDanger ? "🔴 위험" : "🟡 경고";
 
-                    string sensorLabel = isAccel ? "가속도" : "토크";
-                    AppendEventLog(
-                        $"[{DateTime.Now:HH:mm:ss}] ⚠ {sensorLabel} 이상  " +
-                        $"score={result.AnomalyScore:F3}  thr={result.Threshold:F3}" +
-                        (string.IsNullOrEmpty(result.ClassName) ? "" : $"  class={result.ClassName}"));
-
-                    rows.Add(new EventRow
+                    // 상태 전환(정상→이상) 또는 쿨다운 경과 시만 기록 — AE(이상탐지) 전 센서 대상
+                    bool shouldLog = !wasAnomaly || cooldownOk;
+                    if (shouldLog)
                     {
-                        TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
-                        Axis         = isAccel ? -1 : -2,
-                        AnomalyScore = Math.Round(result.AnomalyScore, 4),
-                        Threshold    = Math.Round(result.Threshold, 4),
-                        Alarm        = sensorLabel + " 이상"
-                    });
-                    if (rows.Count > 500) rows.RemoveAt(0);
+                        // ── KPI 카드 업데이트 ─────────────────────────────────
+                        if (isDanger) Interlocked.Increment(ref cntDanger);
+                        else          Interlocked.Increment(ref cntWarning);
+                        cardDanger.ValueText  = cntDanger  + " 건";
+                        cardWarning.ValueText = cntWarning + " 건";
+                        if (isDanger) ShowToast(AlarmLevel.Danger, displayName, displayScore);
+
+                        AppendEventLog(
+                            $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
+                            $"score={displayScore:F3}  thr={clientThr:F3}{cls}{spikeInfo}");
+                        _lastAnomalyLogTime[key] = DateTime.Now;
+
+                        // 이벤트 카운트 표 갱신
+                        int _evtAxisKey = (isAccel && !result.Axis.HasValue)         ? -1
+                                        : (!isAccel && !isCombined && !result.Axis.HasValue) ? -10
+                                        : result.Axis.HasValue ? result.Axis.Value
+                                        : -99;
+                        if (_evtAxisKey != -99) UpdateEventCount(_evtAxisKey, isDanger);
+
+                        rows.Add(new EventRow
+                        {
+                            TimeLine     = DateTime.Now.ToString("HH:mm:ss"),
+                            Sensor       = displayName,
+                            AnomalyScore = Math.Round(displayScore, 4),
+                            Threshold    = Math.Round(clientThr,    4),
+                            Alarm        = levelTag + " " + displayName + " 이상" + spikeTag + cls
+                        });
+                        if (rows.Count > 500) rows.RemoveAt(0);
+                    }
+                }
+                else if (wasAnomaly)
+                {
+                    // 이상→정상 복귀 시 1회 기록
+                    AppendEventLog(
+                        $"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 {displayName}  score={displayScore:F3}");
+                }
+                _prevAnomalyState[key] = anomaly;
+            }));
+        }
+
+        /// <summary>
+        /// AppEvents.ClsInferenceResultReceived 핸들러 — CLS 결함진단 결과를 분류 매트릭스에 반영합니다.
+        /// ClsAvailable=false이면 "모델없음"으로 표시, true이면 결함명/신뢰도 표시.
+        /// </summary>
+        private void OnLiveClsInferenceResult(string sensorType, CombinedInferenceResult combined)
+        {
+            if (combined == null || combined.IsError) return;
+
+            bool isAccel = string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase);
+
+            // ── combined AE 스코어를 차트 큐에 추가: 체크박스 상태와 무관하게 항상 실행 ──────────────
+            // (axis=null 전역 모델 포함. ConcurrentDictionary/Queue이므로 UI 스레드 불필요)
+            if (combined.AnomalyScore >= 0)
+            {
+                string chartKey = combined.Axis.HasValue
+                    ? $"{sensorType}_ax{combined.Axis.Value}"
+                    : sensorType;
+                if (combined.Threshold > 0)
+                    _axisThresholds.TryAdd(chartKey, (double)combined.Threshold);
+                double axThr2   = _axisThresholds.TryGetValue(chartKey, out double tv) ? tv : 1.0;
+                double norm2    = axThr2 > 0 ? (double)combined.AnomalyScore / axThr2 : (double)combined.AnomalyScore;
+                double prevEma2 = _chartEma.GetOrAdd(chartKey, norm2);
+                double smooth2  = ChartEmaAlpha * norm2 + (1.0 - ChartEmaAlpha) * prevEma2;
+                _chartEma[chartKey] = smooth2;
+                _liveScoreQueue.Enqueue(Tuple.Create(chartKey, DateTime.Now, smooth2));
+                while (_liveScoreQueue.Count > 6000)
+                { Tuple<string, DateTime, double> _d; _liveScoreQueue.TryDequeue(out _d); }
+
+                double prevMa2 = _chartMaEma.GetOrAdd(chartKey, norm2);
+                double ma2     = ChartMaAlpha * norm2 + (1.0 - ChartMaAlpha) * prevMa2;
+                _chartMaEma[chartKey] = ma2;
+                _liveMaQueue.Enqueue(Tuple.Create(chartKey, DateTime.Now, ma2));
+            }
+
+            // UI 칩/이벤트/매트릭스 업데이트: 체크박스 활성화 시에만
+            if (!_IsSensorEnabled(sensorType)) return;
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                bool isCombinedSensor = string.Equals(sensorType, "combined", StringComparison.OrdinalIgnoreCase);
+
+                // ── combined AE 칩 상태 업데이트 (결합 모델 추론 칩을 상태 바에 표시) ──
+                if (isCombinedSensor && combined.Axis.HasValue && combined.AnomalyScore >= 0)
+                {
+                    string chipKey  = $"combined_ax{combined.Axis.Value}";
+                    string chipName = $"결합 Ax{combined.Axis.Value}";
+                    EnsureLiveChip(chipKey, chipName);
+
+                    // 임계값 기준 normScore
+                    if (combined.Threshold > 0)
+                        _axisThresholds.TryAdd(chipKey, combined.Threshold);
+                    double cAxThr   = _axisThresholds.TryGetValue(chipKey, out double ctv) ? ctv : 1.0;
+                    double cRawScore = (combined.RawMae.HasValue && combined.RawThreshold.HasValue
+                                        && combined.RawThreshold.Value > 0)
+                                       ? combined.RawMae.Value / combined.RawThreshold.Value
+                                       : (double)combined.AnomalyScore;
+                    double cNorm    = cAxThr > 0 ? (double)combined.AnomalyScore / cAxThr : (double)combined.AnomalyScore;
+
+                    // 연속 카운터 + 스파이크 감지
+                    bool cThreshAnom;
+                    { int prev; _consecutiveAnomalyCount.TryGetValue(chipKey, out prev);
+                      cThreshAnom = (double)combined.AnomalyScore >= cAxThr;
+                      int nc = cThreshAnom ? prev + 1 : 0;
+                      _consecutiveAnomalyCount[chipKey] = nc;
+                      cThreshAnom = nc >= AnomalyConfirmCount; }
+
+                    var cBase = _scoreBaseline.GetOrAdd(chipKey, ((double)combined.AnomalyScore, 0));
+                    bool cSpike = cBase.count >= SpikeWarmup
+                                  && (double)combined.AnomalyScore > cBase.ema * SpikeFactor;
+                    _scoreBaseline[chipKey] = (cBase.ema * (1 - SpikeEmaAlpha)
+                                               + (double)combined.AnomalyScore * SpikeEmaAlpha,
+                                               cBase.count + 1);
+
+                    bool cAnomaly = cThreshAnom || cSpike;
+
+                    // 칩 UI 갱신
+                    _statusChips.TryGetValue(chipKey, out Panel cChip);
+                    _liveStatusLabels.TryGetValue(chipKey, out Label cLblState);
+                    _liveScoreLabels.TryGetValue(chipKey,  out Label cLblScore);
+                    if (cChip     != null) cChip.BackColor    = cAnomaly ? Color.FromArgb(254, 226, 226) : Color.FromArgb(220, 252, 231);
+                    if (cLblState != null) { cLblState.Text      = cAnomaly ? "⚠ 이상" : "✓ 정상";
+                                             cLblState.ForeColor = cAnomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55); }
+                    if (cLblScore != null) cLblScore.Text = $"{cRawScore:F3}";
+
+                    // 이상 이벤트 기록 (쿨다운 + 이벤트 카운트)
+                    if (cAnomaly)
+                    {
+                        bool cIsDanger  = cNorm >= DangerMultiplier;
+                        bool cWasAnom   = _prevAnomalyState.TryGetValue(chipKey, out bool _ca) && _ca;
+                        bool cCooldownOk = !_lastAnomalyLogTime.TryGetValue(chipKey, out DateTime _ct)
+                                           || (DateTime.Now - _ct) >= AnomalyLogCooldown;
+                        if (!cWasAnom || cCooldownOk)
+                        {
+                            string cLevel = cIsDanger ? "🔴 위험" : "🟡 경고";
+                            if (cIsDanger) { Interlocked.Increment(ref cntDanger);  cardDanger.ValueText  = cntDanger  + " 건"; }
+                            else           { Interlocked.Increment(ref cntWarning); cardWarning.ValueText = cntWarning + " 건"; }
+                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] {cLevel} 결합 Ax{combined.Axis.Value} 이상  score={cRawScore:F3}  thr={cAxThr:F3}");
+                            _lastAnomalyLogTime[chipKey] = DateTime.Now;
+                            UpdateEventCount(combined.Axis.Value + 100, cIsDanger);
+                        }
+                    }
+                    else if (_prevAnomalyState.TryGetValue(chipKey, out bool _cWas) && _cWas)
+                        AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 결합 Ax{combined.Axis.Value}  score={cRawScore:F3}");
+                    _prevAnomalyState[chipKey] = cAnomaly;
+
+                    // DGV 이상탐지 현황에 결합 모델 행 갱신 (axis key = 100 + axisValue)
+                    UpdateClassMatrix(combined.Axis.Value + 100, cNorm);
+                }
+
+                // axis 없는 결과(전역 단일 모델)는 DGV 매트릭스 갱신 스킵 — 차트 큐는 이미 위에서 추가됨
+                if (!combined.Axis.HasValue)
+                {
+                    // 모델 정보 라벨만 갱신
+                    if (!string.IsNullOrEmpty(combined.AeModelFile) || !string.IsNullOrEmpty(combined.ClsModelFile))
+                        UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile, isCombinedSensor);
+                    return;
+                }
+
+                string clsName;
+                object confVal;
+                if (!combined.ClsAvailable)
+                {
+                    clsName = "모델없음";
+                    confVal = "-";
+                }
+                else
+                {
+                    clsName = combined.ClsClassName ?? "-";
+                    confVal = combined.ClsConfidence.HasValue
+                              ? (object)(combined.ClsConfidence.Value)
+                              : (object)"-";
+                }
+                UpdateClassMatrixCls(combined.Axis.Value, sensorType, clsName, confVal);
+
+                // 사용 모델 파일명 라벨 갱신 (AE + CLS)
+                if (!string.IsNullOrEmpty(combined.AeModelFile) || !string.IsNullOrEmpty(combined.ClsModelFile))
+                    UpdateModelInfoLabel(isAccel, combined.AeModelFile, combined.ClsModelFile, isCombinedSensor);
+
+                // 결함 감지 시 KPI 카운트 + 이벤트 로그 기록
+                if (combined.ClsAvailable && combined.ClsIsFault == true)
+                {
+                    string axLabel   = $" Ax{combined.Axis.Value}";
+                    string sensor    = isAccel ? "가속도"
+                                     : isCombinedSensor ? "결합"
+                                     : "토크";
+                    string conf      = combined.ClsConfidence.HasValue
+                                       ? $"  신뢰도={combined.ClsConfidence.Value:P0}" : "";
+
+                    // 신뢰도 0.7 이상 → 위험, 미만 → 경고
+                    bool isCritical = combined.ClsConfidence.HasValue
+                                      ? combined.ClsConfidence.Value >= 0.7f
+                                      : true; // 신뢰도 없으면 위험으로 분류
+                    if (isCritical) { cntDanger++;  cardDanger.ValueText  = cntDanger  + " 건"; }
+                    else            { cntWarning++; cardWarning.ValueText = cntWarning + " 건"; }
+
+                    AppendEventLog(
+                        $"[{DateTime.Now:HH:mm:ss}] 🔶 결함진단 {sensor}{axLabel} = {clsName}{conf}");
                 }
             }));
+        }
+
+        /// <summary>
+        /// 실시간 분류 현황 매트릭스 CLS 열 갱신 (UI 스레드에서만 호출)
+        /// torque/combined per-axis 결과만 처리; accel은 전역 단일 모델이므로 여기 오지 않음
+        /// </summary>
+        private void UpdateClassMatrixCls(int axis, string sensorType, string className, object confValue)
+        {
+            if (_classMatrixDgv == null || axis < 0) return;
+
+            // accel CLS는 per-axis DGV 대상 아님 (전역 단일 모델) — 무시
+            if (string.Equals(sensorType, "accel", StringComparison.OrdinalIgnoreCase)) return;
+
+            // 행 확보 (AE 결과보다 먼저 올 수도 있으므로 여기서도 생성)
+            if (!_classMatrixAxisRow.TryGetValue(axis, out int rowIdx))
+            {
+                rowIdx = _classMatrixDgv.Rows.Add();
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axis;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value   = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLSCONF].Value = "-";
+                _classMatrixAxisRow[axis] = rowIdx;
+            }
+
+            int clsCol, confCol;
+            switch (sensorType?.ToLowerInvariant())
+            {
+                case "combined":
+                    clsCol  = CMG_COL_CCLS;  confCol = CMG_COL_CCLSCONF; break;
+                default: // "torque"
+                    clsCol  = CMG_COL_TCLS;  confCol = CMG_COL_TCLSCONF; break;
+            }
+
+            _classMatrixDgv.Rows[rowIdx].Cells[clsCol].Value  = className ?? "-";
+            _classMatrixDgv.Rows[rowIdx].Cells[confCol].Value = confValue ?? (object)"-";
+            _classMatrixDgv.InvalidateRow(rowIdx);
+        }
+
+        /// <summary>
+        // ── 센서 표시 필터 헬퍼 ─────────────────────────────────────────────────
+
+        /// <summary>체크박스 상태 기반으로 해당 sensorType의 표시 여부를 반환합니다.</summary>
+        private bool _IsSensorEnabled(string sensorType)
+        {
+            switch (sensorType?.ToLowerInvariant())
+            {
+                case "accel":    return _chkShowAccel    == null || _chkShowAccel.Checked;
+                case "torque":   return _chkShowTorque   == null || _chkShowTorque.Checked;
+                case "combined": return _chkShowCombined == null || _chkShowCombined.Checked;
+                default:         return true;
+            }
+        }
+
+        /// <summary>
+        /// 체크박스 상태에 따라 _dualChartPanel 의 열 너비와 차트 래퍼 패널 Visible 을 조정합니다.
+        /// 표시 중인 차트끼리 균등 분할 (각 33% / 50% / 100%) — 숨겨진 열은 0px.
+        /// </summary>
+        private void _UpdateChartLayout()
+        {
+            if (_dualChartPanel == null) return;
+            bool showA = _chkShowAccel?.Checked    ?? true;
+            bool showT = _chkShowTorque?.Checked   ?? false;
+            bool showC = _chkShowCombined?.Checked ?? false;
+
+            if (_accelChartWrap    != null) _accelChartWrap.Visible    = showA;
+            if (_torqueChartWrap   != null) _torqueChartWrap.Visible   = showT;
+            if (_combinedChartWrap != null) _combinedChartWrap.Visible = showC;
+
+            int visCount = (showA ? 1 : 0) + (showT ? 1 : 0) + (showC ? 1 : 0);
+            float pct = visCount > 0 ? 100f / visCount : 33.33f;
+
+            _dualChartPanel.SuspendLayout();
+            _dualChartPanel.ColumnStyles.Clear();
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(showA ? SizeType.Percent  : SizeType.Absolute, showA ? pct : 0));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(showT ? SizeType.Percent  : SizeType.Absolute, showT ? pct : 0));
+            _dualChartPanel.ColumnStyles.Add(new ColumnStyle(showC ? SizeType.Percent  : SizeType.Absolute, showC ? pct : 0));
+            _dualChartPanel.ResumeLayout(true);
+        }
+
+        /// <summary>
+        /// 체크박스 CheckedChanged 시 호출 — 해당 sensorType의 칩과 컨트롤을 표시/숨깁니다.
+        /// accel: _pnlAccelAeBar 패널 + DGV 가속도 행
+        /// torque: DGV 토크 행들 (열 show/hide 불필요 — AE만 사용)
+        /// </summary>
+        private void ApplySensorVisibility(string sensorType, bool visible)
+        {
+            // 1) 상태 바 칩 show/hide
+            foreach (var kv in _statusChips)
+            {
+                string chipSensor = kv.Key.Contains("_")
+                    ? kv.Key.Substring(0, kv.Key.IndexOf('_'))
+                    : kv.Key;
+                if (string.Equals(chipSensor, sensorType, StringComparison.OrdinalIgnoreCase))
+                    kv.Value.Visible = visible;
+            }
+
+            // 2) 센서별 컨트롤 show/hide
+            switch (sensorType?.ToLowerInvariant())
+            {
+                case "accel":
+                    if (_pnlAccelAeBar != null) _pnlAccelAeBar.Visible = visible;
+                    // DGV 가속도 행 show/hide
+                    if (_classMatrixDgv != null && _classMatrixAxisRow.TryGetValue(-1, out int accelRow))
+                        _classMatrixDgv.Rows[accelRow].Visible = visible;
+                    break;
+                case "torque":
+                    // DGV 토크 행들 (전역 + per-axis) show/hide
+                    if (_classMatrixDgv != null)
+                    {
+                        if (_classMatrixAxisRow.TryGetValue(-10, out int tGlobalRow))
+                            _classMatrixDgv.Rows[tGlobalRow].Visible = visible;
+                        foreach (var kv in _classMatrixAxisRow)
+                        {
+                            if (kv.Key >= 0)
+                                _classMatrixDgv.Rows[kv.Value].Visible = visible;
+                        }
+                    }
+                    break;
+                case "combined":
+                    // DGV 결합 행 (key >= 100) show/hide
+                    if (_classMatrixDgv != null)
+                    {
+                        foreach (var kv in _classMatrixAxisRow)
+                        {
+                            if (kv.Key >= 100)
+                                _classMatrixDgv.Rows[kv.Value].Visible = visible;
+                        }
+                    }
+                    break;
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 재학습 트리거
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// ⟳ 재학습 버튼 클릭 — ContextMenu로 학습 모드 선택 후 Airflow DAG 트리거.
+        /// </summary>
+        private void OnRetrainButtonClick(object sender, EventArgs e)
+        {
+            var menu = new ContextMenuStrip();
+
+            void AddItem(string text, string[] modes)
+            {
+                var item = menu.Items.Add(text) as ToolStripMenuItem;
+                if (item == null) return;
+                item.Click += async (s2, e2) => await TriggerRetrainAsync(modes);
+            }
+
+            AddItem("AE 전체 재학습",           new[] { "ae_accel", "ae_torque_global", "ae_torque", "ae_combined_global", "ae_combined" });
+            menu.Items.Add(new ToolStripSeparator());
+            AddItem("가속도 AE 재학습",          new[] { "ae_accel" });
+            AddItem("토크 AE 재학습 (전역+축별)", new[] { "ae_torque_global", "ae_torque" });
+            AddItem("토크 전역 AE 재학습",       new[] { "ae_torque_global" });
+            AddItem("토크 축별 AE 재학습",       new[] { "ae_torque" });
+            AddItem("결합 AE 재학습 (전역+축별)",new[] { "ae_combined_global", "ae_combined" });
+
+            menu.Show(_btnRetrain, new System.Drawing.Point(0, _btnRetrain.Height));
+        }
+
+        /// <summary>
+        /// Airflow DAG 트리거 — train_modes conf를 전달하고 결과를 이벤트 로그에 기록합니다.
+        /// </summary>
+        private async System.Threading.Tasks.Task TriggerRetrainAsync(string[] trainModes)
+        {
+            var s = Services.ServerSettings.Current;
+            string dagId = s.AirflowDagId;
+
+            if (string.IsNullOrWhiteSpace(s.AirflowUrl) || string.IsNullOrWhiteSpace(dagId))
+            {
+                MessageBox.Show(
+                    "Airflow URL 또는 DAG ID가 설정되지 않았습니다.\n환경 설정 > 연결 설정에서 확인하세요.",
+                    "Airflow 설정 없음", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            _btnRetrain.Enabled = false;
+            _btnRetrain.Text    = "⟳ 요청 중…";
+            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] 재학습 트리거: {string.Join(", ", trainModes)}");
+
+            try
+            {
+                var conf = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["train_modes"] = trainModes
+                };
+
+                using (var client = new Services.Core.AirflowClient(s.AirflowUrl, s.AirflowUser, s.AirflowPassword))
+                {
+                    var (ok, runId, error) = await client.TriggerDagAsync(dagId, conf)
+                        .ConfigureAwait(false);
+
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (ok)
+                        {
+                            _lastRetrainRunId = runId;
+                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✓ DAG 트리거 성공  run_id={runId}");
+                        }
+                        else
+                        {
+                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✗ DAG 트리거 실패  {error}");
+                            MessageBox.Show($"DAG 트리거 실패:\n{error}", "오류",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                    AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✗ 재학습 오류  {ex.Message}")));
+            }
+            finally
+            {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke(new Action(() =>
+                    {
+                        _btnRetrain.Enabled = true;
+                        _btnRetrain.Text    = "⟳ 재학습";
+                    }));
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>Teaching Sequence 한 회차 완료 → 설비 사용률(cycles) 카드 갱신</summary>
+        private void OnLoopCompleted(int count)
+        {
+            cycles = count;
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke(new Action(() =>
+            {
+                cardCycles.ValueText = cycles + " 회";
+            }));
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 실시간 분류 현황 매트릭스
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// 실시간 이상탐지 현황 패널을 생성합니다. (행=센서, 열=AE 점수/판정)
+        /// </summary>
+        private Panel BuildClassMatrixPanel()
+        {
+            var outer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 4) };
+
+            var hdr = new Label
+            {
+                Text = "실시간 이상탐지 현황  ( AE: 가속도·토크 이상탐지 점수/판정 )",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                Dock = DockStyle.Top, Height = 22,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, 0, 0, 0)
+            };
+
+            // ── 좌/우 분할: 60% AE 매트릭스 / 40% 이벤트 카운트 표 ──────────
+            var tbl = new TableLayoutPanel
+            {
+                Dock        = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount    = 1,
+                Margin      = Padding.Empty,
+                Padding     = Padding.Empty
+            };
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60f));
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40f));
+            tbl.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            // ── 좌: AE 이상탐지 매트릭스 DGV ─────────────────────────────────
+            _classMatrixDgv = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                AutoGenerateColumns = false,
+                EnableHeadersVisualStyles = false,
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 22,
+                BackgroundColor = SystemColors.Window,
+                BorderStyle = BorderStyle.None,
+                GridColor = Color.FromArgb(220, 220, 225),
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    Font = new Font("Segoe UI", 8.5f),
+                    Alignment = DataGridViewContentAlignment.MiddleCenter
+                },
+                ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    Font = new Font("Segoe UI", 8f, FontStyle.Bold),
+                    BackColor = Color.FromArgb(50, 50, 65),
+                    ForeColor = Color.White,
+                    Alignment = DataGridViewContentAlignment.MiddleCenter
+                }
+            };
+            _classMatrixDgv.RowTemplate.Height = 24;
+
+            // col 0: 센서 레이블 ("가속도", "토크 전역", "Ax0"…)
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "Axis",    HeaderText = "센서",    Width = 72, MinimumWidth = 64, ReadOnly = true });
+            // col 1-2: AE 점수/판정 (가속도·토크 공용)
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TScore",  HeaderText = "AE 점수", Width = 62, MinimumWidth = 58, ReadOnly = true,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0.000", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TState",  HeaderText = "판정",   Width = 68, MinimumWidth = 58, ReadOnly = true,
+                  AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+            // col 3-6: CLS 열 (현재 미사용 — 숨김)
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TCLS",    HeaderText = "토크 결함", Width = 68, MinimumWidth = 60, ReadOnly = true, Visible = false });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "TCLSC",   HeaderText = "신뢰도",   Width = 42, MinimumWidth = 38, ReadOnly = true, Visible = false,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "CCLS",    HeaderText = "결합 결함", Width = 68, MinimumWidth = 60, ReadOnly = true, Visible = false });
+            _classMatrixDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "CCLSC",   HeaderText = "신뢰도",   Width = 42, MinimumWidth = 38, ReadOnly = true, Visible = false,
+                  DefaultCellStyle = new DataGridViewCellStyle { Format = "0%", Alignment = DataGridViewContentAlignment.MiddleCenter } });
+
+            _classMatrixDgv.CellFormatting += ClassMatrixDgv_CellFormatting;
+            tbl.Controls.Add(_classMatrixDgv, 0, 0);
+
+            // ── 우: 이벤트 카운트 표 ─────────────────────────────────────────
+            var dgvHeaderStyle = new DataGridViewCellStyle
+            {
+                Font      = new Font("Segoe UI", 8f, FontStyle.Bold),
+                BackColor = Color.FromArgb(50, 50, 65),
+                ForeColor = Color.White,
+                Alignment = DataGridViewContentAlignment.MiddleCenter
+            };
+            _eventCountDgv = new DataGridView
+            {
+                Dock        = DockStyle.Fill,
+                ReadOnly    = true,
+                AllowUserToAddRows    = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                RowHeadersVisible   = false,
+                SelectionMode       = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect         = false,
+                AutoGenerateColumns = false,
+                EnableHeadersVisualStyles        = false,
+                ColumnHeadersHeightSizeMode      = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight              = 22,
+                BackgroundColor                  = SystemColors.Window,
+                BorderStyle                      = BorderStyle.None,
+                GridColor                        = Color.FromArgb(220, 220, 225),
+                DefaultCellStyle                 = new DataGridViewCellStyle
+                {
+                    Font      = new Font("Segoe UI", 8.5f),
+                    Alignment = DataGridViewContentAlignment.MiddleCenter
+                },
+                ColumnHeadersDefaultCellStyle = dgvHeaderStyle
+            };
+            _eventCountDgv.RowTemplate.Height = 24;
+            _eventCountDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "EvtAxis",   HeaderText = "축",       Width = 60, MinimumWidth = 52, ReadOnly = true,
+                  DefaultCellStyle   = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleLeft, Padding = new Padding(4,0,0,0) } });
+            _eventCountDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "EvtDanger", HeaderText = "🔴 위험",  Width = 50, MinimumWidth = 44, ReadOnly = true,
+                  DefaultCellStyle   = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter } });
+            _eventCountDgv.Columns.Add(new DataGridViewTextBoxColumn
+                { Name = "EvtWarn",   HeaderText = "🟡 경고",  AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 44, ReadOnly = true,
+                  DefaultCellStyle   = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter } });
+
+            _eventCountDgv.CellFormatting += EventCountDgv_CellFormatting;
+            tbl.Controls.Add(_eventCountDgv, 1, 0);
+
+            outer.Controls.Add(tbl);
+            outer.Controls.Add(hdr);   // Top — 최상단 헤더
+            return outer;
+        }
+
+        /// <summary>이벤트 카운트 DGV 셀 색상 (위험=연빨강, 경고=연노랑, 0=흰색)</summary>
+        private void EventCountDgv_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.ColumnIndex == 1) // 위험
+            {
+                int v = 0;
+                int.TryParse(e.Value?.ToString(), out v);
+                e.CellStyle.BackColor = v > 0 ? Color.FromArgb(255, 220, 220) : Color.FromArgb(245, 245, 248);
+                e.CellStyle.ForeColor = v > 0 ? Color.FromArgb(160, 20, 20)   : Color.Gray;
+            }
+            else if (e.ColumnIndex == 2) // 경고
+            {
+                int v = 0;
+                int.TryParse(e.Value?.ToString(), out v);
+                e.CellStyle.BackColor = v > 0 ? Color.FromArgb(255, 248, 210) : Color.FromArgb(245, 245, 248);
+                e.CellStyle.ForeColor = v > 0 ? Color.FromArgb(150, 100, 0)   : Color.Gray;
+            }
+        }
+
+        /// <summary>
+        /// 이벤트 카운트 표를 업데이트합니다. (UI 스레드에서만 호출)
+        /// axisKey: -1=가속도, -10=토크 전역, 0~N=토크 Ax{N}, 100~=결합 Ax{N-100}
+        /// </summary>
+        private void UpdateEventCount(int axisKey, bool isDanger)
+        {
+            if (_eventCountDgv == null) return;
+
+            if (!_warnEventCounts.ContainsKey(axisKey))    _warnEventCounts[axisKey]   = 0;
+            if (!_dangerEventCounts.ContainsKey(axisKey))  _dangerEventCounts[axisKey] = 0;
+
+            if (isDanger) _dangerEventCounts[axisKey]++;
+            else          _warnEventCounts[axisKey]++;
+
+            // 행 확보
+            if (!_eventCountRowIdx.TryGetValue(axisKey, out int rowIdx))
+            {
+                rowIdx = _eventCountDgv.Rows.Add();
+                string axLabel = axisKey == -1   ? "가속도"
+                               : axisKey == -10  ? "토크 전역"
+                               : axisKey >= 100  ? $"결합 Ax{axisKey - 100}"
+                               : $"Ax{axisKey}";
+                _eventCountDgv.Rows[rowIdx].Cells[0].Value = axLabel;
+                _eventCountDgv.Rows[rowIdx].Cells[1].Value = 0;
+                _eventCountDgv.Rows[rowIdx].Cells[2].Value = 0;
+                _eventCountRowIdx[axisKey] = rowIdx;
+            }
+
+            _eventCountDgv.Rows[rowIdx].Cells[1].Value = _dangerEventCounts[axisKey];
+            _eventCountDgv.Rows[rowIdx].Cells[2].Value = _warnEventCounts[axisKey];
+            SortEventCountByCount();
+        }
+
+        /// <summary>
+        /// _eventCountDgv 행을 위험 건수 → 경고 건수 내림차순으로 재정렬합니다 (UI 스레드에서만 호출).
+        /// </summary>
+        private void SortEventCountByCount()
+        {
+            if (_eventCountDgv == null || _eventCountRowIdx.Count == 0) return;
+
+            // 1) 스냅샷
+            var items = new List<(int axisKey, int danger, int warn, object label)>();
+            foreach (var kv in _eventCountRowIdx)
+            {
+                var r = _eventCountDgv.Rows[kv.Value];
+                int d = 0, w = 0;
+                int.TryParse(r.Cells[1].Value?.ToString(), out d);
+                int.TryParse(r.Cells[2].Value?.ToString(), out w);
+                items.Add((kv.Key, d, w, r.Cells[0].Value));
+            }
+
+            // 2) 위험 내림차순 → 경고 내림차순
+            items.Sort((a, b) =>
+            {
+                int cmp = b.danger.CompareTo(a.danger);
+                return cmp != 0 ? cmp : b.warn.CompareTo(a.warn);
+            });
+
+            // 3) 기존 슬롯에 덮어쓰기
+            var slots = _eventCountRowIdx.Values.OrderBy(x => x).ToList();
+            for (int i = 0; i < items.Count; i++)
+            {
+                int slot = slots[i];
+                var it   = items[i];
+                _eventCountDgv.Rows[slot].Cells[0].Value = it.label;
+                _eventCountDgv.Rows[slot].Cells[1].Value = it.danger;
+                _eventCountDgv.Rows[slot].Cells[2].Value = it.warn;
+                _eventCountRowIdx[it.axisKey] = slot;
+            }
+            _eventCountDgv.Invalidate();
+        }
+
+        /// <summary>
+        /// 실시간 분류 현황 매트릭스 셀 색상 (점수 기반 3단계)
+        /// </summary>
+        private void ClassMatrixDgv_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+
+            // ── AE 토크 이상탐지 열 색상 (점수 기반 3단계) ─────────────────
+            if (e.ColumnIndex == CMG_COL_TS || e.ColumnIndex == CMG_COL_TSTATE)
+            {
+                double score = 0;
+                var cell = _classMatrixDgv.Rows[e.RowIndex].Cells[CMG_COL_TS];
+                if (cell.Value != null)
+                    double.TryParse(cell.Value.ToString(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out score);
+
+                Color bg, fg;
+                if (score <= 0)                            { bg = Color.FromArgb(245,245,248); fg = Color.Gray; }
+                else if (score >= DangerMultiplier)        { bg = Color.FromArgb(255,220,220); fg = Color.FromArgb(160,20,20); }
+                else if (score >= WarnMultiplier)          { bg = Color.FromArgb(255,248,210); fg = Color.FromArgb(150,100,0); }
+                else                                       { bg = Color.FromArgb(220,248,228); fg = Color.FromArgb(20,110,50); }
+
+                e.CellStyle.BackColor          = bg;
+                e.CellStyle.ForeColor          = fg;
+                e.CellStyle.SelectionBackColor = bg;
+                e.CellStyle.SelectionForeColor = fg;
+                return;
+            }
+
+            // ── CLS 결함진단 열 색상 (결함명 기반) ──────────────────────────
+            if (e.ColumnIndex == CMG_COL_TCLS  || e.ColumnIndex == CMG_COL_TCLSCONF ||
+                e.ColumnIndex == CMG_COL_CCLS  || e.ColumnIndex == CMG_COL_CCLSCONF)
+            {
+                int nameCol = (e.ColumnIndex == CMG_COL_TCLS || e.ColumnIndex == CMG_COL_TCLSCONF)
+                              ? CMG_COL_TCLS
+                              : CMG_COL_CCLS;
+
+                string cls = _classMatrixDgv.Rows[e.RowIndex].Cells[nameCol].Value?.ToString() ?? "";
+
+                Color bg, fg;
+                if (string.IsNullOrEmpty(cls) || cls == "-" || cls == "모델없음")
+                    { bg = Color.FromArgb(245,245,248); fg = Color.Gray; }
+                else if (string.Equals(cls, "normal", StringComparison.OrdinalIgnoreCase))
+                    { bg = Color.FromArgb(220,248,228); fg = Color.FromArgb(20,110,50); }
+                else
+                    { bg = Color.FromArgb(255,235,200); fg = Color.FromArgb(140,70,0); }  // 결함 = 주황
+
+                e.CellStyle.BackColor          = bg;
+                e.CellStyle.ForeColor          = fg;
+                e.CellStyle.SelectionBackColor = bg;
+                e.CellStyle.SelectionForeColor = fg;
+            }
+        }
+
+        /// <summary>
+        /// 실시간 이상탐지 현황 매트릭스 갱신 (UI 스레드에서만 호출).
+        /// axis 규약: -1=가속도 전역, -10=토크 전역, 0~N=토크 Ax{N}, 100~=결합 Ax{N-100}
+        /// </summary>
+        private void UpdateClassMatrix(int axis, double normScore)
+        {
+            if (_classMatrixDgv == null) return;
+
+            // 행 확보
+            if (!_classMatrixAxisRow.TryGetValue(axis, out int rowIdx))
+            {
+                rowIdx = _classMatrixDgv.Rows.Add();
+                // 센서 레이블
+                string axLabel = axis == -1   ? "가속도"
+                               : axis == -10  ? "토크 전역"
+                               : axis >= 100  ? $"결합 Ax{axis - 100}"
+                               : $"Ax{axis}";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_AXIS].Value     = axLabel;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value       = 0.0;
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value   = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TCLSCONF].Value = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLS].Value     = "-";
+                _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_CCLSCONF].Value = "-";
+                _classMatrixAxisRow[axis] = rowIdx;
+            }
+
+            // 상태 텍스트
+            string stateText;
+            if (normScore <= 0)                     stateText = "-";
+            else if (normScore >= DangerMultiplier)  stateText = "🔴 위험";
+            else if (normScore >= WarnMultiplier)    stateText = "🟡 경고";
+            else                                     stateText = "✓ 정상";
+
+            _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TS].Value     = normScore;
+            _classMatrixDgv.Rows[rowIdx].Cells[CMG_COL_TSTATE].Value = stateText;
+
+            // 점수 내림차순 정렬
+            SortClassMatrixByScore();
+        }
+
+        /// <summary>
+        /// _classMatrixDgv 행을 AE 점수 내림차순으로 재정렬합니다 (UI 스레드에서만 호출).
+        /// 기존 행 슬롯에 데이터를 덮어쓰는 방식으로 깜빡임 없이 동작합니다.
+        /// </summary>
+        private void SortClassMatrixByScore()
+        {
+            if (_classMatrixDgv == null || _classMatrixAxisRow.Count == 0) return;
+
+            // 1) 현재 각 axis의 데이터 스냅샷
+            var items = new List<(int axisKey, double score, object label, object state,
+                                   object tcls, object tclsc, object ccls, object cclsc, bool visible)>();
+            foreach (var kv in _classMatrixAxisRow)
+            {
+                var r = _classMatrixDgv.Rows[kv.Value];
+                double score = 0;
+                double.TryParse(r.Cells[CMG_COL_TS].Value?.ToString(),
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out score);
+                items.Add((
+                    kv.Key,
+                    score,
+                    r.Cells[CMG_COL_AXIS].Value,
+                    r.Cells[CMG_COL_TSTATE].Value,
+                    r.Cells[CMG_COL_TCLS].Value,
+                    r.Cells[CMG_COL_TCLSCONF].Value,
+                    r.Cells[CMG_COL_CCLS].Value,
+                    r.Cells[CMG_COL_CCLSCONF].Value,
+                    r.Visible
+                ));
+            }
+
+            // 2) 점수 내림차순 정렬
+            items.Sort((a, b) => b.score.CompareTo(a.score));
+
+            // 3) 기존 행 슬롯 인덱스 목록 (추가된 순서대로)
+            var slots = _classMatrixAxisRow.Values.OrderBy(x => x).ToList();
+
+            // 4) 정렬된 순서대로 셀값 덮어쓰기 & _classMatrixAxisRow 인덱스 갱신
+            for (int i = 0; i < items.Count; i++)
+            {
+                int slot = slots[i];
+                var it   = items[i];
+                var row  = _classMatrixDgv.Rows[slot];
+                row.Cells[CMG_COL_AXIS].Value     = it.label;
+                row.Cells[CMG_COL_TS].Value        = it.score;
+                row.Cells[CMG_COL_TSTATE].Value    = it.state;
+                row.Cells[CMG_COL_TCLS].Value      = it.tcls;
+                row.Cells[CMG_COL_TCLSCONF].Value  = it.tclsc;
+                row.Cells[CMG_COL_CCLS].Value      = it.ccls;
+                row.Cells[CMG_COL_CCLSCONF].Value  = it.cclsc;
+                row.Visible                        = it.visible;
+                _classMatrixAxisRow[it.axisKey]    = slot;
+            }
+            _classMatrixDgv.Invalidate();
+        }
+
+        /// <summary>
+        /// 가속도 전역 AE 결과를 _pnlAccelAeBar 패널에 반영합니다 (UI 스레드에서만 호출).
+        /// </summary>
+        /// <summary>수신된 모델 파일명을 차트 하단 모델 정보 라벨에 반영합니다.</summary>
+        private void UpdateModelInfoLabel(bool isAccel, string modelFile, string clsModelFile = null, bool isCombined = false)
+        {
+            if (string.IsNullOrWhiteSpace(modelFile) && string.IsNullOrWhiteSpace(clsModelFile)) return;
+
+            System.Collections.Generic.HashSet<string> seen;
+            Label lbl;
+            if (isCombined)      { seen = _seenCombinedModels; lbl = _lblCombinedModelInfo; }
+            else if (isAccel)    { seen = _seenAccelModels;    lbl = _lblAccelModelInfo;    }
+            else                 { seen = _seenTorqueModels;   lbl = _lblTorqueModelInfo;   }
+            if (lbl == null || lbl.IsDisposed) return;
+
+            bool changed = false;
+            string fn = System.IO.Path.GetFileName(modelFile);
+            if (!string.IsNullOrEmpty(fn) && seen.Add(fn)) changed = true;
+
+            if (!string.IsNullOrEmpty(clsModelFile))
+            {
+                string cfn = System.IO.Path.GetFileName(clsModelFile);
+                if (!string.IsNullOrEmpty(cfn) && seen.Add("cls:" + cfn)) changed = true;
+            }
+
+            if (!changed) return;
+
+            // AE 모델: 파일명 목록, CLS 모델: "cls:" prefix 제거 후 표시
+            var aeFiles  = new System.Collections.Generic.List<string>();
+            var clsFiles = new System.Collections.Generic.List<string>();
+            foreach (var s in seen)
+            {
+                if (s.StartsWith("cls:")) clsFiles.Add(s.Substring(4));
+                else aeFiles.Add(s);
+            }
+
+            var parts = new System.Collections.Generic.List<string>();
+            if (aeFiles.Count  > 0) parts.Add("AE: "  + string.Join(", ", aeFiles));
+            if (clsFiles.Count > 0) parts.Add("CLS: " + string.Join(", ", clsFiles));
+            lbl.Text = "모델  " + string.Join("  |  ", parts);
+        }
+
+        private void UpdateAccelAeDisplay(double normScore)
+        {
+            _accelAeNormScore = normScore;
+
+            string stateText;
+            Color  stateColor;
+            if (normScore <= 0)
+            {
+                stateText  = "—";
+                stateColor = Color.Gray;
+            }
+            else if (normScore >= DangerMultiplier)
+            {
+                stateText  = "🔴 위험";
+                stateColor = Color.FromArgb(160, 20, 20);
+            }
+            else if (normScore >= WarnMultiplier)
+            {
+                stateText  = "🟡 경고";
+                stateColor = Color.FromArgb(150, 100, 0);
+            }
+            else
+            {
+                stateText  = "✓ 정상";
+                stateColor = Color.FromArgb(20, 110, 50);
+            }
+
+            if (_lblAccelAeScore != null) _lblAccelAeScore.Text      = normScore > 0 ? $"{normScore:F3}" : "—";
+            if (_lblAccelAeState != null)
+            {
+                _lblAccelAeState.Text      = stateText;
+                _lblAccelAeState.ForeColor = stateColor;
+            }
+
+            // 패널 배경색 갱신
+            if (_pnlAccelAeBar != null)
+            {
+                _pnlAccelAeBar.BackColor = normScore <= 0
+                    ? Color.FromArgb(245, 245, 248)
+                    : normScore >= DangerMultiplier ? Color.FromArgb(255, 220, 220)
+                    : normScore >= WarnMultiplier   ? Color.FromArgb(255, 248, 210)
+                    : Color.FromArgb(220, 248, 228);
+            }
         }
 
         private static bool HasYColumns(string[] headers, OnnxAxisModel om, int axis)
@@ -4489,15 +6130,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             public string DeltaText { get { return _delta.Text; } set { _delta.Text = value; } }
             public string Footnote { get { return _foot.Text; } set { _foot.Text = value; } }
 
-            private readonly Label _title = new Label { Font = new Font("Segoe UI", 12, FontStyle.Bold) };
-            private readonly Label _value = new Label { Font = new Font("Segoe UI", 22, FontStyle.Bold) };
-            private readonly Label _delta = new Label { Font = new Font("Segoe UI", 10) };
-            private readonly Label _foot = new Label { Font = new Font("Segoe UI", 9), ForeColor = Color.Gray };
+            private readonly Label _title = new Label { Font = new Font("Segoe UI", 10, FontStyle.Bold) };
+            private readonly Label _value = new Label { Font = new Font("Segoe UI", 20, FontStyle.Bold) };
+            private readonly Label _delta = new Label { Font = new Font("Segoe UI", 9) };
+            private readonly Label _foot = new Label { Font = new Font("Segoe UI", 8), ForeColor = Color.Gray };
 
             public KpiCard()
             {
                 this.DoubleBuffered = true;
-                this.Padding = new Padding(16);     // 카드 내부 여백
+                this.Padding = new Padding(10, 8, 10, 8);   // 카드 내부 여백 (좌우10, 상하8)
                 this.BackColor = Color.White;
 
                 // ---- 내부 레이아웃: 행을 퍼센트 비율로 꽉 채움 ----
@@ -4528,8 +6169,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _value.Dock = DockStyle.Fill;
                 _value.Margin = new Padding(0, 2, 0, 2);
                 _value.TextAlign = ContentAlignment.MiddleLeft;
-                // 보기 좋은 기본 폰트 (필요 시 조정)
-                if (_value.Font.Size < 14) _value.Font = new Font(_value.Font.FontFamily, 16, FontStyle.Bold);
 
                 _delta.AutoSize = false;
                 _delta.Dock = DockStyle.Fill;
@@ -4559,9 +6198,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 base.OnPaint(e);
                 Graphics g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                Rectangle shadowRect = this.ClientRectangle; shadowRect.Inflate(-2, -2); shadowRect.Offset(2, 3);
-                using (System.Drawing.Drawing2D.GraphicsPath shadowPath = Rounded(shadowRect, 16))
-                using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(40, 0, 0, 0)))
+                Rectangle shadowRect = this.ClientRectangle; shadowRect.Inflate(-3, -4); shadowRect.Offset(2, 2);
+                using (System.Drawing.Drawing2D.GraphicsPath shadowPath = Rounded(shadowRect, 14))
+                using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(35, 0, 0, 0)))
                 { g.FillPath(shadowBrush, shadowPath); }
                 Rectangle rect = this.ClientRectangle; rect.Inflate(-4, -6);
                 using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(rect, 16))

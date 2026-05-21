@@ -1,0 +1,355 @@
+"""
+train_model.py - PHM 대시보드용 ML 모델 학습 및 ONNX 변환 스크립트
+
+사용법:
+    python train_model.py --params <params_json_path>
+
+params JSON 구조:
+{
+    "csv": "features.csv 경로",
+    "output": "model.onnx 출력 경로",
+    "session": "AD" | "FD",
+    "model": "knn" | "isoforest" | "ocsvm" | "svm" | "rf" | "gbm" | "mlp",
+    "k": 5,
+    "standardize": true,
+    "threshold": 0.0,       // AD 전용 임계값
+    "features": ["feat1", "feat2", ...],
+    "class_names": ["Normal", "Anomaly"]  // or FD 클래스명
+}
+
+결과: stdout에 JSON 출력 (accuracy, info 필드)
+      output 경로에 ONNX 파일 생성
+
+의존성: 첫 실행 시 자동 설치됨 (pip 필요)
+    scikit-learn skl2onnx onnx numpy
+"""
+
+import sys
+import subprocess
+
+
+def _ensure_packages():
+    """필요한 패키지가 없으면 자동으로 pip 설치합니다."""
+    REQUIRED = [
+        ("numpy", "numpy"),
+        ("sklearn", "scikit-learn"),
+        ("skl2onnx", "skl2onnx"),
+        ("onnx", "onnx"),
+    ]
+    missing = []
+    for import_name, pip_name in REQUIRED:
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(pip_name)
+
+    if missing:
+        print(f"[setup] 패키지 자동 설치: {', '.join(missing)}", file=sys.stderr)
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--quiet"] + missing,
+                stdout=subprocess.DEVNULL,
+            )
+            print("[setup] 설치 완료", file=sys.stderr)
+        except subprocess.CalledProcessError as e:
+            print(f"[setup] 설치 실패: {e}", file=sys.stderr)
+            sys.exit(1)
+
+
+_ensure_packages()
+
+import argparse
+import json
+import os
+import numpy as np
+import csv
+
+
+def load_params(params_path: str) -> dict:
+    # utf-8-sig: BOM 포함/미포함 모두 처리
+    with open(params_path, "r", encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
+def load_csv(csv_path: str, feature_keys: list):
+    """CSV에서 특징 데이터와 레이블을 읽습니다."""
+    X, labels = [], []
+    with open(csv_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                x = [float(row[k]) for k in feature_keys]
+                labels.append(row.get("Label", "").strip())
+                X.append(x)
+            except (KeyError, ValueError):
+                continue
+    return np.array(X, dtype=np.float32), labels
+
+
+def encode_labels_ad(labels):
+    """AD: Anomaly=1, 그 외=0"""
+    return np.array([1 if l.lower() == "anomaly" else 0 for l in labels], dtype=np.int64)
+
+
+def encode_labels_fd(labels, class_names: list):
+    """FD: 클래스명 → 정수 인덱스"""
+    name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
+    result = []
+    for l in labels:
+        idx = name_to_id.get(l.lower(), len(class_names))
+        result.append(idx)
+    return np.array(result, dtype=np.int64)
+
+
+def build_pipeline(model_key: str, session: str, params: dict):
+    """sklearn 파이프라인을 구성합니다."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    scaler = StandardScaler() if params.get("standardize", True) else None
+    k = int(params.get("k", 5))
+
+    estimator = None
+    if session == "AD":
+        if model_key == "knn":
+            from sklearn.neighbors import LocalOutlierFactor
+            # LOF는 novelty=True로 AD 사용 (score_samples 지원)
+            estimator = LocalOutlierFactor(n_neighbors=k, novelty=True)
+        elif model_key == "isoforest":
+            from sklearn.ensemble import IsolationForest
+            estimator = IsolationForest(n_estimators=100, contamination=0.1, random_state=42)
+        elif model_key == "ocsvm":
+            from sklearn.svm import OneClassSVM
+            estimator = OneClassSVM(nu=0.1, kernel="rbf", gamma="scale")
+        else:
+            from sklearn.ensemble import IsolationForest
+            estimator = IsolationForest(n_estimators=100, random_state=42)
+    else:  # FD
+        if model_key == "knn":
+            from sklearn.neighbors import KNeighborsClassifier
+            estimator = KNeighborsClassifier(n_neighbors=k)
+        elif model_key == "svm":
+            from sklearn.svm import SVC
+            estimator = SVC(kernel="rbf", probability=True, random_state=42)
+        elif model_key == "rf":
+            from sklearn.ensemble import RandomForestClassifier
+            estimator = RandomForestClassifier(n_estimators=100, random_state=42)
+        elif model_key == "gbm":
+            from sklearn.ensemble import GradientBoostingClassifier
+            estimator = GradientBoostingClassifier(n_estimators=100, random_state=42)
+        elif model_key == "mlp":
+            from sklearn.neural_network import MLPClassifier
+            estimator = MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, random_state=42)
+        else:
+            from sklearn.ensemble import RandomForestClassifier
+            estimator = RandomForestClassifier(n_estimators=100, random_state=42)
+
+    if scaler is not None:
+        return Pipeline([("scaler", scaler), ("model", estimator)])
+    else:
+        return Pipeline([("model", estimator)])
+
+
+def to_onnx(pipeline, n_features: int, output_path: str, session: str, class_names: list):
+    """sklearn 파이프라인을 ONNX로 변환합니다."""
+    from skl2onnx import convert_sklearn
+    from skl2onnx.common.data_types import FloatTensorType
+
+    initial_type = [("float_input", FloatTensorType([None, n_features]))]
+
+    # AD 모델은 이진 분류 래퍼 적용
+    if session == "AD":
+        model_to_convert = pipeline
+    else:
+        model_to_convert = pipeline
+
+    options = {}
+    # SVC, RF 등 확률 출력 옵션
+    from sklearn.svm import SVC
+    from sklearn.neighbors import KNeighborsClassifier
+    final_est = pipeline.steps[-1][1]
+    if hasattr(final_est, "predict_proba"):
+        options = {type(final_est): {"zipmap": False}}
+
+    # target_opset: ai.onnx.ml 3 은 skl2onnx 구버전(1.14 이하)과 호환
+    # 기본 onnx opset 은 15, ml 도메인만 3으로 고정
+    onnx_model = convert_sklearn(
+        model_to_convert,
+        initial_types=initial_type,
+        options=options,
+        target_opset={"": 15, "ai.onnx.ml": 3},
+    )
+
+    with open(output_path, "wb") as f:
+        f.write(onnx_model.SerializeToString())
+
+
+def main():
+    parser = argparse.ArgumentParser(description="PHM 모델 학습 및 ONNX 변환")
+    parser.add_argument("--params", required=True, help="파라미터 JSON 파일 경로")
+    args = parser.parse_args()
+
+    params = load_params(args.params)
+
+    csv_path = params["csv"]
+    output_path = params["output"]
+    session = params.get("session", "AD").upper()
+    model_key = params.get("model", "knn").lower()
+    feature_keys = params.get("features", [])
+    class_names = params.get("class_names", ["Normal", "Anomaly"])
+
+    if not feature_keys:
+        print(json.dumps({"error": "features 목록이 비어 있습니다."}))
+        sys.exit(1)
+
+    # 데이터 로드
+    X, labels = load_csv(csv_path, feature_keys)
+    if len(X) == 0:
+        print(json.dumps({"error": "CSV에서 유효한 샘플을 읽지 못했습니다."}))
+        sys.exit(1)
+
+    # 레이블 인코딩
+    if session == "AD":
+        y = encode_labels_ad(labels)
+        # AD: 정상(0)만 학습
+        normal_mask = y == 0
+        X_train = X[normal_mask]
+        if len(X_train) == 0:
+            print(json.dumps({"error": "정상 레이블 샘플이 없습니다."}))
+            sys.exit(1)
+        y_train = y[normal_mask]
+    else:
+        y = encode_labels_fd(labels, class_names)
+        X_train = X
+        y_train = y
+
+    n_features = X_train.shape[1]
+
+    # 파이프라인 구성 및 학습
+    pipeline = build_pipeline(model_key, session, params)
+
+    # AD/FD 공통: score_threshold 계산용 변수
+    score_threshold = None  # decision_function 기반 임계값 (C# rawScore = -decision_function)
+
+    if session == "AD":
+        # AD 모델은 정상 데이터만으로 학습
+        pipeline.fit(X_train)
+        try:
+            preds = pipeline.predict(X_train)
+            n_normal = int(np.sum(preds == 1))
+            n_total = len(X_train)
+            normal_rate = n_normal / n_total if n_total > 0 else 0.0
+            accuracy = normal_rate
+            info = (f"학습={n_total} 정상샘플 | "
+                    f"정상 분류율={n_normal}/{n_total} ({100*normal_rate:.1f}%)")
+        except Exception:
+            accuracy = None
+            info = f"학습={len(X_train)} 정상샘플"
+
+        # decision_function으로 score_threshold 계산
+        # C#에서는 rawScore = -decision_function(x) 로 부호 반전하므로
+        # 정상 데이터의 -decision_function 값 중 상위 5% 지점을 임계값으로 사용
+        # (= 95%의 정상 샘플이 threshold 이하 → 정상 판정)
+        try:
+            df_scores = pipeline.decision_function(X_train)  # shape (N,)
+            # 부호 반전: rawScore = -df
+            raw_scores = -df_scores
+            score_threshold = float(np.percentile(raw_scores, 95))
+            info += f" | score_thr={score_threshold:.4f}"
+        except Exception:
+            pass  # decision_function 미지원 모델은 label 기반으로만 동작
+    else:
+        pipeline.fit(X_train, y_train)
+        pred = pipeline.predict(X_train)
+        accuracy = float(np.mean(pred == y_train))
+        info = f"학습={len(X_train)} 샘플, 클래스={len(set(y_train))}"
+
+    # ONNX 변환
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    to_onnx(pipeline, n_features, output_path, session, class_names)
+
+    # _meta.json 사이드카 저장 (DashboardForm에서 SKL 모델 메타데이터 읽기용)
+    meta = {
+        "session": session,
+        "model_type": model_key,
+        "features": feature_keys,
+        "class_names": class_names,
+        "y_column": params.get("y_column", ""),
+        "threshold": params.get("threshold", 0.0),      # C# kNN 임계값
+        "score_threshold": score_threshold,              # decision_function 기반 임계값 (None이면 label만 사용)
+        "n_features": n_features,
+        "k": params.get("k", 5),
+        "standardize": params.get("standardize", True),  # build_pipeline 기본값과 동일하게 True
+    }
+
+    # knn 타입 AD: C# kNN 거리 스코어와 일치시키기 위해 학습 벡터 저장
+    # (Dashboard에서 SignalFeatures.ScoreKnn()으로 동일한 스코어 계산)
+    if session == "AD" and model_key == "knn":
+        try:
+            scaler = pipeline.named_steps.get("scaler")
+            if scaler is not None:
+                meta["mean"] = scaler.mean_.tolist()
+                meta["std"] = scaler.scale_.tolist()
+            else:
+                meta["mean"] = None
+                meta["std"] = None
+            # 학습 벡터 저장 (표준화 전 원본 - C# ScoreKnn이 내부적으로 표준화 처리)
+            meta["train_vectors"] = X_train.tolist()
+        except Exception as e:
+            pass  # 저장 실패해도 ONNX label 기반으로 동작
+    meta_path = os.path.splitext(output_path)[0] + "_meta.json"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    # ── MLflow 로깅 (선택적 — mlflow 미설치 또는 URI 미설정이면 건너뜀) ──────
+    _try_log_mlflow(params, model_key, session, feature_keys, class_names,
+                    n_features, accuracy, score_threshold, output_path, meta_path)
+
+    result = {"info": info}
+    if accuracy is not None:
+        result["accuracy"] = accuracy
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def _try_log_mlflow(params, model_key, session, feature_keys, class_names,
+                    n_features, accuracy, score_threshold, output_path, meta_path):
+    """MLflow 실험 로깅. mlflow 미설치 또는 tracking URI 미설정이면 조용히 건너뜁니다."""
+    tracking_uri = params.get("mlflow_tracking_uri", "") or os.environ.get("MLFLOW_TRACKING_URI", "")
+    if not tracking_uri:
+        return
+    try:
+        import mlflow
+
+        mlflow.set_tracking_uri(tracking_uri)
+        experiment_name = params.get("mlflow_experiment", "PHM-SKL")
+        mlflow.set_experiment(experiment_name)
+
+        with mlflow.start_run(run_name=f"{session}-{model_key}"):
+            # 파라미터
+            mlflow.log_params({
+                "session":      session,
+                "model":        model_key,
+                "n_features":   n_features,
+                "standardize":  params.get("standardize", True),
+                "k":            params.get("k", 5),
+                "class_names":  ",".join(class_names),
+                "features":     ",".join(feature_keys),
+            })
+            # 메트릭
+            if accuracy is not None:
+                mlflow.log_metric("train_accuracy", float(accuracy))
+            if score_threshold is not None:
+                mlflow.log_metric("score_threshold", float(score_threshold))
+
+            # 아티팩트
+            mlflow.log_artifact(output_path, artifact_path="model")
+            if os.path.exists(meta_path):
+                mlflow.log_artifact(meta_path, artifact_path="model")
+
+            print(f"[MLflow] run logged → {tracking_uri} / {experiment_name}", file=sys.stderr)
+    except Exception as e:
+        print(f"[MLflow] 로깅 건너뜀: {e}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

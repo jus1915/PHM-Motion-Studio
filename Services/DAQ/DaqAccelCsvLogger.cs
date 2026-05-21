@@ -26,7 +26,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private string _aiRange = "ai0:2";      // 각 모듈 3채널(X/Y/Z)
         private double _rate = 0;         // 로깅 샘플레이트
         private static double AccelRate => 1.0 / AppState.GetPeriodForColumn("x");
-        private int _readBlock = 2048;       // 채널당 블록 크기
+        private int _readBlock = 256;        // 채널당 블록 크기 (256@1kHz = 256ms, 부드러운 스트리밍)
         private double _minG = -5, _maxG = 5;       // 측정 범위 (g)
         private double _iepeCurrentAmps = 0.004;     // IEPE excitation current (A), typical 4 mA
 
@@ -37,6 +37,16 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public double MinG { get { return _minG; } set { _minG = value; } }
         public double MaxG { get { return _maxG; } set { _maxG = value; } }
         public double IepeCurrentAmps { get { return _iepeCurrentAmps; } set { _iepeCurrentAmps = value > 0 ? value : 0.004; } }
+        /// <summary>異??몃뜳?ㅻ? 諛쏆븘 "Idle" ?먮뒗 "Pos"瑜?諛섑솚. null?대㈃ "Pos"濡?媛꾩＜.</summary>
+        public Func<int, string> GetAxisOperation { get; set; }
+        /// <summary>Op_Ax{n} 而щ읆???앹꽦??異??몃뜳??紐⑸줉. null?대㈃ Op 而щ읆 ?놁쓬.</summary>
+        public int[] LoggedAxes { get; set; }
+
+        /// <summary>
+        /// true 이면 CSV 파일 기록을 생략합니다 (BlockReceived 콜백은 계속 동작).
+        /// CombinedCsvLogger 와 함께 사용 시 true 로 설정하면 중복 파일 생성을 방지합니다.
+        /// </summary>
+        public bool SuppressCsvWrite { get; set; } = false;
 
         // ===== 민감도/오프셋 (mV/g, g) =====
         private class AxisSens { public double X; public double Y; public double Z; }
@@ -160,6 +170,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private AsyncCallback _cb;
         private bool _running;
         private long _samples;
+        private DateTime _startUtc;         // 첫 블록 기준 절대 시작 시간
+        private bool _startUtcSet;
 
         private string[] _csvPathByMod;
         private FileStream[] _fsByMod;
@@ -169,6 +181,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
         public bool IsRunning { get { return _running; } }
         public string[] CsvPathByModule { get { return _csvPathByMod; } }
         public string[] LastCsvPaths { get { return _lastCsvPathByMod; } }
+
 
         public bool Start(int[] axisIndices, string filePath, string filename, uint durationMs = 5000)
         {
@@ -222,6 +235,16 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 for (int m = 0; m < modCount; m++)
                 {
+                    // SuppressCsvWrite=true 이면 파일 자체를 생성하지 않음
+                    if (SuppressCsvWrite)
+                    {
+                        _csvPathByMod[m]     = null;
+                        _lastCsvPathByMod[m] = null;
+                        _fsByMod[m]          = null;
+                        _swByMod[m]          = null;
+                        continue;
+                    }
+
                     var moduleDir = Path.Combine(dir, _modules[m]);
                     Directory.CreateDirectory(moduleDir);
                     var fileName = baseName + "_Accel.csv";
@@ -236,10 +259,12 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         bufferSize: 64 * 1024,
                         options: FileOptions.SequentialScan);
                     var bs = new BufferedStream(_fsByMod[m], 64 * 1024);
-                    // UTF-8, 4KB 내부 버퍼
-                    _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = false };
+                    _swByMod[m] = new StreamWriter(bs, new UTF8Encoding(false), 4096) { AutoFlush = true };
                     // 헤더
-                    _swByMod[m].WriteLine("time_s,x,y,z");
+                    var _hdr = new System.Text.StringBuilder("time_s,x,y,z");
+                    if (LoggedAxes != null)
+                        foreach (int _ax in LoggedAxes) _hdr.Append($",Op_Ax{_ax}");
+                    _swByMod[m].WriteLine(_hdr.ToString());
                 }
 
                 _reader = new AnalogMultiChannelReader(_aiTask.Stream)
@@ -251,6 +276,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 _aiTask.Start();
                 _samples = 0;
+                _startUtcSet = false;
 
 
                 _running = true;
@@ -340,6 +366,9 @@ namespace PHM_Project_DockPanel.Services.DAQ
             }
         }
 
+        // ===== 외부 소비자 콜백 (module, block[channels,samples], timestampUtc) =====
+        public Action<string, double[,], DateTime> BlockReceived;
+
         // ===== Read 콜백(로깅) =====
         private void ReadCallback(IAsyncResult ar)
         {
@@ -353,6 +382,10 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 int modulesInBuffer = Math.Min(_modules.Length, ch / 3);
 
                 double rate = (_rate > 0) ? _rate : AccelRate;
+                // Op_Ax{n} 媛믪? 釉붾줉????踰덈쭔 罹≪쿂 (?ㅻ젅???덉쟾)
+                string[] _opNows = (LoggedAxes != null && GetAxisOperation != null)
+                    ? System.Array.ConvertAll(LoggedAxes, ax => GetAxisOperation(ax) ?? "Pos")
+                    : System.Array.Empty<string>();
 
                 for (int i = 0; i < n; i++)
                 {
@@ -372,12 +405,47 @@ namespace PHM_Project_DockPanel.Services.DAQ
                         var off = GetAxisOffset(_modules[m]);
                         gx -= off.X; gy -= off.Y; gz -= off.Z;
 
-                        if (_swByMod[m] != null)
-                            _swByMod[m].WriteLine(t.ToString("F6") + "," + gx.ToString("G6") + "," + gy.ToString("G6") + "," + gz.ToString("G6"));
+                        if (_swByMod[m] != null && !SuppressCsvWrite)
+                        {
+                            var _rowSb = new System.Text.StringBuilder();
+                            _rowSb.Append(t.ToString("F6")).Append(",").Append(gx.ToString("G6"))
+                                  .Append(",").Append(gy.ToString("G6")).Append(",").Append(gz.ToString("G6"));
+                            foreach (string _op in _opNows) _rowSb.Append(",").Append(_op);
+                            _swByMod[m].WriteLine(_rowSb.ToString());
+                        }
                     }
                 }
 
                 _samples += n;
+
+                // 외부 소비자(InfluxDB 등)에게 블록 알림 — 모듈별로 발행
+                var br = BlockReceived;
+                if (br != null)
+                {
+                    // 하드웨어 클록 기반 타임스탬프:
+                    // 첫 블록은 UtcNow로 시작 시간을 확정하고,
+                    // 이후 블록은 샘플 카운터로 정확히 계산 → CPU 지연과 무관하게 연속성 보장
+                    double rate2 = (_rate > 0) ? _rate : AccelRate;
+                    if (!_startUtcSet)
+                    {
+                        _startUtc    = DateTime.UtcNow - TimeSpan.FromSeconds(n / rate2);
+                        _startUtcSet = true;
+                    }
+                    DateTime ts = _startUtc + TimeSpan.FromSeconds((_samples) / rate2);
+
+                    for (int m = 0; m < modulesInBuffer; m++)
+                    {
+                        int baseIdx = m * 3;
+                        var modBlock = new double[3, n];
+                        for (int i = 0; i < n; i++)
+                        {
+                            modBlock[0, i] = block[baseIdx + 0, i];
+                            modBlock[1, i] = block[baseIdx + 1, i];
+                            modBlock[2, i] = block[baseIdx + 2, i];
+                        }
+                        br.Invoke(_modules[m], modBlock, ts);
+                    }
+                }
 
                 if (_running && _reader != null && _cb != null)
                     _reader.BeginReadMultiSample(_readBlock, _cb, null);

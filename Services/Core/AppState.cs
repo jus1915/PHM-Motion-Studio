@@ -12,6 +12,9 @@ namespace PHM_Project_DockPanel.Services
     {
         public static LogWriterForm LogWriter { get; set; }
 
+        /// <summary>현재 선택된 데이터 레이블. 로컬 CSV 저장 경로에 반영됩니다.</summary>
+        public static string CurrentLabel { get; set; } = "";
+
         public static LogGraphForm.LogKind LogGraphPreferredKind { get; set; } = LogGraphForm.LogKind.Torque;
         public static double TorqueCycleSeconds { get; set; } = 0.001; // 1 tick = 1ms (필요시 변경)
         public static List<string> LastAccelCsvs { get; set; } = new List<string>();

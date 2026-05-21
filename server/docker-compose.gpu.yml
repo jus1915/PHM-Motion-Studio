@@ -1,0 +1,21 @@
+# GPU 오버라이드 — docker-compose.yml 과 함께 사용
+#
+# 사용법:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# 또는 서버 .env 에 COMPOSE_FILE 설정:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml
+#   (이후 docker compose up -d 만으로 GPU 모드 적용)
+
+services:
+  airflow-scheduler:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

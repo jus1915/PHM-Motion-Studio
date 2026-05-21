@@ -79,6 +79,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         // 공통/학습 탭
         private ComboBox cmbSession;                    // ★ 세션 전환
+        private ComboBox cmbModelType;                  // ★ 모델 유형
+        private Label lblKParam;                        // k 파라미터 레이블 (kNN 전용)
+        private TextBox txtPythonPath;                  // Python 실행 경로
         private CheckedListBox clbTimeFeatures;
         private CheckedListBox clbFreqFeatures;
         private Button btnTimeSelectAll, btnTimeClearAll;
@@ -112,6 +115,44 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private List<Tuple<double, int, string>> _valScores = new List<Tuple<double, int, string>>();
         private double _optThresh = double.NaN;
         private bool _updatingThreshold = false;
+
+        // ── DL 학습 탭 ───────────────────────────────────────────────────────
+        private TextBox          _dlDataDir, _dlOutputPath, _dlLabelColumn, _dlLr;
+        private RadioButton      _dlRdoAccel, _dlRdoTorque;
+        private CheckBox         _dlChX, _dlChY, _dlChZ;         // Accel 채널
+        private CheckBox[]       _dlChTrq;                        // Torque 채널 (Pos/Vel/Trq/CmdPos/CmdVel)
+        private Panel            _dlChPanel;                      // 채널 선택 컨테이너
+        // 결함 클래스 체크박스 (채널 체크박스와 동일한 스타일)
+        private CheckBox         _dlChkNormal;
+        private CheckBox         _dlChkOverload;
+        private CheckBox         _dlChkLooseness;
+        private CheckBox         _dlChkOverspeed;
+        private NumericUpDown    _dlWindowSize, _dlStride, _dlEpochs, _dlBatch, _dlValSplit;
+        private Button           _dlBtnTrain, _dlBtnStop, _dlBtnVenv, _dlBtnBatch;
+        private RichTextBox      _dlLog;
+        private ProgressBar      _dlProgress;
+        private Label            _dlStatus;
+        private System.Diagnostics.Process _dlProc;
+        private RadioButton      _dlRdoCls, _dlRdoAe;   // DL 모델 유형: 분류(CLS) / AE
+        private Label            _dlClassListLbl;        // "결함 클래스:" ↔ "정상 클래스:"
+
+        // ── Airflow 패널 ─────────────────────────────────────────────────────
+        private TextBox  _aflUrl, _aflDagId;
+        private Button   _aflBtnTrigger, _aflBtnStatus;
+        private Label    _aflStatusLbl;
+        private TextBox  _aflProfile;     // 저장 프로파일명 (예: default, v2026-05-11)
+        private TextBox  _aflProfileLabel;// 프로파일 표시 이름 (선택)
+        private string   _aflLastRunId;
+
+        // ── Airflow 모델 선택 체크박스 ────────────────────────────────────────
+        private FlowLayoutPanel _aflModelFlow;
+        private CheckBox _aflChkAll;                                      // 전체 선택
+        private CheckBox _aflChkAeAccelG, _aflChkAeTorqueG,              // AE 전역
+                         _aflChkAeTorqueAx,                              // AE 토크 축별
+                         _aflChkAeCombG,   _aflChkAeCombAx;             // AE 결합
+        private CheckBox _aflChkClsAccel,  _aflChkClsTorque,            // CLS
+                         _aflChkClsComb;
+        private bool     _aflUpdatingAll;
 
         public AIForm()
         {
@@ -203,14 +244,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Padding = new Padding(0, 0, 6, 0)
             };
             rightStack.RowStyles.Clear();
-            rightStack.RowStyles.Add(new RowStyle());                       // (0) 세션 콤보 ★
-            rightStack.RowStyles.Add(new RowStyle());                       // (1) Y 라벨
-            rightStack.RowStyles.Add(new RowStyle());                       // (2) k 라벨
-            rightStack.RowStyles.Add(new RowStyle());                       // (3) k numeric
-            rightStack.RowStyles.Add(new RowStyle());                       // (4) 표준화
-            rightStack.RowStyles.Add(new RowStyle());                       // (5) 전체선택/해제(모두)
-            rightStack.RowStyles.Add(new RowStyle());                       // (6) 학습/저장 버튼들
-            rightStack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // (7) filler
+            rightStack.RowStyles.Add(new RowStyle());                       // (0) 세션 콤보
+            rightStack.RowStyles.Add(new RowStyle());                       // (1) 모델 유형
+            rightStack.RowStyles.Add(new RowStyle());                       // (2) Y 라벨
+            rightStack.RowStyles.Add(new RowStyle());                       // (3) k 라벨
+            rightStack.RowStyles.Add(new RowStyle());                       // (4) k numeric
+            rightStack.RowStyles.Add(new RowStyle());                       // (5) 표준화
+            rightStack.RowStyles.Add(new RowStyle());                       // (6) Python 경로
+            rightStack.RowStyles.Add(new RowStyle());                       // (7) 전체선택/해제(모두)
+            rightStack.RowStyles.Add(new RowStyle());                       // (8) 학습/저장 버튼들
+            rightStack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // (9) filler
 
             // 세션 전환 콤보
             var lblSess = new Label { Text = "세션:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
@@ -218,19 +261,36 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             cmbSession.Items.Add("이상 탐지 (Anomaly Detection)");
             cmbSession.Items.Add("결함 진단 (Fault Diagnosis)");
             cmbSession.SelectedIndex = 0;
+            cmbSession.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
             cmbSession.SelectedIndexChanged += (s, e) =>
             {
                 _session = (cmbSession.SelectedIndex == 0) ? SessionType.AnomalyDetection : SessionType.FaultDiagnosis;
+                UpdateModelTypeItems();
                 ApplySessionUI();
             };
             var sessPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Dock = DockStyle.Top };
             sessPanel.Controls.Add(lblSess);
             sessPanel.Controls.Add(cmbSession);
 
+            // 모델 유형 콤보
+            var lblModelType = new Label { Text = "모델:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+            cmbModelType = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180 };
+            cmbModelType.SelectedIndexChanged += (s, e) => UpdateModelTypeUI();
+            var modelTypePanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Dock = DockStyle.Top };
+            modelTypePanel.Controls.Add(lblModelType);
+            modelTypePanel.Controls.Add(cmbModelType);
+
             lblYColumn = new Label { AutoSize = true, Text = "Y 컬럼: (미지정)", Margin = new Padding(0, 6, 0, 0) };
-            var lblK = new Label { Text = "k:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+            lblKParam = new Label { Text = "k:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
             numK = new NumericUpDown { Minimum = 1, Maximum = 50, Value = 5, Width = 80, Anchor = AnchorStyles.Left | AnchorStyles.Top };
             chkStd = new CheckBox { Text = "표준화", Checked = true, AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+
+            // Python 경로
+            var lblPython = new Label { Text = "Python:", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+            txtPythonPath = new TextBox { Text = "python", Width = 160, Margin = new Padding(0, 4, 0, 0) };
+            var pythonPathPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Dock = DockStyle.Top };
+            pythonPathPanel.Controls.Add(lblPython);
+            pythonPathPanel.Controls.Add(txtPythonPath);
 
             var pnlBoth = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = true, AutoSize = true, Dock = DockStyle.Top };
             btnAllSelectBoth = new Button { Text = "전체 선택(모두)", Width = 130 };
@@ -243,7 +303,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             btnMarkAllNormal = new Button { Text = "전체 정상", Width = 90 };
             btnMarkAllAnomaly = new Button { Text = "전체 이상", Width = 90 };
             btnTrain = new Button { Text = "학습", Width = 80 };
-            btnSaveModel = new Button { Text = "모델 저장", Width = 90 };
+            btnSaveModel = new Button { Text = "ONNX 저장", Width = 100 };
             btnMarkAllNormal.Click += (s, e) => MarkAll("Normal");
             btnMarkAllAnomaly.Click += (s, e) => MarkAll("Anomaly");
             btnTrain.Click += (s, e) => TrainModel();
@@ -251,13 +311,18 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             pnlTrainBtns.Controls.AddRange(new Control[] { btnMarkAllNormal, btnMarkAllAnomaly, btnTrain, btnSaveModel });
 
             rightStack.Controls.Add(sessPanel, 0, 0);
-            rightStack.Controls.Add(lblYColumn, 0, 1);
-            rightStack.Controls.Add(lblK, 0, 2);
-            rightStack.Controls.Add(numK, 0, 3);
-            rightStack.Controls.Add(chkStd, 0, 4);
-            rightStack.Controls.Add(pnlBoth, 0, 5);
-            rightStack.Controls.Add(pnlTrainBtns, 0, 6);
+            rightStack.Controls.Add(modelTypePanel, 0, 1);
+            rightStack.Controls.Add(lblYColumn, 0, 2);
+            rightStack.Controls.Add(lblKParam, 0, 3);
+            rightStack.Controls.Add(numK, 0, 4);
+            rightStack.Controls.Add(chkStd, 0, 5);
+            rightStack.Controls.Add(pythonPathPanel, 0, 6);
+            rightStack.Controls.Add(pnlBoth, 0, 7);
+            rightStack.Controls.Add(pnlTrainBtns, 0, 8);
             rightScroll.Controls.Add(rightStack);
+
+            // 모델 유형 초기 목록
+            UpdateModelTypeItems();
 
             top3.Controls.Add(grpTime, 0, 0);
             top3.Controls.Add(grpFreq, 1, 0);
@@ -340,6 +405,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tabs.TabPages.Add(tabTrain);
             tabs.TabPages.Add(tabVal);
             tabs.TabPages.Add(tabEval);
+            tabs.TabPages.Add(BuildDlTab());
             Controls.Add(tabs);
 
             ClientSize = new Size(1180, 740);
@@ -391,6 +457,26 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     gridTrain.Columns.Insert(idx, col);
                 }
             }
+        }
+
+        private void UpdateModelTypeItems()
+        {
+            string current = cmbModelType.SelectedItem?.ToString() ?? "kNN";
+            cmbModelType.Items.Clear();
+            if (_session == SessionType.AnomalyDetection)
+                cmbModelType.Items.AddRange(new object[] { "kNN", "Isolation Forest", "One-Class SVM" });
+            else
+                cmbModelType.Items.AddRange(new object[] { "kNN", "SVM", "Random Forest", "Gradient Boosting", "MLP" });
+            int idx = cmbModelType.Items.IndexOf(current);
+            cmbModelType.SelectedIndex = idx >= 0 ? idx : 0;
+        }
+
+        private void UpdateModelTypeUI()
+        {
+            bool isKnn = (cmbModelType.SelectedItem?.ToString() ?? "kNN") == "kNN";
+            if (lblKParam != null) lblKParam.Visible = isKnn;
+            if (numK != null) numK.Visible = isKnn;
+            if (txtPythonPath?.Parent != null) txtPythonPath.Parent.Visible = !isKnn;
         }
 
         private void CheckAll(CheckedListBox clb, bool check)
@@ -450,7 +536,21 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 object row = _featureRowsRaw[r];
                 var dr = dt.NewRow();
                 dr["FileName"] = GetProp<string>(row, "FileName") ?? "";
-                dr["Label"] = (_session == SessionType.AnomalyDetection) ? "Normal" : ""; // 세션별 기본값
+                // InfluxDB 세그먼트는 Label 프로퍼티가 설정됨 → 그대로 사용, 없으면 세션별 기본값
+                string rowLabel = GetProp<string>(row, "Label") ?? "";
+                if (string.IsNullOrEmpty(rowLabel))
+                {
+                    rowLabel = (_session == SessionType.AnomalyDetection) ? "Normal" : "";
+                }
+                else if (_session == SessionType.AnomalyDetection)
+                {
+                    // AD 모드: 콤보 항목은 정확히 "Normal" / "Anomaly" 이어야 함 (대소문자 정규화)
+                    if (rowLabel.Equals("Anomaly", StringComparison.OrdinalIgnoreCase))
+                        rowLabel = "Anomaly";
+                    else
+                        rowLabel = "Normal"; // normal, fault 등 그 외 모두 Normal로
+                }
+                dr["Label"] = rowLabel;
                 for (int i = 0; i < _featureList.Length; i++)
                 {
                     string key = _featureList[i].Key;
@@ -530,12 +630,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _samples = BuildSamplesFromGrid(_selectedKeys); if (_samples.Count == 0) { MessageBox.Show("유효한 샘플이 없습니다."); return; }
             _k = (int)numK.Value; _useStandardize = chkStd.Checked;
 
+            string modelTypeName = cmbModelType.SelectedItem?.ToString() ?? "kNN";
+
             // 표준화 파라미터: 학습셋 기준 (누설 방지)
             if (_useStandardize)
             {
                 var Xall = _samples.Select(s => s.X).ToArray();
                 (_mean, _std) = Standardizer.Fit(Xall);
-                //Standardizer.TransformInPlace(Xall, _mean, _std);
                 for (int i = 0; i < _samples.Count; i++) _samples[i].X = Xall[i];
             }
             else { _mean = null; _std = null; }
@@ -550,6 +651,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 }
                 _trainSet = _samples.Where(s => s.Label == 0).ToList();
                 if (_trainSet.Count == 0) { MessageBox.Show("정상으로 표시된 샘플이 없습니다."); return; }
+                // kNN은 C#, 그 외 Python 기반 모델도 검증 미리보기는 kNN으로 표시
                 _model = new KNNAnomalyModel(_k, _useStandardize, _mean, _std);
                 _model.Fit(_trainSet.Select(s => s.X).ToList(), _trainSet.Select(_ => 0).ToList());
                 _trainVectors = _trainSet.Select(s => s.X).ToArray();
@@ -565,11 +667,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 _trainSet = _samples.ToList();
                 _model = new KNNClassifier(_k, _useStandardize, _mean, _std);
                 _model.Fit(_trainSet.Select(s => s.X).ToList(), _trainSet.Select(s => s.Label).ToList());
-                _trainVectors = null; // CLS는 보관 불필요
+                _trainVectors = null;
                 _classNames = _enc.ClassNames();
             }
 
-            MessageBox.Show($"학습 완료\n세션={_session} / 샘플={_trainSet.Count} / 특징={_selectedKeys.Length}\nk={_k}, 표준화={_useStandardize}");
+            string note = modelTypeName == "kNN" ? "" : $"\n\n※ '{modelTypeName}' 모델은 [ONNX 저장] 시 Python으로 학습·변환됩니다.\n  검증 미리보기는 kNN으로 표시됩니다.";
+            MessageBox.Show($"학습 완료\n세션={_session} / 모델={modelTypeName} / 샘플={_trainSet.Count} / 특징={_selectedKeys.Length}{note}");
         }
 
         // ====== 검증 ======
@@ -777,53 +880,261 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void SaveModelBySession()
         {
-            if (_model == null) { MessageBox.Show("먼저 학습을 수행하세요."); return; }
+            if (_samples == null || _samples.Count == 0) { MessageBox.Show("먼저 학습을 수행하세요."); return; }
             if (_selectedKeys == null || _selectedKeys.Length == 0) { MessageBox.Show("특징 선택이 비었습니다."); return; }
 
-            double thrToSave = (double)numThreshold.Value;
-            if (_session == SessionType.AnomalyDetection)
+            string modelTypeName = cmbModelType.SelectedItem?.ToString() ?? "kNN";
+            string sessionStr = _session == SessionType.AnomalyDetection ? "AE" : "CLS";
+            string defaultName = $"{modelTypeName.ToLower().Replace(' ', '_').Replace('-', '_')}_{sessionStr.ToLower()}_model.onnx";
+
+            using (var sfd = new SaveFileDialog { Filter = "ONNX Model (*.onnx)|*.onnx", FileName = defaultName })
             {
-                // 임계값 자동 산출 (필요시)
-                if (thrToSave <= 0.0)
+                if (sfd.ShowDialog() != DialogResult.OK) return;
+                string onnxPath = sfd.FileName;
+
+                // 특징 데이터를 임시 CSV로 내보내기
+                string csvPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_train_features.csv");
+                ExportSamplesToCsv(csvPath);
+
+                // Python 스크립트 경로 결정
+                string scriptPath = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".",
+                    "scripts", "train_model.py");
+                if (!System.IO.File.Exists(scriptPath))
+                {
+                    MessageBox.Show($"Python 스크립트를 찾을 수 없습니다:\n{scriptPath}\n\nscripts/train_model.py 를 실행 파일 폴더에 배치하세요.",
+                        "스크립트 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // 임계값 계산 (AD)
+                double thrToSave = (double)numThreshold.Value;
+                if (_session == SessionType.AnomalyDetection && thrToSave <= 0.0)
                 {
                     var loo = ComputeTrainScoresLOO();
-                    if (loo.Length >= 2)
-                    {
-                        thrToSave = Percentile(loo, 0.99);
-                        try { numThreshold.Value = (decimal)thrToSave; } catch { }
-                        MessageBox.Show($"검증 없이 자동 임계값 적용\nLOO 99% = {thrToSave:F3}", "자동 임계값", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    else
-                    {
-                        MessageBox.Show("학습 샘플 수가 너무 적어(≤1) 자동 임계값을 계산할 수 없습니다.", "임계값 미설정", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
+                    if (loo.Length >= 2) { thrToSave = Percentile(loo, 0.99); try { numThreshold.Value = (decimal)thrToSave; } catch { } }
                 }
-            }
 
-            var payload = new
-            {
-                Session = _session.ToString(),
-                ModelType = (_session == SessionType.AnomalyDetection ? "KNN_AD" : "KNN_CLS"),
-                K = _k,
-                Standardize = _useStandardize,
-                Features = _selectedKeys,
-                Threshold = (_session == SessionType.AnomalyDetection ? thrToSave : (double?)null),
-                Mean = _mean,
-                Std = _std,
-                Train = (_session == SessionType.AnomalyDetection ? _trainVectors : null),
-                YColumn = _yColumnName,
-                ClassNames = (_session == SessionType.FaultDiagnosis ? _classNames : null) // ← 문자열 클래스명 보존
-            };
-
-            using (var sfd = new SaveFileDialog { Filter = "PHM Model (*.json)|*.json", FileName = (_session == SessionType.AnomalyDetection ? "knn_ad_model.json" : "knn_cls_model.json") })
-            {
-                if (sfd.ShowDialog() == DialogResult.OK)
+                // 파라미터를 임시 JSON 파일로 저장 (인수 이스케이프 문제 회피)
+                string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_train_params.json");
+                var paramsObj = new
                 {
-                    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
-                    System.IO.File.WriteAllText(sfd.FileName, json);
-                    MessageBox.Show("모델 저장 완료");
+                    csv = csvPath,
+                    output = onnxPath,
+                    session = sessionStr,
+                    model = ModelTypeToScriptKey(modelTypeName),
+                    k = _k,
+                    standardize = _useStandardize,
+                    threshold = thrToSave,
+                    features = _selectedKeys,
+                    class_names = _classNames,
+                    y_column = _yColumnName ?? ""
+                };
+                System.IO.File.WriteAllText(paramsPath,
+                    JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = false }),
+                    new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false)); // BOM 없음
+
+                string userPython = txtPythonPath?.Text?.Trim() ?? "";
+                string python = FindPythonExe(userPython);
+                if (python == null)
+                {
+                    MessageBox.Show(
+                        "Python을 찾을 수 없습니다.\n\n" +
+                        "다음 중 하나를 수행하세요:\n" +
+                        "  1. Python 공식 사이트(python.org)에서 설치 후 재시도\n" +
+                        "     (설치 시 'Add python.exe to PATH' 체크)\n" +
+                        "  2. 위 'Python:' 입력란에 python.exe 전체 경로를 직접 입력\n" +
+                        "     예) C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+                        "Python 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
+                if (txtPythonPath != null && txtPythonPath.Text.Trim() != python)
+                    txtPythonPath.Text = python;   // 자동 탐지 결과를 UI에 반영
+
+                string args = $"\"{scriptPath}\" --params \"{paramsPath}\"";
+
+                string stdout = "", stderr = "";
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(python, args)
+                    {
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
+                    using (var proc = System.Diagnostics.Process.Start(psi))
+                    {
+                        stdout = proc.StandardOutput.ReadToEnd();
+                        stderr = proc.StandardError.ReadToEnd();
+                        proc.WaitForExit();
+                        if (proc.ExitCode != 0)
+                        {
+                            MessageBox.Show($"Python 오류 (exitcode={proc.ExitCode}):\n{stderr}\n\n{stdout}", "ONNX 저장 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Python 실행 실패: {ex.Message}\n\n탐지된 경로: {python}", "실행 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // stdout에서 metrics 파싱 (선택적)
+                string metricsMsg = "";
+                if (!string.IsNullOrWhiteSpace(stdout))
+                {
+                    try
+                    {
+                        var doc = System.Text.Json.JsonDocument.Parse(stdout.Trim());
+                        if (doc.RootElement.TryGetProperty("accuracy", out var acc))
+                            metricsMsg = $"\n정확도: {acc.GetDouble():F3}";
+                        if (doc.RootElement.TryGetProperty("info", out var info))
+                            metricsMsg += $"\n{info.GetString()}";
+                    }
+                    catch { metricsMsg = $"\n{stdout.Trim()}"; }
+                }
+                MessageBox.Show($"ONNX 모델 저장 완료\n{onnxPath}{metricsMsg}", "저장 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
+        }
+
+        private static string ModelTypeToScriptKey(string displayName)
+        {
+            switch (displayName)
+            {
+                case "kNN": return "knn";
+                case "Isolation Forest": return "isoforest";
+                case "One-Class SVM": return "ocsvm";
+                case "SVM": return "svm";
+                case "Random Forest": return "rf";
+                case "Gradient Boosting": return "gbm";
+                case "MLP": return "mlp";
+                default: return displayName.ToLower().Replace(' ', '_');
+            }
+        }
+
+        /// <summary>사용 가능한 Python 실행 파일을 탐색합니다. 없으면 null 반환.</summary>
+        private static string FindPythonExe(string userPath)
+        {
+            var candidates = new List<string>();
+
+            // 1) 사용자 지정 경로
+            if (!string.IsNullOrWhiteSpace(userPath)) candidates.Add(userPath);
+
+            // 2) PATH에 등록된 명령어
+            candidates.AddRange(new[] { "py", "python", "python3" });
+
+            // 3) Windows 레지스트리에서 설치 경로 탐색
+            foreach (var exePath in FindPythonFromRegistry())
+                candidates.Add(exePath);
+
+            // 4) 일반 설치 폴더 탐색 (PATH 미등록 케이스 대응)
+            var searchRoots = new[]
+            {
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python"),
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Programs", "Python"),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                @"C:\",
+            };
+            foreach (var root in searchRoots)
+            {
+                if (!System.IO.Directory.Exists(root)) continue;
+                try
+                {
+                    foreach (var dir in System.IO.Directory.GetDirectories(root, "Python3*")
+                                            .OrderByDescending(d => d))
+                    {
+                        var exe = System.IO.Path.Combine(dir, "python.exe");
+                        if (System.IO.File.Exists(exe)) candidates.Add(exe);
+                    }
+                }
+                catch { }
+            }
+
+            // 후보 중 실제 실행 가능한 첫 번째 반환
+            foreach (var cand in candidates)
+            {
+                if (string.IsNullOrWhiteSpace(cand)) continue;
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(cand, "--version")
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    using (var p = System.Diagnostics.Process.Start(psi))
+                    {
+                        if (p.WaitForExit(3000) && p.ExitCode == 0)
+                            return cand;
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        /// <summary>레지스트리 HKCU/HKLM에서 Python InstallPath를 읽어 python.exe 경로 목록 반환.</summary>
+        private static IEnumerable<string> FindPythonFromRegistry()
+        {
+            var result = new List<string>();
+            var hives = new[]
+            {
+                Microsoft.Win32.Registry.CurrentUser,
+                Microsoft.Win32.Registry.LocalMachine
+            };
+            foreach (var hive in hives)
+            {
+                try
+                {
+                    using (var key = hive.OpenSubKey(@"SOFTWARE\Python\PythonCore"))
+                    {
+                        if (key == null) continue;
+                        foreach (var ver in key.GetSubKeyNames().OrderByDescending(v => v))
+                        {
+                            try
+                            {
+                                using (var instKey = key.OpenSubKey(ver + @"\InstallPath"))
+                                {
+                                    if (instKey == null) continue;
+                                    var exePath = instKey.GetValue("ExecutablePath") as string;
+                                    if (string.IsNullOrEmpty(exePath))
+                                    {
+                                        var folder = instKey.GetValue("") as string;
+                                        if (!string.IsNullOrEmpty(folder))
+                                            exePath = System.IO.Path.Combine(folder.TrimEnd('\\', '/'), "python.exe");
+                                    }
+                                    if (!string.IsNullOrEmpty(exePath) && System.IO.File.Exists(exePath))
+                                        result.Add(exePath);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+            return result;
+        }
+
+        private void ExportSamplesToCsv(string path)
+        {
+            var sb = new System.Text.StringBuilder();
+            // 헤더
+            sb.Append("FileName,Label");
+            foreach (var k in _selectedKeys) sb.Append($",{k}");
+            sb.AppendLine();
+            // 데이터
+            foreach (var s in _samples)
+            {
+                sb.Append($"\"{s.FileName}\",\"{s.LabelName}\"");
+                foreach (var x in s.X) sb.Append($",{x.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+                sb.AppendLine();
+            }
+            System.IO.File.WriteAllText(path, sb.ToString(), System.Text.Encoding.UTF8);
         }
 
         private double[] ComputeTrainScoresLOO()
@@ -925,6 +1236,1245 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             {
                 if (mean == null || std == null) return; int n = X.Length, d = X[0].Length;
                 for (int i = 0; i < n; i++) for (int j = 0; j < d; j++) X[i][j] = (X[i][j] - mean[j]) / (std[j] == 0 ? 1 : std[j]);
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        //  DL 학습 탭
+        // ════════════════════════════════════════════════════════════════════
+
+        private TabPage BuildDlTab()
+        {
+            var tab = new TabPage("DL 학습");
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));  // 설정 패널
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));   // Airflow 패널
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 로그 영역
+
+            // ── 상단: 설정 2열 ────────────────────────────────────────────
+            var top2 = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(6, 4, 6, 0) };
+            top2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            top2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+
+            top2.Controls.Add(BuildDlLeftPanel(),  0, 0);
+            top2.Controls.Add(BuildDlRightPanel(), 1, 0);
+
+            // ── 하단: 로그 + 진행 ─────────────────────────────────────────
+            var botLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(6, 0, 6, 6) };
+            botLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); // 상태 + 프로그레스바
+            botLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); // 버튼
+            botLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // 로그
+
+            // 프로그레스 행
+            var progRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlStatus   = new Label { AutoSize = true, Text = "대기 중", Margin = new Padding(0, 4, 8, 0) };
+            _dlProgress = new ProgressBar { Width = 300, Height = 20, Minimum = 0, Maximum = 100 };
+            progRow.Controls.Add(_dlStatus);
+            progRow.Controls.Add(_dlProgress);
+
+            // 버튼 행
+            var btnRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlBtnTrain = new Button { Text = "▶ 학습 시작", Width = 110, Height = 24, BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            _dlBtnBatch = new Button { Text = "⚡ 전체 축 일괄", Width = 115, Height = 24, BackColor = Color.FromArgb(16, 110, 60), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            _dlBtnStop  = new Button { Text = "■ 중지",          Width = 70,  Height = 24, Enabled = false };
+            _dlBtnVenv  = new Button { Text = "🐍 가상환경",     Width = 100, Height = 24 };
+            _dlBtnTrain.Click += (s, e) => StartDlTrainingAsync();
+            _dlBtnBatch.Click += (s, e) => StartBatchTrainingAsync();
+            _dlBtnStop.Click  += (s, e) => StopDlTraining();
+            _dlBtnVenv.Click  += (s, e) => RunSetupVenv();
+            btnRow.Controls.Add(_dlBtnTrain);
+            btnRow.Controls.Add(_dlBtnBatch);
+            btnRow.Controls.Add(_dlBtnStop);
+            btnRow.Controls.Add(_dlBtnVenv);
+
+            // 로그
+            _dlLog = new RichTextBox
+            {
+                Dock = DockStyle.Fill, ReadOnly = true, BackColor = Color.FromArgb(30, 30, 30),
+                ForeColor = Color.LightGreen, Font = new Font("Consolas", 9f),
+                ScrollBars = RichTextBoxScrollBars.Vertical
+            };
+
+            botLayout.Controls.Add(progRow,  0, 0);
+            botLayout.Controls.Add(btnRow,   0, 1);
+            botLayout.Controls.Add(_dlLog,   0, 2);
+
+            root.Controls.Add(top2,              0, 0);
+            root.Controls.Add(BuildAirflowPanel(), 0, 1);
+            root.Controls.Add(botLayout,          0, 2);
+
+            // 서버 설정 변경 시 Airflow 패널 URL·DagId 동기화
+            Services.AppEvents.ServerSettingsChanged += s =>
+            {
+                if (IsDisposed) return;
+                if (InvokeRequired) { BeginInvoke(new Action(() => SyncAirflowPanel(s))); return; }
+                SyncAirflowPanel(s);
+            };
+            tab.Controls.Add(root);
+            return tab;
+        }
+
+        private GroupBox BuildDlLeftPanel()
+        {
+            var grp = new GroupBox { Text = "데이터 소스 / 클래스", Dock = DockStyle.Fill, Padding = new Padding(8) };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6 };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 5; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 클래스 리스트
+
+            int row = 0;
+
+            // 데이터 폴더
+            tl.Controls.Add(Lbl("데이터 폴더:"), 0, row);
+            _dlDataDir = new TextBox { Dock = DockStyle.Fill, Text = @"C:\Data\PHM_Logs\Signals" };
+            var dirRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlDataDir.Width = 150;
+            dirRow.Controls.Add(_dlDataDir);
+            var btnBrowseDir = new Button { Text = "…", Width = 26, Height = 22 };
+            btnBrowseDir.Click += (s, e) => {
+                using (var fbd = new FolderBrowserDialog { SelectedPath = _dlDataDir.Text })
+                    if (fbd.ShowDialog() == DialogResult.OK) { _dlDataDir.Text = fbd.SelectedPath; ScanDataFolder(); }
+            };
+            var btnScan = new Button { Text = "🔍", Width = 28, Height = 22, Font = new Font(Font.FontFamily, 8.5f) };
+            btnScan.Click += (s, e) => ScanDataFolder();
+            // 연속 수집 폴더 바로가기
+            var btnContDir = new Button { Text = "📁수집", Width = 52, Height = 22, Font = new Font(Font.FontFamily, 8f),
+                BackColor = Color.FromArgb(0, 100, 160), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            btnContDir.Click += (s, e) => {
+                _dlDataDir.Text = @"C:\Data\PHM_Logs\Signals";
+                if (System.IO.Directory.Exists(_dlDataDir.Text)) ScanDataFolder();
+            };
+            dirRow.Controls.AddRange(new Control[] { btnBrowseDir, btnScan, btnContDir });
+            tl.Controls.Add(dirRow, 1, row++);
+
+            // 신호 타입 (Accel / Torque)
+            tl.Controls.Add(Lbl("신호 타입:"), 0, row);
+            var sensorRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+            _dlRdoAccel  = new RadioButton { Text = "가속도계",  Checked = true, AutoSize = true };
+            _dlRdoTorque = new RadioButton { Text = "토크",      Checked = false, AutoSize = true, Margin = new Padding(8,0,0,0) };
+            sensorRow.Controls.AddRange(new Control[] { _dlRdoAccel, _dlRdoTorque });
+            tl.Controls.Add(sensorRow, 1, row++);
+
+            // 입력 채널 (동적 패널)
+            tl.Controls.Add(Lbl("입력 채널:"), 0, row);
+            _dlChPanel = new Panel { Dock = DockStyle.Fill };
+
+            // Accel 채널 패널
+            var accelFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Name = "accelFlow" };
+            _dlChX = new CheckBox { Text = "x", Checked = true, AutoSize = true };
+            _dlChY = new CheckBox { Text = "y", Checked = true, AutoSize = true };
+            _dlChZ = new CheckBox { Text = "z", Checked = true, AutoSize = true };
+            accelFlow.Controls.AddRange(new Control[] { _dlChX, _dlChY, _dlChZ });
+
+            // Torque 채널 패널 (토크 CSV는 Trq(%) 만 저장)
+            var trqFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Name = "trqFlow", Visible = false };
+            var trqCols = new[] { "Trq(%)" };
+            _dlChTrq = new CheckBox[trqCols.Length];
+            for (int i = 0; i < trqCols.Length; i++)
+            {
+                _dlChTrq[i] = new CheckBox { Text = trqCols[i], Checked = true, AutoSize = true, Margin = new Padding(0,2,6,0) };
+                trqFlow.Controls.Add(_dlChTrq[i]);
+            }
+
+            _dlChPanel.Controls.AddRange(new Control[] { accelFlow, trqFlow });
+            tl.Controls.Add(_dlChPanel, 1, row++);
+
+            // 신호 타입 전환 이벤트
+            _dlRdoAccel.CheckedChanged += (s, e) =>
+            {
+                if (!_dlRdoAccel.Checked) return;
+                accelFlow.Visible = true; trqFlow.Visible = false;
+                // 출력 파일명 힌트 업데이트
+                if (_dlOutputPath != null && _dlOutputPath.Text.Contains("torque"))
+                    _dlOutputPath.Text = _dlOutputPath.Text.Replace("torque", "accel");
+            };
+            _dlRdoTorque.CheckedChanged += (s, e) =>
+            {
+                if (!_dlRdoTorque.Checked) return;
+                accelFlow.Visible = false; trqFlow.Visible = true;
+                if (_dlOutputPath != null && !_dlOutputPath.Text.Contains("torque"))
+                    _dlOutputPath.Text = System.IO.Path.Combine(
+                        System.IO.Path.GetDirectoryName(_dlOutputPath.Text) ?? "",
+                        "cnn1d_torque.onnx");
+            };
+
+            // Label 컬럼
+            tl.Controls.Add(Lbl("Label 컬럼:"), 0, row);
+            _dlLabelColumn = new TextBox { Dock = DockStyle.Fill, Text = "Label" };
+            tl.Controls.Add(_dlLabelColumn, 1, row++);
+
+
+            // ── 결함 클래스 체크박스 (채널과 동일한 스타일) ───────────────────
+            _dlClassListLbl = Lbl("결함 클래스:");
+            tl.Controls.Add(_dlClassListLbl, 0, row);
+
+            var clsFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                AutoSize = true
+            };
+            _dlChkNormal    = new CheckBox { Text = "normal",    Checked = true,  AutoSize = true };
+            _dlChkOverload  = new CheckBox { Text = "overload",  Checked = false, AutoSize = true };
+            _dlChkLooseness = new CheckBox { Text = "looseness", Checked = true,  AutoSize = true };
+            _dlChkOverspeed = new CheckBox { Text = "overspeed", Checked = false, AutoSize = true };
+            clsFlow.Controls.AddRange(new Control[] { _dlChkNormal, _dlChkOverload, _dlChkLooseness, _dlChkOverspeed });
+            tl.Controls.Add(clsFlow, 1, row++);
+
+            grp.Controls.Add(tl);
+            return grp;
+        }
+
+        /// <summary>
+        /// 데이터 폴더를 스캔하여 클래스 목록·신호 타입·채널·축 번호·출력 경로를 자동 설정합니다.
+        /// 기대 구조: {root}/{클래스명}/{Accel|Torque}/[{device}/]*.csv
+        /// </summary>
+        private void ScanDataFolder()
+        {
+            string root = _dlDataDir?.Text?.Trim() ?? "";
+            if (!System.IO.Directory.Exists(root))
+            {
+                MessageBox.Show("폴더가 존재하지 않습니다:\n" + root, "스캔 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // ── 1. 클래스 디렉터리 탐색 (첫 번째 레벨 서브폴더 중 Accel/Torque를 포함한 것) ──
+            var classDirs = System.IO.Directory.GetDirectories(root)
+                .Where(d =>
+                    System.IO.Directory.GetDirectories(d, "Accel", System.IO.SearchOption.TopDirectoryOnly).Any() ||
+                    System.IO.Directory.GetDirectories(d, "Torque", System.IO.SearchOption.TopDirectoryOnly).Any())
+                .Select(d => System.IO.Path.GetFileName(d))
+                .OrderBy(n => n)
+                .ToList();
+
+            if (classDirs.Count == 0)
+            {
+                MessageBox.Show(
+                    "클래스 폴더를 찾지 못했습니다.\n\n" +
+                    "기대 구조:\n  {루트}/{클래스명}/Accel/*.csv\n  {루트}/{클래스명}/Torque/*.csv",
+                    "스캔 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // ── 2. 신호 타입 감지 ────────────────────────────────────────────────────
+            bool hasAccel  = System.IO.Directory.GetDirectories(root, "Accel",  System.IO.SearchOption.AllDirectories).Any();
+            bool hasTorque = System.IO.Directory.GetDirectories(root, "Torque", System.IO.SearchOption.AllDirectories).Any();
+            bool useAccel  = hasAccel; // Accel 우선
+
+            // ── 3. 대표 CSV 헤더 읽기 ───────────────────────────────────────────────
+            string sampleCsv = System.IO.Directory
+                .EnumerateFiles(root, "*.csv", System.IO.SearchOption.AllDirectories)
+                .FirstOrDefault(f =>
+                {
+                    string seg = System.IO.Path.GetDirectoryName(f) ?? "";
+                    return useAccel
+                        ? seg.IndexOf(System.IO.Path.DirectorySeparatorChar + "Accel", StringComparison.OrdinalIgnoreCase) >= 0
+                        : seg.IndexOf(System.IO.Path.DirectorySeparatorChar + "Torque", StringComparison.OrdinalIgnoreCase) >= 0;
+                });
+
+            string[] headers = new string[0];
+            if (sampleCsv != null)
+            {
+                try
+                {
+                    string headerLine = System.IO.File.ReadLines(sampleCsv).FirstOrDefault() ?? "";
+                    headers = headerLine.Split(new[] { ',', ';', '\t' }, StringSplitOptions.None)
+                                        .Select(h => h.Trim()).ToArray();
+                }
+                catch { }
+            }
+
+            // ── 4. 축 번호 추출 (폴더명 "Axis0" → 0) ────────────────────────────────
+            var axisMatch = System.Text.RegularExpressions.Regex.Match(
+                System.IO.Path.GetFileName(root), @"[Aa]xis(\d+)");
+            int axisNum = axisMatch.Success ? int.Parse(axisMatch.Groups[1].Value) : 0;
+
+            // ── 5. UI 적용 ────────────────────────────────────────────────────────────
+            // 클래스 리스트
+            // 미리 정의된 클래스는 체크박스로 반영
+            var knownMap = new System.Collections.Generic.Dictionary<string, CheckBox>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "normal",    _dlChkNormal    },
+                { "overload",  _dlChkOverload  },
+                { "looseness", _dlChkLooseness },
+                { "overspeed", _dlChkOverspeed },
+            };
+            foreach (var kv in knownMap) kv.Value.Checked = false;
+
+            foreach (var c in classDirs)
+            {
+                if (knownMap.TryGetValue(c, out CheckBox chk))
+                    chk.Checked = true;
+            }
+
+            // 신호 타입 + 채널
+            if (useAccel)
+            {
+                _dlRdoAccel.Checked = true;
+                if (_dlChX != null) _dlChX.Checked = headers.Any(h => string.Equals(h, "x", StringComparison.OrdinalIgnoreCase));
+                if (_dlChY != null) _dlChY.Checked = headers.Any(h => string.Equals(h, "y", StringComparison.OrdinalIgnoreCase));
+                if (_dlChZ != null) _dlChZ.Checked = headers.Any(h => string.Equals(h, "z", StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                _dlRdoTorque.Checked = true;
+                if (_dlChTrq != null)
+                {
+                    // 토크 CSV 헤더: time_s, Ax{n}_Trq(%) — "Trq(%)" 접미사 매칭
+                    var trqSuffixes = new[] { "Trq(%)" };
+                    for (int i = 0; i < _dlChTrq.Length && i < trqSuffixes.Length; i++)
+                    {
+                        string sfx = trqSuffixes[i];
+                        _dlChTrq[i].Checked = headers.Any(h =>
+                            System.Text.RegularExpressions.Regex.IsMatch(
+                                h, @"^Ax\d+_" + System.Text.RegularExpressions.Regex.Escape(sfx) + @"$",
+                                System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+                    }
+                }
+            }
+
+            // Label 컬럼
+            bool hasLabelCol = headers.Any(h => string.Equals(h, "Label", StringComparison.OrdinalIgnoreCase));
+            if (_dlLabelColumn != null)
+                _dlLabelColumn.Text = hasLabelCol ? "Label" : "";
+
+            // 출력 경로 자동 생성
+            if (_dlOutputPath != null)
+            {
+                string modelsDir = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(_dlOutputPath.Text)
+                    ?? @"C:\Data\PHM_Logs\models");
+                string sigTag   = useAccel ? "accel" : "torque";
+                bool   scanIsAe = _dlRdoAe?.Checked == true;
+                string scanPfx  = scanIsAe ? "ae_cnn1d" : "cnn1d";
+                _dlOutputPath.Text = System.IO.Path.Combine(modelsDir, $"{scanPfx}_axis{axisNum}_{sigTag}.onnx");
+            }
+
+            string sigTypeText = useAccel ? "가속도계(Accel)" : "토크(Torque)";
+            string bothText    = (hasAccel && hasTorque) ? " (Accel + Torque 모두 존재, Accel 우선)" : "";
+            MessageBox.Show(
+                $"스캔 완료{bothText}\n\n" +
+                $"  신호 타입  : {sigTypeText}\n" +
+                $"  클래스 수  : {classDirs.Count}개\n" +
+                $"  클래스    : {string.Join(", ", classDirs)}\n" +
+                $"  헤더 채널  : {string.Join(", ", headers)}\n" +
+                $"  축 번호   : {axisNum}",
+                "데이터셋 스캔 결과", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private GroupBox BuildDlRightPanel()
+        {
+            var grp = new GroupBox { Text = "모델 설정 / 출력", Dock = DockStyle.Fill, Padding = new Padding(8) };
+            var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 10 };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 10; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+
+            int row = 0;
+
+            // 모델 유형: 분류(CLS) / AE(이상탐지)
+            tl.Controls.Add(Lbl("모델 유형:"), 0, row);
+            var modeFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+            _dlRdoCls = new RadioButton { Text = "분류(CLS)", Checked = true, AutoSize = true };
+            _dlRdoAe  = new RadioButton { Text = "AE(이상탐지)", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+            _dlRdoCls.CheckedChanged += (s, e) => { if (_dlRdoCls.Checked) { UpdateDlModeUi(); UpdateAflTrainModeItems(); UpdateTriggerButtonText(); } };
+            _dlRdoAe.CheckedChanged  += (s, e) => { if (_dlRdoAe.Checked)  { UpdateDlModeUi(); UpdateAflTrainModeItems(); UpdateTriggerButtonText(); } };
+            modeFlow.Controls.AddRange(new Control[] { _dlRdoCls, _dlRdoAe });
+            tl.Controls.Add(modeFlow, 1, row++);
+
+            // 윈도우 크기
+            tl.Controls.Add(Lbl("윈도우(샘플):"), 0, row);
+            _dlWindowSize = Nud(64, 65536, 256); tl.Controls.Add(_dlWindowSize, 1, row++);
+
+            // 스트라이드
+            tl.Controls.Add(Lbl("스트라이드:"), 0, row);
+            _dlStride = Nud(1, 65536, 128); tl.Controls.Add(_dlStride, 1, row++);
+
+            // 에포크
+            tl.Controls.Add(Lbl("에포크:"), 0, row);
+            _dlEpochs = Nud(1, 10000, 30); tl.Controls.Add(_dlEpochs, 1, row++);
+
+            // 배치 크기
+            tl.Controls.Add(Lbl("배치 크기:"), 0, row);
+            _dlBatch = Nud(1, 1024, 32); tl.Controls.Add(_dlBatch, 1, row++);
+
+            // 학습률
+            tl.Controls.Add(Lbl("학습률:"), 0, row);
+            _dlLr = new TextBox { Dock = DockStyle.Fill, Text = "0.001" };
+            tl.Controls.Add(_dlLr, 1, row++);
+
+            // 검증 비율
+            tl.Controls.Add(Lbl("검증 비율(%):"), 0, row);
+            _dlValSplit = Nud(5, 50, 20); tl.Controls.Add(_dlValSplit, 1, row++);
+
+            // 출력 경로
+            tl.Controls.Add(Lbl("출력 모델:"), 0, row);
+            _dlOutputPath = new TextBox { Dock = DockStyle.Fill, Text = @"C:\Data\PHM_Logs\models\cnn1d_fd.onnx" };
+            var outRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _dlOutputPath.Width = 180;
+            var btnOutPath = new Button { Text = "…", Width = 28, Height = 22 };
+            btnOutPath.Click += (s, e) => {
+                using (var sfd = new SaveFileDialog { Filter = "ONNX|*.onnx", FileName = System.IO.Path.GetFileName(_dlOutputPath.Text) })
+                    if (sfd.ShowDialog() == DialogResult.OK) _dlOutputPath.Text = sfd.FileName;
+            };
+            outRow.Controls.Add(_dlOutputPath);
+            outRow.Controls.Add(btnOutPath);
+            tl.Controls.Add(outRow, 1, row++);
+
+            // Python 경로 (기존 txtPythonPath 공유 — 텍스트만 표시)
+            tl.Controls.Add(Lbl("Python:"), 0, row);
+            var pyNote = new Label { AutoSize = true, Text = "← 학습 탭의 Python 경로 사용", ForeColor = Color.Gray, Margin = new Padding(0, 6, 0, 0) };
+            tl.Controls.Add(pyNote, 1, row++);
+
+            grp.Controls.Add(tl);
+            return grp;
+        }
+
+        /// <summary>모델 유형(CLS/AE) 전환 시 관련 UI를 동기화합니다.</summary>
+        private void UpdateDlModeUi()
+        {
+            bool isAe = _dlRdoAe?.Checked == true;
+
+            // 클래스 레이블 전환
+            if (_dlClassListLbl != null)
+                _dlClassListLbl.Text = isAe ? "정상 클래스:" : "결함 클래스:";
+
+            // 출력 경로 파일명 접두사 ae_ 추가/제거
+            if (_dlOutputPath != null)
+            {
+                string dir = System.IO.Path.GetDirectoryName(_dlOutputPath.Text) ?? "";
+                string fn  = System.IO.Path.GetFileNameWithoutExtension(_dlOutputPath.Text);
+                if (isAe && !fn.StartsWith("ae_", StringComparison.OrdinalIgnoreCase))
+                    _dlOutputPath.Text = System.IO.Path.Combine(dir, "ae_" + fn + ".onnx");
+                else if (!isAe && fn.StartsWith("ae_", StringComparison.OrdinalIgnoreCase))
+                    _dlOutputPath.Text = System.IO.Path.Combine(dir, fn.Substring(3) + ".onnx");
+            }
+        }
+
+        private static Label Lbl(string text) =>
+            new Label { Text = text, AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+
+        private static NumericUpDown Nud(int min, int max, int val) =>
+            new NumericUpDown { Minimum = min, Maximum = max, Value = val, Dock = DockStyle.Fill };
+
+        // ── DL 학습 실행 ─────────────────────────────────────────────────────
+
+        /// <summary>현재 UI 설정을 기반으로 학습 params를 빌드합니다. 실패 시 null 반환.</summary>
+        private Dictionary<string, object> BuildDlParams(string dataDir, string outputPath)
+        {
+            var channels = new List<string>();
+            bool isTorque = _dlRdoTorque?.Checked == true;
+            if (isTorque) { if (_dlChTrq != null) foreach (var cb in _dlChTrq) if (cb.Checked) channels.Add(cb.Text); }
+            else { if (_dlChX.Checked) channels.Add("x"); if (_dlChY.Checked) channels.Add("y"); if (_dlChZ.Checked) channels.Add("z"); }
+            if (channels.Count == 0) return null;
+
+            bool isAe = _dlRdoAe?.Checked == true;
+            // 체크박스에서 선택된 클래스 수집 (표시 순서 유지)
+            var classNames = new System.Collections.Generic.List<string>();
+            var clsTogglePairs = new (CheckBox Chk, string Name)[]
+            {
+                (_dlChkNormal,    "normal"),
+                (_dlChkOverload,  "overload"),
+                (_dlChkLooseness, "looseness"),
+                (_dlChkOverspeed, "overspeed"),
+            };
+            foreach (var pair in clsTogglePairs)
+                if (pair.Chk != null && pair.Chk.Checked) classNames.Add(pair.Name);
+            // CLS: 클래스 2개 이상, AE: 정상 클래스 1개 이상
+            if (!isAe && classNames.Count < 2) return null;
+            if (isAe  && classNames.Count < 1) return null;
+
+            if (!double.TryParse(_dlLr.Text.Trim(), System.Globalization.NumberStyles.Float,
+                CultureInfo.InvariantCulture, out double lr) || lr <= 0) return null;
+
+            var p = new Dictionary<string, object>
+            {
+                ["data_dir"]            = dataDir,
+                ["output"]              = outputPath,
+                ["channels"]            = channels.ToArray(),
+                ["sensor_type"]         = isTorque ? "torque" : "accel",
+                ["label_column"]        = _dlLabelColumn?.Text?.Trim() ?? "Label",
+                ["class_names"]         = classNames.ToArray(),
+                ["window_size"]         = (int)_dlWindowSize.Value,
+                ["stride"]              = (int)_dlStride.Value,
+                ["epochs"]              = (int)_dlEpochs.Value,
+                ["batch_size"]          = (int)_dlBatch.Value,
+                ["lr"]                  = lr,
+                ["val_split"]           = (double)_dlValSplit.Value / 100.0,
+                ["seed"]                = 42,
+                ["mlflow_tracking_uri"] = Services.ServerSettings.Current.MlflowUrl ?? "",
+                ["mlflow_experiment"]   = "PHM-DL",
+                ["session"]             = isAe ? "AE" : "CLS",
+            };
+            // AE: 어떤 폴더를 "정상"으로 볼지 명시 + threshold percentile 상향
+            if (isAe)
+            {
+                p["normal_classes"]         = classNames.ToArray();
+                p["ae_threshold_percentile"] = 99.5;  // 99→99.5: 정상 동작 중 false alarm 감소
+            }
+            return p;
+        }
+
+        /// <summary>데이터 폴더에서 Axis* 하위 폴더를 스캔해 일괄 학습합니다.</summary>
+        private async void StartBatchTrainingAsync()
+        {
+            string currentDir = _dlDataDir?.Text?.Trim() ?? "";
+            if (!System.IO.Directory.Exists(currentDir))
+            { MessageBox.Show("데이터 폴더가 없습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            // Axis 폴더 탐색: 현재 폴더 우선 → 부모 폴더 차선 → 단일 폴더 fallback
+            // 우선순위 ①: currentDir 안에 Axis* 하위폴더 (e.g. train\20260414_Axis0)
+            var axisDirs = System.IO.Directory.GetDirectories(currentDir)
+                .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
+                    System.IO.Path.GetFileName(d), @"[Aa]xis\d+"))
+                .OrderBy(d => d)
+                .ToList();
+
+            if (axisDirs.Count == 0)
+            {
+                // 우선순위 ②: 부모 폴더 안에 Axis* 폴더 (currentDir 자체가 Axis 폴더인 경우)
+                string parentDir = System.IO.Path.GetDirectoryName(currentDir) ?? currentDir;
+                if (parentDir != currentDir && System.IO.Directory.Exists(parentDir))
+                {
+                    axisDirs = System.IO.Directory.GetDirectories(parentDir)
+                        .Where(d => System.Text.RegularExpressions.Regex.IsMatch(
+                            System.IO.Path.GetFileName(d), @"[Aa]xis\d+"))
+                        .OrderBy(d => d)
+                        .ToList();
+                }
+            }
+
+            if (axisDirs.Count == 0)
+                axisDirs = new List<string> { currentDir }; // 우선순위 ③: 단일 폴더
+
+            var dlg = MessageBox.Show(
+                $"다음 {axisDirs.Count}개 축을 순차 학습합니다:\n\n" +
+                string.Join("\n", axisDirs.Select(d => "  • " + System.IO.Path.GetFileName(d))) +
+                "\n\n계속할까요?",
+                "일괄 학습 확인", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+            if (dlg != DialogResult.OK) return;
+
+            // Python + 스크립트 확인 (공통)
+            string scriptsDir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
+            string venvPython = System.IO.Path.Combine(scriptsDir, ".venv", "Scripts", "python.exe");
+            string python = System.IO.File.Exists(venvPython) ? venvPython : FindPythonExe(txtPythonPath?.Text?.Trim() ?? "");
+            if (python == null) { MessageBox.Show("Python을 찾을 수 없습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+            string scriptPath = System.IO.Path.Combine(scriptsDir, "train_dl_model.py");
+            if (!System.IO.File.Exists(scriptPath)) { MessageBox.Show("train_dl_model.py 없음.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            string modelsDir = System.IO.Path.GetDirectoryName(_dlOutputPath?.Text ?? "") ?? @"C:\Data\PHM_Logs\models";
+            bool isTorque = _dlRdoTorque?.Checked == true;
+            string sigTag = isTorque ? "torque" : "accel";
+
+            _dlBtnTrain.Enabled = false; _dlBtnBatch.Enabled = false; _dlBtnStop.Enabled = true;
+            _dlLog.Clear();
+
+            int total = axisDirs.Count, done = 0;
+            foreach (var axisDir in axisDirs)
+            {
+                if (_dlProc != null) break; // 중지 체크
+
+                string axisName = System.IO.Path.GetFileName(axisDir);
+                var axisMatch = System.Text.RegularExpressions.Regex.Match(axisName, @"[Aa]xis(\d+)");
+                int axisNum = axisMatch.Success ? int.Parse(axisMatch.Groups[1].Value) : done;
+                bool   batchIsAe = _dlRdoAe?.Checked == true;
+                string batchPfx  = batchIsAe ? "ae_cnn1d" : "cnn1d";
+                string outputPath = System.IO.Path.Combine(modelsDir, $"{batchPfx}_axis{axisNum}_{sigTag}.onnx");
+                try { System.IO.Directory.CreateDirectory(modelsDir); } catch { }
+
+                var paramsObj = BuildDlParams(axisDir, outputPath);
+                if (paramsObj == null)
+                {
+                    AppendDlLog($"[SKIP] {axisName} — params 빌드 실패 (채널/클래스 미설정)", Color.Yellow);
+                    done++; continue;
+                }
+
+                AppendDlLog($"\n━━━ [{done + 1}/{total}] {axisName} ━━━", Color.Cyan);
+                _dlStatus.Text = $"일괄 [{done + 1}/{total}] {axisName}";
+
+                string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"phm_dl_batch_{axisNum}.json");
+                System.IO.File.WriteAllText(paramsPath,
+                    JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = true }),
+                    new System.Text.UTF8Encoding(false));
+
+                int totalEpochs = (int)_dlEpochs.Value;
+                bool success = await System.Threading.Tasks.Task.Run(() => RunTrainingProcess(python, scriptPath, paramsPath, totalEpochs));
+
+                done++;
+                _dlProgress.Value = (int)(done * 100.0 / total);
+                if (!success) AppendDlLog($"[FAIL] {axisName}", Color.Red);
+                else          AppendDlLog($"[OK]   모델 저장: {outputPath}", Color.LightGreen);
+            }
+
+            _dlBtnTrain.Enabled = true; _dlBtnBatch.Enabled = true; _dlBtnStop.Enabled = false;
+            _dlStatus.Text = $"일괄 완료 ({done}/{total})";
+            MessageBox.Show($"일괄 학습 완료: {done}/{total}개 축\n모델 폴더: {modelsDir}",
+                "완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        /// <summary>학습 프로세스를 실행하고 완료 여부를 반환합니다. 동기 블로킹 — Task.Run에서 호출.</summary>
+        /// <param name="onProgress">에포크 진행률(0-100)을 받는 콜백 (선택적)</param>
+        private bool RunTrainingProcess(string python, string scriptPath, string paramsPath, int totalEpochs, Action<int> onProgress = null)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(python, $"\"{scriptPath}\" --params \"{paramsPath}\"")
+                {
+                    UseShellExecute = false, RedirectStandardOutput = true,
+                    RedirectStandardError = true, CreateNoWindow = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                    StandardErrorEncoding  = System.Text.Encoding.UTF8,
+                };
+                // Python I/O 인코딩 강제 — MLflow 등 라이브러리가 이모지/한글을 stderr로 출력할 때
+                // 시스템 기본 인코딩(cp949)과 충돌하는 문제 방지
+                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+                psi.EnvironmentVariables["PYTHONUTF8"]       = "1";
+                _dlProc = System.Diagnostics.Process.Start(psi);
+                _dlProc.ErrorDataReceived += (s2, ea) =>
+                {
+                    if (ea.Data != null) BeginInvoke(new Action(() => AppendDlLog("[ERR] " + ea.Data, Color.Orange)));
+                };
+                _dlProc.BeginErrorReadLine();
+
+                string line;
+                while ((line = _dlProc.StandardOutput.ReadLine()) != null)
+                {
+                    string captured = line;
+                    BeginInvoke(new Action(() =>
+                    {
+                        AppendDlLog(captured);
+                        try
+                        {
+                            using (var doc = JsonDocument.Parse(captured))
+                            {
+                                if (doc.RootElement.TryGetProperty("epoch", out var ep))
+                                {
+                                    int pct = Math.Min(100, (int)(ep.GetInt32() * 100.0 / totalEpochs));
+                                    onProgress?.Invoke(pct);
+                                    if (doc.RootElement.TryGetProperty("val_acc", out var va))
+                                        _dlStatus.Text = $"에포크 {ep.GetInt32()}/{totalEpochs}  val_acc={va.GetDouble():F3}";
+                                    else if (doc.RootElement.TryGetProperty("val_mse", out var vm))
+                                        _dlStatus.Text = $"에포크 {ep.GetInt32()}/{totalEpochs}  val_mse={vm.GetDouble():F5}";
+                                }
+                                if (doc.RootElement.TryGetProperty("accuracy", out var acc))
+                                    _dlStatus.Text = $"완료  최종={acc.GetDouble():F3}";
+                                else if (doc.RootElement.TryGetProperty("threshold", out var thr))
+                                    _dlStatus.Text = $"완료  임계값={thr.GetDouble():F4}";
+                            }
+                        }
+                        catch { }
+                    }));
+                }
+                _dlProc.WaitForExit();
+                int exitCode = _dlProc.ExitCode;
+                _dlProc = null;
+                return exitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new Action(() => AppendDlLog("프로세스 오류: " + ex.Message, Color.Red)));
+                _dlProc = null;
+                return false;
+            }
+        }
+
+        private async void StartDlTrainingAsync()
+        {
+            // ── 유효성 검사 ──────────────────────────────────────────────────
+            string dataDir = _dlDataDir?.Text?.Trim() ?? "";
+            if (!System.IO.Directory.Exists(dataDir))
+            { MessageBox.Show("데이터 폴더가 존재하지 않습니다:\n" + dataDir, "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            string outputPath = _dlOutputPath?.Text?.Trim() ?? "";
+            if (string.IsNullOrEmpty(outputPath))
+            { MessageBox.Show("출력 모델 경로를 입력하세요.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            // ── params 빌드 ─────────────────────────────────────────────────
+            var paramsObj = BuildDlParams(dataDir, outputPath);
+            if (paramsObj == null)
+            {
+                bool trainIsAe = _dlRdoAe?.Checked == true;
+                MessageBox.Show(
+                    trainIsAe ? "입력 채널(1개 이상), 정상 클래스(1개 이상), 학습률을 확인하세요."
+                              : "입력 채널(1개 이상), 결함 클래스(2개 이상), 학습률을 확인하세요.",
+                    "설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // ── Python 및 스크립트 확인 ──────────────────────────────────────
+            string scriptsDir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
+            string venvPython = System.IO.Path.Combine(scriptsDir, ".venv", "Scripts", "python.exe");
+            string python = System.IO.File.Exists(venvPython)
+                ? venvPython
+                : FindPythonExe(txtPythonPath?.Text?.Trim() ?? "");
+            if (python == null)
+            {
+                MessageBox.Show(
+                    "Python을 찾을 수 없습니다.\n\n" +
+                    "• [🐍 가상환경 설정] 버튼을 클릭하여 .venv 생성\n" +
+                    "• 또는 학습 탭의 Python 경로를 설정하세요.",
+                    "Python 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            AppendDlLog($"[Python] {python}");
+
+            string scriptPath = System.IO.Path.Combine(scriptsDir, "train_dl_model.py");
+            if (!System.IO.File.Exists(scriptPath))
+            { MessageBox.Show("train_dl_model.py 를 찾을 수 없습니다:\n" + scriptPath, "스크립트 없음", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+
+            // ── 출력 폴더 생성 + params JSON 저장 ─────────────────────────────
+            try { System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(outputPath)); } catch { }
+            int totalEpochs = (int)_dlEpochs.Value;
+            string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_dl_params.json");
+            System.IO.File.WriteAllText(paramsPath,
+                JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = true }),
+                new System.Text.UTF8Encoding(false));
+
+            // ── UI 상태 전환 ─────────────────────────────────────────────────
+            _dlLog.Clear();
+            _dlProgress.Value   = 0;
+            _dlBtnTrain.Enabled = false;
+            _dlBtnBatch.Enabled = false;
+            _dlBtnStop.Enabled  = true;
+            _dlStatus.Text = "학습 중...";
+            AppendDlLog($"[시작] python \"{scriptPath}\"");
+            AppendDlLog($"[params] {paramsPath}");
+            AppendDlLog("");
+
+            // ── 비동기 프로세스 실행 ─────────────────────────────────────────
+            bool success = await System.Threading.Tasks.Task.Run(() =>
+                RunTrainingProcess(python, scriptPath, paramsPath, totalEpochs,
+                    pct => BeginInvoke(new Action(() => _dlProgress.Value = pct))));
+
+            _dlProgress.Value   = success ? 100 : _dlProgress.Value;
+            _dlBtnTrain.Enabled = true;
+            _dlBtnBatch.Enabled = true;
+            _dlBtnStop.Enabled  = false;
+
+            if (success)
+            {
+                _dlStatus.Text = "완료 ✓";
+                AppendDlLog($"\n모델 저장: {outputPath}", Color.Cyan);
+                bool doneIsAe = _dlRdoAe?.Checked == true;
+                MessageBox.Show(
+                    doneIsAe
+                        ? $"AE 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX AE 모델로 로드하세요."
+                        : $"DL 모델 학습 완료!\n{outputPath}\n\n대시보드에서 ONNX 분류 모델로 로드하세요.",
+                    "학습 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                _dlStatus.Text = "오류";
+                AppendDlLog("학습 실패", Color.Red);
+            }
+        }
+
+        private void RunSetupVenv()
+        {
+            // ── 선택 다이얼로그 ────────────────────────────────────────
+            string choice;
+            using (var dlg = new Form
+            {
+                Text            = "환경 설치",
+                Width           = 360,
+                Height          = 160,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition   = FormStartPosition.CenterParent,
+                MaximizeBox     = false,
+                MinimizeBox     = false,
+            })
+            {
+                var lbl = new Label
+                {
+                    Text   = "설치 항목을 선택하세요:",
+                    Left   = 16, Top = 16, Width = 320, Height = 20,
+                };
+                var btnLocal = new Button
+                {
+                    Text = "🐍  로컬 가상환경 설치",
+                    Left = 16, Top = 48, Width = 150, Height = 36,
+                };
+                var btnServer = new Button
+                {
+                    Text = "🚀  서버 GPU Docker 빌드",
+                    Left = 178, Top = 48, Width = 155, Height = 36,
+                };
+                var btnCancel = new Button
+                {
+                    Text         = "취소",
+                    Left         = 254, Top = 92, Width = 79, Height = 26,
+                    DialogResult = DialogResult.Cancel,
+                };
+                dlg.Controls.AddRange(new Control[] { lbl, btnLocal, btnServer, btnCancel });
+                dlg.CancelButton = btnCancel;
+                btnLocal.Click  += (s, e) => { dlg.Tag = "local";  dlg.Close(); };
+                btnServer.Click += (s, e) => { dlg.Tag = "server"; dlg.Close(); };
+
+                dlg.ShowDialog(this);
+                choice = dlg.Tag as string;
+            }
+            if (choice == null) return;
+
+            // ── 공통 helpers ───────────────────────────────────────────
+            string scriptsDir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "scripts");
+
+            void RunBat(string fileName, string logMsg)
+            {
+                string batPath = System.IO.Path.Combine(scriptsDir, fileName);
+                if (!System.IO.File.Exists(batPath))
+                {
+                    MessageBox.Show($"{fileName} 를 찾을 수 없습니다:\n{batPath}",
+                        "파일 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName         = batPath,
+                        WorkingDirectory = scriptsDir,
+                        UseShellExecute  = true,
+                    });
+                    AppendDlLog(logMsg, Color.Cyan);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"{fileName} 실행 실패:\n{ex.Message}",
+                        "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+
+            // ── 선택 분기 ──────────────────────────────────────────────
+            if (choice == "local")
+                RunBat("setup_venv.bat",
+                    "[가상환경] setup_venv.bat 실행 중 — 완료 후 학습 시작 가능합니다.");
+            else
+                RunBat("setup_docker_gpu.bat",
+                    "[서버 GPU] setup_docker_gpu.bat 실행 중 — SSH로 서버에 접속합니다.");
+        }
+
+        private void StopDlTraining()
+        {
+            try { _dlProc?.Kill(); } catch { }
+            _dlBtnTrain.Enabled = true;
+            _dlBtnStop.Enabled  = false;
+            _dlStatus.Text = "중단됨";
+            AppendDlLog("사용자에 의해 중단됨", Color.Yellow);
+        }
+
+        private void AppendDlLog(string text, Color? color = null)
+        {
+            if (_dlLog == null) return;
+            _dlLog.SelectionStart  = _dlLog.TextLength;
+            _dlLog.SelectionLength = 0;
+            _dlLog.SelectionColor  = color ?? Color.LightGreen;
+            _dlLog.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  " + text + "\n");
+            _dlLog.ScrollToCaret();
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        //  Airflow 연동 패널
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>서버 설정 저장 후 Airflow 패널 텍스트박스를 최신값으로 갱신합니다.</summary>
+        private void SyncAirflowPanel(Services.ServerSettings s)
+        {
+            if (_aflUrl   != null) _aflUrl.Text   = s.AirflowUrl   ?? "";
+            if (_aflDagId != null) _aflDagId.Text = s.AirflowDagId ?? "phm_retrain";
+            // User/Password 는 ServerSettings.Current 에서 직접 읽으므로 별도 TextBox 불필요
+        }
+
+        private GroupBox BuildAirflowPanel()
+        {
+            var grp = new GroupBox
+            {
+                Text = "Airflow 주기 재학습",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(8, 2, 8, 2),
+                ForeColor = Color.FromArgb(0, 140, 220),
+            };
+
+            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 10, RowCount = 1 };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 36));   // col0  "URL:"
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));    // col1  URL textbox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));   // col2  "DAG:"
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // col3  DAG ID textbox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));   // col4  "프로파일:" label
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));  // col5  프로파일 TextBox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));   // col6  "라벨:" label
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));    // col7  라벨 TextBox
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));  // col8  Trigger button
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));   // col9  Status button
+
+            var lblUrl = new Label { Text = "URL:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText };
+            _aflUrl = new TextBox { Dock = DockStyle.Fill,
+                Text = Services.ServerSettings.Current.AirflowUrl ?? "http://localhost:8080" };
+
+            var lblDag = new Label { Text = "DAG:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText };
+            _aflDagId = new TextBox { Dock = DockStyle.Fill,
+                Text = Services.ServerSettings.Current.AirflowDagId ?? "phm_retrain" };
+
+            // ── 모델 선택 체크박스 패널 ────────────────────────────────────────
+            Action onModelChk = () => { if (!_aflUpdatingAll) UpdateTriggerButtonText(); };
+
+            _aflChkAll = AflMakeChk("▣ 전체", true);
+            _aflChkAll.Font = new Font(_aflChkAll.Font, FontStyle.Bold);
+            _aflChkAll.CheckedChanged += (s, e) =>
+            {
+                if (_aflUpdatingAll) return;
+                _aflUpdatingAll = true;
+                bool chk = _aflChkAll.Checked;
+                foreach (Control c in _aflModelFlow.Controls)
+                    if (c is CheckBox cb && cb != _aflChkAll && cb.Visible) cb.Checked = chk;
+                _aflUpdatingAll = false;
+                UpdateTriggerButtonText();
+            };
+
+            // AE 체크박스
+            _aflChkAeAccelG   = AflMakeChk("Accel 전역",   true); _aflChkAeAccelG.CheckedChanged   += (s, e) => onModelChk();
+            _aflChkAeTorqueG  = AflMakeChk("Torque 전역",  true); _aflChkAeTorqueG.CheckedChanged  += (s, e) => onModelChk();
+            _aflChkAeTorqueAx = AflMakeChk("Torque 축별",  true); _aflChkAeTorqueAx.CheckedChanged += (s, e) => onModelChk();
+            _aflChkAeCombG    = AflMakeChk("Comb 전역",    true); _aflChkAeCombG.CheckedChanged    += (s, e) => onModelChk();
+            _aflChkAeCombAx   = AflMakeChk("Comb 축별",    true); _aflChkAeCombAx.CheckedChanged   += (s, e) => onModelChk();
+
+            // CLS 체크박스
+            _aflChkClsAccel  = AflMakeChk("Accel",    true); _aflChkClsAccel.CheckedChanged  += (s, e) => onModelChk();
+            _aflChkClsTorque = AflMakeChk("Torque",   true); _aflChkClsTorque.CheckedChanged += (s, e) => onModelChk();
+            _aflChkClsComb   = AflMakeChk("Combined", true); _aflChkClsComb.CheckedChanged   += (s, e) => onModelChk();
+
+            _aflModelFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill, AutoSize = false,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Padding = new Padding(0), Margin = new Padding(0),
+            };
+            _aflModelFlow.Controls.AddRange(new Control[]
+            {
+                _aflChkAll,
+                _aflChkAeAccelG, _aflChkAeTorqueG, _aflChkAeTorqueAx,
+                _aflChkAeCombG,  _aflChkAeCombAx,
+                _aflChkClsAccel, _aflChkClsTorque, _aflChkClsComb,
+            });
+
+            // 프로파일 컨트롤
+            var lblProfile = new Label
+            {
+                Text = "프로파일:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText,
+            };
+            _aflProfile = new TextBox
+            {
+                Dock = DockStyle.Fill, Text = "default",
+                ForeColor = Color.FromArgb(40, 40, 40),
+            };
+            // 워터마크: 빈 칸이면 연회색으로 "default" 힌트
+            _aflProfile.Enter += (s, e) => { if (_aflProfile.Text == "default") { _aflProfile.SelectAll(); } };
+
+            var lblProfileLbl = new Label
+            {
+                Text = "라벨:", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft, ForeColor = SystemColors.ControlText,
+            };
+            _aflProfileLabel = new TextBox
+            {
+                Dock = DockStyle.Fill, Text = "",
+                ForeColor = Color.FromArgb(100, 100, 100),
+            };
+            var tipProfile = new System.Windows.Forms.ToolTip();
+            tipProfile.SetToolTip(_aflProfile,      "모델 저장 디렉토리 이름\n예: default, accel_only, v2026-05-11");
+            tipProfile.SetToolTip(_aflProfileLabel, "프로파일 표시 이름 (선택)\n예: 5월 재학습");
+
+            _aflBtnTrigger = new Button
+            {
+                Text = "▶ 지금 트리거", Height = 24,
+                BackColor = Color.FromArgb(0, 120, 60), ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
+                Dock = DockStyle.Fill, Margin = new Padding(2, 4, 2, 4),
+            };
+            _aflBtnTrigger.Click += async (s, e) => await TriggerAirflowAsync();
+
+            _aflBtnStatus = new Button
+            {
+                Text = "🔄 상태 조회", Height = 24,
+                Dock = DockStyle.Fill, Margin = new Padding(2, 4, 2, 4),
+            };
+            _aflBtnStatus.Click += async (s, e) => await RefreshAirflowStatusAsync();
+
+            _aflStatusLbl = new Label
+            {
+                Text = "—", AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft,
+                ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8.5f),
+            };
+
+            // row0: 컨트롤 / row1: 모델 체크박스 / row2: 상태 레이블
+            tl.RowCount = 3;
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
+
+            tl.Controls.Add(lblUrl,          0, 0);
+            tl.Controls.Add(_aflUrl,          1, 0);
+            tl.Controls.Add(lblDag,           2, 0);
+            tl.Controls.Add(_aflDagId,        3, 0);
+            tl.Controls.Add(lblProfile,       4, 0);
+            tl.Controls.Add(_aflProfile,      5, 0);
+            tl.Controls.Add(lblProfileLbl,    6, 0);
+            tl.Controls.Add(_aflProfileLabel, 7, 0);
+            tl.Controls.Add(_aflBtnTrigger,   8, 0);
+            tl.Controls.Add(_aflBtnStatus,    9, 0);
+
+            // row1: 모델 선택 체크박스 (전체 span)
+            tl.SetColumnSpan(_aflModelFlow, 10);
+            tl.Controls.Add(_aflModelFlow, 0, 1);
+
+            // row2: 상태 레이블 (전체 span)
+            tl.SetColumnSpan(_aflStatusLbl, 10);
+            tl.Controls.Add(_aflStatusLbl, 0, 2);
+
+            // 초기 세션(CLS)에 맞는 항목 채우기
+            UpdateAflTrainModeItems();
+
+            grp.Controls.Add(tl);
+            return grp;
+        }
+
+        /// <summary>체크박스 생성 헬퍼.</summary>
+        private static CheckBox AflMakeChk(string text, bool isChecked) => new CheckBox
+        {
+            Text = text, Checked = isChecked, AutoSize = true,
+            Margin = new Padding(0, 4, 10, 0),
+        };
+
+        /// <summary>AE/CLS 세션에 따라 모델 선택 체크박스를 표시/숨깁니다.</summary>
+        private void UpdateAflTrainModeItems()
+        {
+            if (_aflModelFlow == null) return;
+            if (this.InvokeRequired) { this.BeginInvoke(new Action(UpdateAflTrainModeItems)); return; }
+
+            bool isAe = (_dlRdoAe?.Checked == true);
+
+            // AE 체크박스
+            _aflChkAeAccelG.Visible   = isAe;
+            _aflChkAeTorqueG.Visible  = isAe;
+            _aflChkAeTorqueAx.Visible = isAe;
+            _aflChkAeCombG.Visible    = isAe;
+            _aflChkAeCombAx.Visible   = isAe;
+
+            // CLS 체크박스
+            _aflChkClsAccel.Visible  = !isAe;
+            _aflChkClsTorque.Visible = !isAe;
+            _aflChkClsComb.Visible   = !isAe;
+
+            // 세션 전환 시 전체 선택 상태 리셋
+            _aflUpdatingAll = true;
+            _aflChkAll.Checked = true;
+            foreach (Control c in _aflModelFlow.Controls)
+                if (c is CheckBox cb && cb != _aflChkAll) cb.Checked = true;
+            _aflUpdatingAll = false;
+
+            UpdateTriggerButtonText();
+        }
+
+        /// <summary>
+        /// 현재 DL 탭 설정을 params로 패키징해 Airflow DAG를 즉시 트리거합니다.
+        /// </summary>
+        /// <summary>세션/센서 선택 조합을 버튼 툴팁으로 표시합니다.</summary>
+        private void UpdateTriggerButtonText()
+        {
+            if (_aflBtnTrigger == null) return;
+            bool isAe = (_dlRdoAe?.Checked == true);
+
+            var tasks = new System.Collections.Generic.List<string>();
+            if (isAe)
+            {
+                if (_aflChkAeAccelG?.Checked   == true) tasks.Add("Accel 전역");
+                if (_aflChkAeTorqueG?.Checked  == true) tasks.Add("Torque 전역");
+                if (_aflChkAeTorqueAx?.Checked == true) tasks.Add("Torque 축별");
+                if (_aflChkAeCombG?.Checked    == true) tasks.Add("Comb 전역");
+                if (_aflChkAeCombAx?.Checked   == true) tasks.Add("Comb 축별");
+            }
+            else
+            {
+                if (_aflChkClsAccel?.Checked  == true) tasks.Add("Accel");
+                if (_aflChkClsTorque?.Checked == true) tasks.Add("Torque");
+                if (_aflChkClsComb?.Checked   == true) tasks.Add("Combined");
+            }
+
+            string label   = isAe ? "AE" : "CLS";
+            string preview = tasks.Count > 0
+                ? string.Join(" + ", tasks)
+                : "⚠ 없음 (1개 이상 선택 필요)";
+            string tipText = $"[{label}] 실행 태스크: {preview}";
+
+            _aflBtnTrigger.Text = $"▶ 트리거 [{label}]";
+            if (_aflBtnTrigger.Tag is System.Windows.Forms.ToolTip tt)
+                tt.SetToolTip(_aflBtnTrigger, tipText);
+            else
+            {
+                var newTip = new System.Windows.Forms.ToolTip();
+                newTip.SetToolTip(_aflBtnTrigger, tipText);
+                _aflBtnTrigger.Tag = newTip;
+            }
+        }
+
+        private async System.Threading.Tasks.Task TriggerAirflowAsync()
+        {
+            string dataDir    = _dlDataDir?.Text?.Trim() ?? "";
+            string outputPath = _dlOutputPath?.Text?.Trim() ?? "";
+            string dagId      = _aflDagId?.Text?.Trim() ?? "phm_retrain";
+            string airflowUrl = _aflUrl?.Text?.Trim()
+                                ?? Services.ServerSettings.Current.AirflowUrl;
+
+            if (!System.IO.Directory.Exists(dataDir))
+            {
+                MessageBox.Show("데이터 폴더가 없습니다:\n" + dataDir, "오류",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            var paramsObj = BuildDlParams(dataDir, outputPath);
+            if (paramsObj == null)
+            {
+                MessageBox.Show("학습 설정이 올바르지 않습니다. 채널/클래스/학습률을 확인하세요.",
+                    "설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // ── train_modes 결정: 체크박스 상태 읽기 ─────────────────────────────
+            bool isAeSession = (_dlRdoAe?.Checked == true);
+
+            var modeList = new System.Collections.Generic.List<string>();
+            if (isAeSession)
+            {
+                if (_aflChkAeAccelG?.Checked   == true) modeList.Add("ae_accel");
+                if (_aflChkAeTorqueG?.Checked  == true) modeList.Add("ae_torque_global");
+                if (_aflChkAeTorqueAx?.Checked == true) modeList.Add("ae_torque");
+                if (_aflChkAeCombG?.Checked    == true) modeList.Add("ae_combined_global");
+                if (_aflChkAeCombAx?.Checked   == true) modeList.Add("ae_combined");
+            }
+            else
+            {
+                if (_aflChkClsAccel?.Checked  == true) modeList.Add("accel");
+                if (_aflChkClsTorque?.Checked == true) modeList.Add("torque");
+                if (_aflChkClsComb?.Checked   == true) modeList.Add("combined");
+            }
+            string[] trainModes = modeList.ToArray();
+
+            if (trainModes.Length == 0)
+            {
+                MessageBox.Show("학습할 모델을 1개 이상 선택하세요.",
+                                "모델 미선택", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            paramsObj["train_modes"] = trainModes;
+            // Airflow DAG 태스크는 session을 내부 고정값 사용 → conf의 session 제거
+            paramsObj.Remove("session");
+
+            // ── 프로파일 설정 ────────────────────────────────────────────────
+            string profileName = _aflProfile?.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(profileName)) profileName = "default";
+            paramsObj["profile"] = profileName;
+
+            string profileLabel = _aflProfileLabel?.Text?.Trim();
+            if (!string.IsNullOrWhiteSpace(profileLabel))
+                paramsObj["profile_label"] = profileLabel;
+
+            _aflBtnTrigger.Enabled = false;
+            _aflStatusLbl.ForeColor = Color.DodgerBlue;
+            _aflStatusLbl.Text = "트리거 중…";
+
+            var s2 = Services.ServerSettings.Current;
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                var trigResult = await client.TriggerDagAsync(dagId, paramsObj);
+                if (trigResult.Ok)
+                {
+                    string prof = paramsObj.TryGetValue("profile", out var pv) ? pv?.ToString() : "default";
+                    _aflLastRunId           = trigResult.RunId;
+                    _aflStatusLbl.Text      = $"queued — {trigResult.RunId}  [프로파일: {prof}]";
+                    _aflStatusLbl.ForeColor = Color.LightGreen;
+                    AppendDlLog($"[Airflow] DAG 트리거 성공: {trigResult.RunId}  프로파일={prof}", Color.LightGreen);
+                }
+                else
+                {
+                    _aflStatusLbl.Text      = "트리거 실패: " + trigResult.Error;
+                    _aflStatusLbl.ForeColor = Color.OrangeRed;
+                    AppendDlLog($"[Airflow] 트리거 실패: {trigResult.Error}", Color.OrangeRed);
+                }
+            }
+
+            _aflBtnTrigger.Enabled = true;
+        }
+
+        /// <summary>마지막으로 트리거된 DAG 실행 상태를 조회합니다.</summary>
+        private async System.Threading.Tasks.Task RefreshAirflowStatusAsync()
+        {
+            string dagId      = _aflDagId?.Text?.Trim() ?? "phm_retrain";
+            string airflowUrl = _aflUrl?.Text?.Trim()
+                                ?? Services.ServerSettings.Current.AirflowUrl;
+
+            _aflBtnStatus.Enabled   = false;
+            _aflStatusLbl.ForeColor = Color.DodgerBlue;
+            _aflStatusLbl.Text      = "조회 중…";
+
+            var s2 = Services.ServerSettings.Current;
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                if (!string.IsNullOrEmpty(_aflLastRunId))
+                {
+                    var stRes = await client.GetDagRunStatusAsync(dagId, _aflLastRunId);
+                    if (stRes.State != null)
+                    {
+                        _aflStatusLbl.Text      = $"{stRes.State} — {_aflLastRunId}";
+                        _aflStatusLbl.ForeColor = StateColor(stRes.State);
+                    }
+                    else
+                    {
+                        _aflStatusLbl.Text      = "오류: " + stRes.Error;
+                        _aflStatusLbl.ForeColor = Color.OrangeRed;
+                    }
+                }
+                else
+                {
+                    // run_id 없으면 최신 실행 조회
+                    var latRes = await client.GetLatestDagRunAsync(dagId);
+                    if (latRes.State != null)
+                    {
+                        _aflLastRunId           = latRes.RunId;
+                        _aflStatusLbl.Text      = string.IsNullOrEmpty(latRes.RunId)
+                            ? "실행 이력 없음"
+                            : $"{latRes.State} — {latRes.RunId}";
+                        _aflStatusLbl.ForeColor = StateColor(latRes.State ?? "none");
+                    }
+                    else
+                    {
+                        _aflStatusLbl.Text      = "오류: " + latRes.Error;
+                        _aflStatusLbl.ForeColor = Color.OrangeRed;
+                    }
+                }
+            }
+
+            _aflBtnStatus.Enabled = true;
+        }
+
+        private static Color StateColor(string state)
+        {
+            switch (state?.ToLowerInvariant())
+            {
+                case "success":  return Color.LightGreen;
+                case "running":  return Color.DodgerBlue;
+                case "queued":   return Color.Cyan;
+                case "failed":
+                case "upstream_failed": return Color.OrangeRed;
+                default:         return Color.Gray;
             }
         }
     }

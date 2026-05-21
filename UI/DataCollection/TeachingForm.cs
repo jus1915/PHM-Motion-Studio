@@ -27,6 +27,7 @@ namespace PHM_Project_DockPanel.Windows
         private DataGridView _teachingGrid;
 
         private CancellationTokenSource _teachCts;
+        private readonly Random _rng = new Random();
 
         // --- 컬럼 인덱스/이름(고정) ---
         private const int COL_RUN = 0;
@@ -504,8 +505,9 @@ namespace PHM_Project_DockPanel.Windows
                                     abort = true; break;
                                 }
 
+                                double _resolvedTarget = ResolveTarget(step.Target, step.Axis);
                                 success = await _motion.RunMotionWithLogging(
-                                    new[] { step.Axis }, true, step.Target, null, plan.Loop);
+                                    new[] { step.Axis }, true, _resolvedTarget, null, plan.Loop);
                             }
                         }
                         finally
@@ -529,6 +531,9 @@ namespace PHM_Project_DockPanel.Windows
 
                     if (abort) break;
                     iterDone++;
+
+                    // 회차 완료 알림 → DashboardForm 설비 사용률 업데이트
+                    AppEvents.RaiseLoopCompleted(iterDone);
 
                     if (plan.Loop)   // 무한 반복이면 done 카운트만 증가(표시는 n/∞)
                         UpdateIterationStatus(iterDone, -1);
@@ -851,6 +856,25 @@ namespace PHM_Project_DockPanel.Windows
             {
                 _iterStatusLabel.Text = $"반복 {curStr}/{totalStr}";
             }
+        }
+
+        /// <summary>
+        /// Target == 77777이면 해당 축의 50~(PositionMax-50) mm 범위 내 무작위 위치 반환.
+        /// 그 외이면 원래 target 값으로 반환.
+        /// </summary>
+        private double ResolveTarget(double target, int axisIndex)
+        {
+            const double RANDOM_MAGIC = 77777.0;
+            if (Math.Abs(target - RANDOM_MAGIC) > 0.01) return target;
+
+            double posMax = 900.0;  // 기본값
+            if (_motion?.AxisConfigs != null && axisIndex < _motion.AxisConfigs.Length)
+                posMax = _motion.AxisConfigs[axisIndex]?.PositionMax ?? 900.0;
+
+            double lo = 50.0;
+            double hi = posMax - 50.0;
+            if (hi <= lo) return posMax / 2.0;  // 범위가 너무 좁으면 중간값
+            return lo + _rng.NextDouble() * (hi - lo);
         }
     }
 

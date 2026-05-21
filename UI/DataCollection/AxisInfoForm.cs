@@ -35,12 +35,22 @@ namespace PHM_Project_DockPanel.Windows
         private CheckBox _chkAccelCollect;     // 가속도 수집
         private CheckBox _chkTorqueCollect;    // 토크 수집
         private CheckBox _chkRealtime;
+        private CheckBox _chkContCollect;      // 연속 수집
+        private ComboBox _cmbLabel;
+        private Label _lblLabelCaption;
+        private Button _btnAddLabel, _btnRemoveLabel;
 
         // ▷ 레거시 호환용(외부 코드가 LogCheckBox에 접근하던 경우 대응)
         private CheckBox _chkLogCombined = new CheckBox { Visible = false }; // 두 체크의 OR, UI에 미표시
         private bool _syncingLegacy = false;   // 이벤트 루프 방지
         private Label _lblRealtimeStatus;
         private Label _lblDaqStatus;
+
+        // ── CLS 결함 진단 상태 배지 라벨 ──
+        private Label _lblClsNormal;
+        private Label _lblClsOverload;
+        private Label _lblClsLooseBolt;
+        private Label _lblClsOverspeed;
 
         // (선택) 외부에서 접근할 수 있도록 공개 프로퍼티
         public CheckBox AccelCheckBox => _chkAccelCollect;
@@ -67,6 +77,7 @@ namespace PHM_Project_DockPanel.Windows
 
         // --- 우측 액션 ---
         private Button btnServoOnGlobal, btnServoOffGlobal, btnAbsMoveGlobal, btnRelMoveGlobal;
+        private Button btnAlarmClear;
         private TextBox txtTargetGlobal;
         private Label lblCheckedAxes;   // 체크된 축 표시
 
@@ -94,8 +105,12 @@ namespace PHM_Project_DockPanel.Windows
             Padding = new Padding(5);
             this.MinimumSize = new Size(960, 560);
 
-            // === 상단 패널 ===
-            var topPanel = new Panel { Dock = DockStyle.Top, Height = 60, Padding = new Padding(0) };
+            // === 상단 패널 (DPI 스케일 반영) ===
+            float _dpiScale;
+            using (var _dg = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
+                _dpiScale = _dg.DpiX / 96.0f;
+            int topPanelH = Math.Max(92, (int)(92 * _dpiScale));
+            var topPanel = new Panel { Dock = DockStyle.Top, Height = topPanelH, Padding = new Padding(0) };
 
             // ===== (좌측) 상태 라벨들: 세로 정렬 =====
             var leftStatusPanel = new FlowLayoutPanel
@@ -141,6 +156,28 @@ namespace PHM_Project_DockPanel.Windows
             leftStatusPanel.Controls.Add(_lblRealtimeStatus);
             leftStatusPanel.Controls.Add(_lblDaqStatus);
 
+            // ── CLS 결함 진단 배지 ──────────────────────────────────────
+            _lblClsNormal    = CreateClsBadge("Normal");
+            _lblClsOverload  = CreateClsBadge("Overload");
+            _lblClsLooseBolt = CreateClsBadge("Loose Bolt");
+            _lblClsOverspeed = CreateClsBadge("Overspeed");
+
+            var clsBadgePanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0, 4, 0, 0),
+                Padding = new Padding(0)
+            };
+            clsBadgePanel.Controls.Add(_lblClsNormal);
+            clsBadgePanel.Controls.Add(_lblClsOverload);
+            clsBadgePanel.Controls.Add(_lblClsLooseBolt);
+            clsBadgePanel.Controls.Add(_lblClsOverspeed);
+
+            leftStatusPanel.Controls.Add(clsBadgePanel);
+
             // ===== (우측) 체크박스 + Connect/Disconnect 버튼: 가로 정렬 =====
             var rightControlPanel = new FlowLayoutPanel
             {
@@ -153,15 +190,84 @@ namespace PHM_Project_DockPanel.Windows
                 Padding = new Padding(0)
             };
 
-            _chkAccelCollect = new CheckBox { Text = "가속도 수집", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
-            _chkTorqueCollect = new CheckBox { Text = "토크 수집", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
-            _chkRealtime = new CheckBox { Text = "실시간 데이터 전송", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkAccelCollect  = new CheckBox { Text = "가속도 수집",      AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkTorqueCollect = new CheckBox { Text = "토크 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkRealtime      = new CheckBox { Text = "실시간 데이터 전송", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkContCollect   = new CheckBox { Text = "연속 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0),
+                                               ForeColor = System.Drawing.Color.DarkSlateBlue };
 
             _chkRealtime.CheckedChanged += (s, e) =>
             {
-                bool enabled = _chkRealtime.Checked;
-                UpdateRealtimeStatusLabel(enabled);
-                AppEvents.RaiseAccelRealtimeToggled(enabled); // 로그 출력 안 함
+                UpdateRealtimeStatusLabel(_chkRealtime.Checked);
+                UpdateLabelEnabled();
+                AppEvents.RaiseAccelRealtimeToggled(_chkRealtime.Checked); // 로그 출력 안 함
+            };
+
+            _chkContCollect.CheckedChanged += OnContCollectCheckedChanged;
+
+            // 레이블 콤보박스
+            _lblLabelCaption = new Label
+            {
+                Text = "레이블:",
+                AutoSize = true,
+                Margin = new Padding(10, 10, 2, 0)
+            };
+
+            _chkAccelCollect.CheckedChanged += (s, e) => UpdateLabelEnabled();
+            _chkTorqueCollect.CheckedChanged += (s, e) => UpdateLabelEnabled();
+
+            _cmbLabel = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDown,
+                Width = 120,
+                Margin = new Padding(0, 6, 2, 0),
+                Enabled = false
+            };
+            _cmbLabel.Items.AddRange(new object[]
+            {
+                "", "normal", "fault", "bearing_fault", "gear_fault", "imbalance", "looseness",
+                "overload", "overspeed"
+            });
+            _cmbLabel.SelectedIndex = 0;
+            _cmbLabel.TextChanged += (s, e) =>
+                AppEvents.RaiseInfluxLabelChanged(_cmbLabel.Text.Trim());
+            _cmbLabel.SelectedIndexChanged += (s, e) =>
+                AppEvents.RaiseInfluxLabelChanged(_cmbLabel.Text.Trim());
+
+            _btnAddLabel = new Button
+            {
+                Text = "+",
+                Width = 26,
+                Height = 23,
+                Margin = new Padding(0, 8, 0, 0),
+                Enabled = false
+            };
+            _btnAddLabel.Click += (s, e) =>
+            {
+                string newLabel = ShowInputDialog("추가할 레이블 이름을 입력하세요:", "레이블 추가");
+                if (string.IsNullOrWhiteSpace(newLabel)) return;
+                newLabel = newLabel.Trim();
+                if (_cmbLabel.Items.Contains(newLabel)) { _cmbLabel.Text = newLabel; return; }
+                _cmbLabel.Items.Add(newLabel);
+                _cmbLabel.Text = newLabel;
+            };
+
+            _btnRemoveLabel = new Button
+            {
+                Text = "-",
+                Width = 26,
+                Height = 23,
+                Margin = new Padding(2, 8, 5, 0),
+                Enabled = false
+            };
+            _btnRemoveLabel.Click += (s, e) =>
+            {
+                string cur = _cmbLabel.Text.Trim();
+                if (string.IsNullOrEmpty(cur)) return;
+                if (!_cmbLabel.Items.Contains(cur)) return;
+                int idx = _cmbLabel.Items.IndexOf(cur);
+                _cmbLabel.Items.Remove(cur);
+                _cmbLabel.SelectedIndex = Math.Max(0, Math.Min(idx, _cmbLabel.Items.Count - 1));
             };
 
             btnConnect = new Button { Text = "Connect", Width = 100, Margin = new Padding(8, 4, 0, 0) };
@@ -173,6 +279,11 @@ namespace PHM_Project_DockPanel.Windows
             rightControlPanel.Controls.Add(_chkAccelCollect);
             rightControlPanel.Controls.Add(_chkTorqueCollect);
             rightControlPanel.Controls.Add(_chkRealtime);
+            rightControlPanel.Controls.Add(_lblLabelCaption);
+            rightControlPanel.Controls.Add(_cmbLabel);
+            rightControlPanel.Controls.Add(_btnAddLabel);
+            rightControlPanel.Controls.Add(_btnRemoveLabel);
+            rightControlPanel.Controls.Add(_chkContCollect);
             rightControlPanel.Controls.Add(btnConnect);
             rightControlPanel.Controls.Add(btnDisconnect);
 
@@ -347,6 +458,221 @@ namespace PHM_Project_DockPanel.Windows
             }
         }
 
+        private void UpdateLabelEnabled()
+        {
+            bool enabled = _chkAccelCollect.Checked || _chkTorqueCollect.Checked
+                        || _chkRealtime.Checked     || _chkContCollect.Checked;
+            _cmbLabel.Enabled       = enabled;
+            _btnAddLabel.Enabled    = enabled;
+            _btnRemoveLabel.Enabled = enabled;
+        }
+
+        private static string ShowInputDialog(string prompt, string title)
+        {
+            var dlg = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                Width = 320,
+                Height = 120,
+                MinimizeBox = false,
+                MaximizeBox = false
+            };
+            var lbl = new Label { Text = prompt, Left = 10, Top = 10, Width = 290, AutoSize = false };
+            var txt = new TextBox { Left = 10, Top = 32, Width = 284 };
+            var btnOk = new Button { Text = "확인", Left = 140, Top = 58, Width = 72, DialogResult = DialogResult.OK };
+            var btnCancel = new Button { Text = "취소", Left = 220, Top = 58, Width = 72, DialogResult = DialogResult.Cancel };
+            dlg.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+            dlg.AcceptButton = btnOk;
+            dlg.CancelButton = btnCancel;
+            return dlg.ShowDialog() == DialogResult.OK ? txt.Text : string.Empty;
+        }
+
+
+        private async void OnContCollectCheckedChanged(object sender, EventArgs e)
+        {
+            if (_chkContCollect.Checked)
+            {
+                // 수집 대상이 하나도 없으면 즉시 해제
+                if (!_chkAccelCollect.Checked && !_chkTorqueCollect.Checked)
+                {
+                    AppEvents.RaiseLog("[연속 수집] 가속도 또는 토크 수집을 먼저 체크하세요.");
+                    _chkContCollect.Checked = false;
+                    return;
+                }
+
+                string label = _cmbLabel?.Text?.Trim() ?? "";
+                // UI 스레드에서 미리 캡처 — Task.Run 내부에서 UI 컨트롤 접근 시
+                // 크로스 스레드로 인해 .Checked 가 false 반환되는 문제 방지
+                bool snapAccel  = _chkAccelCollect.Checked;
+                bool snapTorque = _chkTorqueCollect.Checked;
+
+                bool ok = await System.Threading.Tasks.Task.Run(
+                    () => _motion.StartContinuousLogging(label, snapAccel, snapTorque));
+
+                if (!ok)
+                {
+                    _chkContCollect.Checked = false;
+                    return;
+                }
+
+                // 수집 중에는 수집 대상 체크박스와 레이블 변경 불가
+                _chkAccelCollect.Enabled  = false;
+                _chkTorqueCollect.Enabled = false;
+                _cmbLabel.Enabled         = _chkRealtime.Checked; // 실시간 전송은 유지
+                UpdateContCollectStatusLabel(true);
+            }
+            else
+            {
+                await System.Threading.Tasks.Task.Run(() => _motion.StopContinuousLogging());
+
+                _chkAccelCollect.Enabled  = true;
+                _chkTorqueCollect.Enabled = true;
+                _cmbLabel.Enabled         = _chkRealtime.Checked;
+                UpdateContCollectStatusLabel(false);
+            }
+        }
+
+        private void UpdateContCollectStatusLabel(bool running)
+        {
+            if (_lblDaqStatus == null) return;
+            if (running)
+            {
+                _lblDaqStatus.Text      = "연속 수집 중...";
+                _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateBlue;
+
+                // 추론 결과 이벤트 구독
+                AppEvents.InferenceResultReceived -= OnInferenceResult;
+                AppEvents.InferenceResultReceived += OnInferenceResult;
+
+                // CLS 결함 진단 이벤트 구독
+                AppEvents.ClsInferenceResultReceived -= OnClsInferenceResult;
+                AppEvents.ClsInferenceResultReceived += OnClsInferenceResult;
+            }
+            else
+            {
+                AppEvents.InferenceResultReceived -= OnInferenceResult;
+                AppEvents.ClsInferenceResultReceived -= OnClsInferenceResult;
+
+                _lblDaqStatus.Text      = "DAQ 상태: 대기 중";
+                _lblDaqStatus.ForeColor = System.Drawing.Color.DarkSlateGray;
+
+                ResetClsBadges();
+            }
+        }
+
+        private void OnInferenceResult(string sensorType, PHM_Project_DockPanel.Services.Core.InferenceResult result)
+        {
+            if (_lblDaqStatus == null || result == null) return;
+
+            // UI 스레드 마샬링
+            if (_lblDaqStatus.InvokeRequired)
+            {
+                _lblDaqStatus.BeginInvoke(
+                    new Action<string, PHM_Project_DockPanel.Services.Core.InferenceResult>(OnInferenceResult),
+                    sensorType, result);
+                return;
+            }
+
+            // per-axis 결과: 선택된 축과 다른 축이면 무시
+            // (result.Axis == null 이면 레거시 전역 모델 결과 → 항상 표시)
+            if (result.Axis.HasValue && _selectedAxis >= 0 && result.Axis.Value != _selectedAxis)
+                return;
+
+            if (result.IsError)
+            {
+                // 오류 원인을 그대로 표시 (디버깅용)
+                _lblDaqStatus.Text      = $"[{sensorType}] 오류: {result.Error}";
+                _lblDaqStatus.ForeColor = System.Drawing.Color.OrangeRed;
+                AppEvents.RaiseLog($"[추론 오류] sensorType={sensorType}  {result.Error}");
+                return;
+            }
+
+            string tag   = sensorType == "accel" ? "가속" : "토크";
+            string axTag = result.Axis.HasValue ? $" Ax{result.Axis.Value}" : "";
+            string state = result.IsAnomaly ? "⚠ 이상" : "✓ 정상";
+            string cls   = !string.IsNullOrEmpty(result.ClassName) ? $" ({result.ClassName})" : "";
+            _lblDaqStatus.Text      = $"[{tag}{axTag}] {state}{cls}  {result.AnomalyScore:F3}";
+            _lblDaqStatus.ForeColor = result.IsAnomaly
+                ? System.Drawing.Color.OrangeRed
+                : System.Drawing.Color.DarkGreen;
+        }
+
+        // ── CLS 결함 진단 배지 핸들러 ────────────────────────────────────
+        private void OnClsInferenceResult(
+            string sensorType,
+            PHM_Project_DockPanel.Services.Core.CombinedInferenceResult result)
+        {
+            if (result == null || result.IsError || !result.ClsAvailable) return;
+
+            if (InvokeRequired)
+            {
+                BeginInvoke(
+                    new Action<string, PHM_Project_DockPanel.Services.Core.CombinedInferenceResult>(OnClsInferenceResult),
+                    sensorType, result);
+                return;
+            }
+
+            // per-axis 결과: 선택 축과 다르면 무시 (null = 전역)
+            if (result.Axis.HasValue && _selectedAxis >= 0 && result.Axis.Value != _selectedAxis)
+                return;
+
+            ResetClsBadges();
+
+            string cls = (result.ClsClassName ?? "").ToLowerInvariant()
+                                                     .Replace(" ", "_")
+                                                     .Replace("-", "_");
+
+            if (cls == "normal" || cls == "")
+            {
+                _lblClsNormal.BackColor    = System.Drawing.Color.MediumSeaGreen;
+                _lblClsNormal.ForeColor    = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("overload"))
+            {
+                _lblClsOverload.BackColor  = System.Drawing.Color.OrangeRed;
+                _lblClsOverload.ForeColor  = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("loose"))
+            {
+                _lblClsLooseBolt.BackColor = System.Drawing.Color.DarkOrange;
+                _lblClsLooseBolt.ForeColor = System.Drawing.Color.White;
+            }
+            else if (cls.Contains("overspeed"))
+            {
+                _lblClsOverspeed.BackColor = System.Drawing.Color.Firebrick;
+                _lblClsOverspeed.ForeColor = System.Drawing.Color.White;
+            }
+        }
+
+        private void ResetClsBadges()
+        {
+            Label[] badges = new Label[] { _lblClsNormal, _lblClsOverload, _lblClsLooseBolt, _lblClsOverspeed };
+            foreach (Label lbl in badges)
+            {
+                if (lbl == null) continue;
+                lbl.BackColor = System.Drawing.Color.LightGray;
+                lbl.ForeColor = System.Drawing.Color.DimGray;
+            }
+        }
+
+        private static Label CreateClsBadge(string text)
+        {
+            return new Label
+            {
+                Text        = text,
+                AutoSize    = false,
+                Width       = 78,
+                Height      = 22,
+                TextAlign   = ContentAlignment.MiddleCenter,
+                BackColor   = System.Drawing.Color.LightGray,
+                ForeColor   = System.Drawing.Color.DimGray,
+                Font        = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                BorderStyle = BorderStyle.FixedSingle,
+                Margin      = new Padding(2, 2, 2, 0)
+            };
+        }
 
         // 레거시-신규 동기화
         private void SyncCombinedFromChildren()
@@ -452,7 +778,8 @@ namespace PHM_Project_DockPanel.Windows
                 UpdateCheckedAxesLabel();
                 SetActionButtonsEnabled(false);
 
-                if (_chkRealtime.Checked) _chkRealtime.Checked = false;
+                if (_chkRealtime.Checked)    _chkRealtime.Checked    = false;
+                if (_chkContCollect?.Checked == true) _chkContCollect.Checked = false;
 
                 AppEvents.RaiseRequestClearSimulator();
                 AppEvents.RaiseLog("Controller disconnected.");
@@ -738,10 +1065,176 @@ namespace PHM_Project_DockPanel.Windows
             grid.SetColumnSpan(btnSetZero, 2);
             grid.Controls.Add(btnSetZero, 0, 2);
 
+            // Alarm Clear
+            btnAlarmClear = new Button
+            {
+                Text = "Alarm Clear",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 6, 0, 0),
+                BackColor = Color.LightSalmon
+            };
+            btnAlarmClear.Click += async (s, e) =>
+            {
+                var axes = CheckedAxes();
+                if (axes.Length == 0 && _selectedAxis >= 0)
+                    axes = new[] { _selectedAxis };
+
+                if (axes.Length == 0)
+                {
+                    MessageBox.Show("축을 체크하거나 선택하세요.", "Alarm Clear",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                var ajin = _motion?.Controller?.AsAjin;
+                if (ajin == null)
+                {
+                    MessageBox.Show("Alarm Clear는 Ajin 제어기에서만 지원됩니다.",
+                        "Alarm Clear", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                btnAlarmClear.Enabled = false;
+                try
+                {
+                    await Task.Run(() =>
+                    {
+                        foreach (int ax in axes)
+                            ajin.ClearAlarm(ax);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"알람 클리어 실패: {ex.Message}", "오류",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    btnAlarmClear.Enabled = true;
+                }
+            };
+            grid.RowCount = 4;
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.SetColumnSpan(btnAlarmClear, 2);
+            grid.Controls.Add(btnAlarmClear, 0, 3);
+
+            // ── 전체 축 제어 섹션 ───────────────────────────────────────────
+            var lblAllAxes = new Label
+            {
+                Text = "── 전체 축 제어 ──",
+                AutoSize = true,
+                ForeColor = Color.DimGray,
+                Font = new Font("Segoe UI", 8.5f),
+                Margin = new Padding(0, 12, 0, 4)
+            };
+
+            var gridAll = new TableLayoutPanel
+            {
+                ColumnCount = 2,
+                RowCount = 2,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+            gridAll.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            gridAll.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            gridAll.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            gridAll.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            var btnAllServoOn = new Button
+            {
+                Text = "전체 Servo ON",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 3, 4),
+                BackColor = Color.FromArgb(220, 255, 220)
+            };
+            var btnAllServoOff = new Button
+            {
+                Text = "전체 Servo OFF",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(3, 0, 0, 4),
+                BackColor = Color.FromArgb(255, 240, 220)
+            };
+            var btnAllAlarmClear = new Button
+            {
+                Text = "전체 Alarm Clear",
+                Height = BTN_H,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 0, 0),
+                BackColor = Color.FromArgb(255, 220, 220)
+            };
+
+            btnAllServoOn.Click += (s, e) =>
+            {
+                if (_axisCount <= 0) return;
+                btnAllServoOn.Enabled = false;
+                try
+                {
+                    for (int ax = 0; ax < _axisCount; ax++)
+                        _motion.Controller.SetServo(ax, true);
+                    AppEvents.RaiseLog($"[전체 Servo ON] {_axisCount}축 서보 ON");
+                }
+                catch (Exception ex) { AppEvents.RaiseLog($"[전체 Servo ON] 오류: {ex.Message}"); }
+                finally { btnAllServoOn.Enabled = true; }
+            };
+
+            btnAllServoOff.Click += (s, e) =>
+            {
+                if (_axisCount <= 0) return;
+                btnAllServoOff.Enabled = false;
+                try
+                {
+                    for (int ax = 0; ax < _axisCount; ax++)
+                        _motion.Controller.SetServo(ax, false);
+                    AppEvents.RaiseLog($"[전체 Servo OFF] {_axisCount}축 서보 OFF");
+                }
+                catch (Exception ex) { AppEvents.RaiseLog($"[전체 Servo OFF] 오류: {ex.Message}"); }
+                finally { btnAllServoOff.Enabled = true; }
+            };
+
+            btnAllAlarmClear.Click += async (s, e) =>
+            {
+                if (_axisCount <= 0) return;
+
+                var ajin = _motion?.Controller?.AsAjin;
+                if (ajin == null)
+                {
+                    MessageBox.Show("Alarm Clear는 Ajin 제어기에서만 지원됩니다.",
+                        "전체 Alarm Clear", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                btnAllAlarmClear.Enabled = false;
+                try
+                {
+                    await Task.Run(() =>
+                    {
+                        for (int ax = 0; ax < _axisCount; ax++)
+                            ajin.ClearAlarm(ax);
+                    });
+                    AppEvents.RaiseLog($"[전체 Alarm Clear] {_axisCount}축 알람 클리어");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"알람 클리어 실패: {ex.Message}", "오류",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally { btnAllAlarmClear.Enabled = true; }
+            };
+
+            gridAll.Controls.Add(btnAllServoOn,    0, 0);
+            gridAll.Controls.Add(btnAllServoOff,   1, 0);
+            gridAll.SetColumnSpan(btnAllAlarmClear, 2);
+            gridAll.Controls.Add(btnAllAlarmClear, 0, 1);
+
             root.Controls.Add(lblCheckedAxes);
             root.Controls.Add(lblTarget);
             root.Controls.Add(numTarget);
             root.Controls.Add(grid);
+            root.Controls.Add(lblAllAxes);
+            root.Controls.Add(gridAll);
 
             return root;
         }
@@ -792,6 +1285,7 @@ namespace PHM_Project_DockPanel.Windows
             btnServoOffGlobal.Enabled = enabled && (_selectedAxis >= 0);
             btnAbsMoveGlobal.Enabled = enabled;
             btnRelMoveGlobal.Enabled = enabled;
+            if (btnAlarmClear != null) btnAlarmClear.Enabled = enabled;
         }
 
         private TextBox CreateTextBox(Panel panel, string label, int left, int top)

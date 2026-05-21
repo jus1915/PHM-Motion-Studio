@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Globalization;
 using System.Windows.Forms;
@@ -15,10 +16,11 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using PHM_Project_DockPanel.Services.Core;
 using PHM_Project_DockPanel.Services;
+using PHM_Project_DockPanel.Services.DAQ;
 
 namespace PHM_Project_DockPanel.UI.DataAnalysis
 {
-    public partial class PreprocessingForm : DockContent
+    public partial class SignalExplorerForm : DockContent
     {
         private const int AutoCheckLimit = 100;
         private const int MaxDisplayPointsPerSeries = 4000; // 화면 표시용 상한
@@ -27,9 +29,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private const int DebounceIntervalMs = 300;
 
         // === Bulk/배치 렌더링 제어 ===
-        private bool _bulkToggle = false;     // 전체 체크/해제 등 일괄 토글 중 플래그
-        private const int MaxSeriesOnChart = 300;   // 한 화면에 표시할 최대 시리즈 수(필요시 조정)
-        private const int BulkBatchSize = 40;       // 배치 크기(한 번에 추가할 시리즈 수)
+        private const int MaxSeriesOnChart = 300;      // 한 화면에 표시할 최대 시리즈 수
+        private const int BulkBatchSize = 40;          // 배치 크기(한 번에 추가할 시리즈 수)
+        private const int MaxAutoVisualizeFiles = 50;  // 이 수 초과 시 차트 시각화 생략
 
         private const int WM_SETREDRAW = 0x000B;
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -69,9 +71,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private AIForm _aiForm;          // AI 창 핸들
         private Button btnOpenAI;        // "AI 열기" 버튼
 
-        // 가상화된 파일 리스트
-        private ListView fileList;       // ← CheckedListBox 대체
+#pragma warning disable 0649
+        // 가상화된 파일 리스트 (하위 호환 — 내부 상태용, null-safe)
+        private ListView fileList;
         private TextBox txtFilter;
+#pragma warning restore 0649
 
         // 데이터 분포 분석용 컨트롤
         private Chart chart;
@@ -114,6 +118,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private class FeatureItem { public string Key { get; set; } public string Title { get; set; } }
         private ComboBox cmbDistType;
 
+        // Data Cleaning Tab
+        private DataGridView _gridClean;
+        private RadioButton _rdoMissingDrop, _rdoMissingZero, _rdoMissingFill;
+        private CheckBox _chkOutlierEnable;
+        private ComboBox _cmbOutlierMethod;
+        private NumericUpDown _nudOutlierThreshold;
+        private ComboBox _cmbCleanOutput;
+        private Button _btnCleanPreview, _btnCleanApply;
+
         // Correlation Tab
         private CheckedListBox clbCorrFeatures;
         private ComboBox cmbCorrMethod;
@@ -128,9 +141,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private string[] _corrSelectedKeys = new string[0];
 
         // Other state
-        private readonly string defaultFolder = @"D:\Data\";
+        private readonly string defaultFolder = @"C:\Data\PHM_Logs\Signals";
         private bool _splitterInitialized = false;
         private readonly HashSet<string> _loadingSeries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private CancellationTokenSource _csvLoadCts = new CancellationTokenSource();
 
         private static readonly string[] TimeColumnCandidates = { "time_s", "cycle" };
 
@@ -157,13 +171,46 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private static double SamplePeriodFor(string yColumn) => AppState.GetPeriodForColumn(yColumn);
 
+        // ── InfluxDB 데이터 소스 ──────────────────────────────────────────────
+        private InfluxDbDataSource _influxSource;
+        private List<SignalSegment> _influxSegments = new List<SignalSegment>();
+
+        private Panel _pnlSourceSelector;
+        private Panel _pnlCsvContent;
+        private Panel _pnlInfluxContent;
+#pragma warning disable 0169
+        private Panel _pnlDatasetContent;   // 하위 호환 — 미사용
+#pragma warning restore 0169
+        private RadioButton _rdoCsv;
+        private RadioButton _rdoInflux;
+        private TreeView _tvCsv;
+        private TextBox _txtCsvRoot;
+        private ComboBox _cmbInfluxDevice;
+        private ComboBox _cmbInfluxLabel;
+        private ComboBox _cmbInfluxChannel;
+        private DateTimePicker _dtpFrom;
+        private DateTimePicker _dtpTo;
+        private NumericUpDown _nudSegSeconds;
+        private Button _btnInfluxQuery;
+        private Button _btnInfluxFullRange;
+        private Button _btnInfluxUploadCsv;
+        private Button _btnInfluxDeleteSelected;
+        private Button _btnInfluxDeleteLabel;
+        private Button _btnInfluxDeleteAll;
+        private Button _btnInfluxCheckAll;
+        private Button _btnInfluxUncheckAll;
+        private CheckedListBox _lstSegments;
+        private Label _lblInfluxStatus;
+
+        private bool InfluxMode => _rdoInflux?.Checked == true;
+
         // ===========================
         // Ctor
         // ===========================
-        public PreprocessingForm()
+        public SignalExplorerForm()
         {
             InitializeComponent();
-            Text = "데이터 전처리";
+            Text = "신호 탐색기";
 
             this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             this.UpdateStyles();
@@ -211,171 +258,52 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Vertical,
                 FixedPanel = FixedPanel.Panel1,
-                IsSplitterFixed = true
+                IsSplitterFixed = false,
+                Panel1MinSize = 280,
+                SplitterDistance = 300
             };
 
             // ----- Left -----
             var leftPanel = new Panel { Dock = DockStyle.Fill };
 
-            var buttonPanel = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Top,
-                Height = 35,
-                FlowDirection = FlowDirection.LeftToRight
-            };
+            _pnlCsvContent = BuildCsvTreePanel();
 
-            btnSelectFolder = new Button { Text = "폴더 선택", Width = 80 };
-            btnSelectFolder.Click += BtnSelectFolder_Click;
+            // ── InfluxDB 콘텐츠 패널 ─────────────────────────────────────────
+            _pnlInfluxContent = BuildInfluxPanel();
+            _pnlInfluxContent.Visible = false;
 
-            btnCheckAll = new Button { Text = "전체 체크", Width = 80 };
-            btnCheckAll.Click += (s, e) =>
-            {
-                _bulkToggle = true; // ← ItemCheck에서 차트 갱신 막기
-                try
-                {
-                    int limit = Math.Min(MaxAutoCheckInView, _viewIndex.Count);
-                    for (int i = 0; i < limit; i++) _checked[_viewIndex[i]] = true;
-                    fileList.Invalidate();
-                }
-                finally { _bulkToggle = false; }
-
-                // 한 번만 배치 렌더링
-                StartBulkRenderFromChecked();
-
-                if (_viewIndex.Count > MaxAutoCheckInView)
-                    MessageBox.Show(
-                        $"표시 중인 파일이 많아 현재 뷰 상위 {MaxAutoCheckInView}개만 체크했습니다. (표시 {_viewIndex.Count}개 / 전체 {_allFiles.Count}개)",
-                        "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            };
-
-            btnUncheckAll = new Button { Text = "전체 해제", Width = 80 };
-            btnUncheckAll.Click += (s, e) =>
-            {
-                _bulkToggle = true;
-                try
-                {
-                    for (int i = 0; i < _viewIndex.Count; i++) _checked[_viewIndex[i]] = false;
-                    fileList.Invalidate();
-                }
-                finally { _bulkToggle = false; }
-
-                // 차트 한 번에 정리
-                lock (chartSync) chart.Series.Clear();
-                AutoAdjustYAxis();
-                ClearFrequencyChart();
-            };
-
-            buttonPanel.Controls.AddRange(new Control[] { btnSelectFolder, btnCheckAll, btnUncheckAll });
-
-            cmbYColumn = new ComboBox
-            {
-                Dock = DockStyle.Top,
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Height = 28,
-                Margin = new Padding(3)
-            };
-            cmbYColumn.SelectedIndexChanged += CmbYColumn_SelectedIndexChanged;
-
-            txtFilter = new TextBox { Dock = DockStyle.Top };
-            SetWatermark(txtFilter, "파일명 필터...");
-            txtFilter.TextChanged += (s, e) => ApplyFilter();
-
-            // === ListView 생성/속성 ===
-            fileList = new ListView
+            // ── 데이터 소스 선택 바 ──────────────────────────────────────────
+            _pnlSourceSelector = new Panel { Dock = DockStyle.Top, Height = 28, BackColor = SystemColors.ControlLight };
+            var srcFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                View = View.Details,                 // Details 필수
-                FullRowSelect = true,
-                HeaderStyle = ColumnHeaderStyle.None,
-                UseCompatibleStateImageBehavior = false,
-                OwnerDraw = false,                   // 반드시 false
-                ShowGroups = false,
-                CheckBoxes = true,                   // VirtualMode=true 이전에!
-                VirtualMode = true,                  // 그 다음
-                VirtualListSize = 0,
-                BorderStyle = BorderStyle.FixedSingle
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
             };
-            // 컬럼 반드시 추가 (폭 0 금지)
-            fileList.Columns.Add("File", 100);
-
-            // 체크박스를 덮는 이미지리스트 제거
-            fileList.StateImageList = null;
-            fileList.SmallImageList = null;
-            fileList.LargeImageList = null;
-
-            // 리사이즈 시 컬럼폭 맞춤
-            fileList.Resize += (s, e) => ResizeFileColumn();
-
-            // 가상 아이템 공급
-            fileList.RetrieveVirtualItem += (s, e) =>
+            srcFlow.Controls.Add(new Label
             {
-                int srcIdx = _viewIndex[e.ItemIndex];
-                string name = _allFiles[srcIdx];
-
-                var item = new ListViewItem(name);      // 텍스트 설정 필수
-                item.Checked = _checked[srcIdx];        // 체크 상태 반영
-                e.Item = item;
-            };
-
-            // 체크 토글 시 차트 갱신 (e.Index 사용)
-            fileList.ItemCheck += (s, e) =>
+                Text = "소스:",
+                AutoSize = true,
+                Margin = new Padding(6, 6, 4, 0),
+                Font = new Font(this.Font, FontStyle.Bold)
+            });
+            _rdoCsv    = new RadioButton { Text = "CSV 파일",  AutoSize = true, Checked = true, Margin = new Padding(0, 5, 10, 0) };
+            _rdoInflux = new RadioButton { Text = "InfluxDB", AutoSize = true, Margin = new Padding(0, 5, 10, 0) };
+            _rdoInflux.CheckedChanged += RdoInflux_CheckedChanged;
+            _rdoCsv.CheckedChanged += (s, e) =>
             {
-                int srcIdx = _viewIndex[e.Index];
-                bool willChecked = (e.NewValue == CheckState.Checked);
-                _checked[srcIdx] = willChecked;
-
-                if (_bulkToggle) return; // ← 전체체크 중엔 끝!
-
-                string name = _allFiles[srcIdx];
-                string path = System.IO.Path.Combine(currentFolder, name);
-                string ycol = (cmbYColumn.SelectedItem != null) ? cmbYColumn.SelectedItem.ToString() : null;
-
-                if (willChecked) { AddCsvSeriesToChart(name, path, ycol); }
-                else
-                {
-                    lock (chartSync)
-                    {
-                        if (chart.Series.IndexOf(name) >= 0)
-                            chart.Series.Remove(chart.Series[name]);
-                    }
-                }
-                AutoAdjustYAxis();
-                ScheduleFreqUpdate();
+                if (!_rdoCsv.Checked) return;
+                _pnlCsvContent.Visible    = true;
+                _pnlInfluxContent.Visible = false;
             };
+            srcFlow.Controls.Add(_rdoCsv);
+            srcFlow.Controls.Add(_rdoInflux);
+            _pnlSourceSelector.Controls.Add(srcFlow);
 
-            // 더블클릭으로도 토글
-            fileList.Activation = ItemActivation.Standard;
-            fileList.ItemActivate += (s, e) =>
-            {
-                if (fileList.SelectedIndices.Count == 0) return;
-                int viewIdx = fileList.SelectedIndices[0];
-                int srcIdx = _viewIndex[viewIdx];
-
-                bool next = !_checked[srcIdx];
-                _checked[srcIdx] = next;
-                fileList.RedrawItems(viewIdx, viewIdx, true);
-
-                string name = _allFiles[srcIdx];
-                string path = System.IO.Path.Combine(currentFolder, name);
-                string ycol = (cmbYColumn.SelectedItem != null) ? cmbYColumn.SelectedItem.ToString() : null;
-
-                if (next) AddCsvSeriesToChart(name, path, ycol);
-                else
-                {
-                    lock (chartSync)
-                    {
-                        if (chart.Series.IndexOf(name) >= 0)
-                            chart.Series.Remove(chart.Series[name]);
-                    }
-                    AutoAdjustYAxis();
-                    ScheduleFreqUpdate();
-                }
-            };
-
-            leftPanel.Controls.Add(fileList);
-            leftPanel.Controls.Add(txtFilter);
-            leftPanel.Controls.Add(cmbYColumn);
-            leftPanel.Controls.Add(buttonPanel);
+            // DockStyle.Top 은 마지막 추가 순서가 최상단 → 역순 추가
+            leftPanel.Controls.Add(_pnlCsvContent);      // Fill  (나중에 Hide/Show)
+            leftPanel.Controls.Add(_pnlInfluxContent);   // Fill  (나중에 Hide/Show)
+            leftPanel.Controls.Add(_pnlSourceSelector);  // Top   (항상 맨 위)
             split.Panel1.Controls.Add(leftPanel);
 
             // ----- Right -----
@@ -651,9 +579,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (defaultKeys.Contains(FeatureList[i].Key))
                     clbCorrFeatures.SetItemChecked(i, true);
 
+            var tabCleaning = new TabPage("데이터 정제");
+            tabCleaning.Controls.Add(BuildDataCleaningPanel());
+
             tabControl.TabPages.Add(tabDistribution);
             tabControl.TabPages.Add(tabFeature);
             tabControl.TabPages.Add(tabCorrelation);
+            tabControl.TabPages.Add(tabCleaning);
             split.Panel2.Controls.Add(tabControl);
 
             this.Controls.Add(split);
@@ -666,8 +598,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             this.Shown += (s, e) =>
             {
                 if (_splitterInitialized) return;
-                int leftPanelWidth = btnSelectFolder.Width + btnCheckAll.Width + btnUncheckAll.Width + 20;
-                split.SplitterDistance = leftPanelWidth;
+                split.SplitterDistance = 280;
                 _splitterInitialized = true;
             };
         }
@@ -725,8 +656,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 {
                     foreach (var name in batch)
                     {
-                        string path = System.IO.Path.Combine(currentFolder, name);
-                        AddCsvSeriesToChart(name, path, ycol); // 내부에서 Task.Run + BeginInvoke → OK
+                        // GetCheckedFileNames() 은 전체 경로를 반환
+                        string seriesName = System.IO.Path.GetFileName(name);
+                        AddCsvSeriesToChart(seriesName, name, ycol);
                     }
                 }
 
@@ -800,24 +732,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void LoadCsvFileListInitial_Virtual()
         {
-            _allFiles.Clear();
-            _viewIndex.Clear();
-
-            if (!Directory.Exists(currentFolder)) return;
-
-            _allFiles = Directory.EnumerateFiles(currentFolder, "*.csv", SearchOption.TopDirectoryOnly)
-                                 .Select(Path.GetFileName)
-                                 .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-                                 .ToList();
-
-            _checked = new BitArray(_allFiles.Count, false);
-
-            if (_allFiles.Count > 0)
-            {
-                var headers = GetCachedHeaders(Path.Combine(currentFolder, _allFiles[0]));
-                if (headers != null) LoadYColumnCombo(headers);
-            }
-            ApplyFilter();
+            // 트리 뷰 기반으로 전환됨 — RefreshCsvTree() 로 위임
+            RefreshCsvTree();
         }
 
         private string[] GetCachedHeaders(string filePath)
@@ -842,23 +758,19 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void ApplyFilter()
         {
+            // 트리 뷰로 전환 후 호환성 유지용 — fileList/txtFilter 미사용 시 무시
+            if (fileList == null || txtFilter == null) return;
             string q = (txtFilter.Text ?? string.Empty).Trim();
             _viewIndex.Clear();
-
             if (string.IsNullOrEmpty(q))
-            {
                 for (int i = 0; i < _allFiles.Count; i++) _viewIndex.Add(i);
-            }
             else
-            {
                 for (int i = 0; i < _allFiles.Count; i++)
                     if (_allFiles[i].IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
                         _viewIndex.Add(i);
-            }
-
             fileList.VirtualListSize = _viewIndex.Count;
             fileList.Invalidate();
-            ResizeFileColumn(); // ★ 텍스트/체크박스 보이도록 폭 맞춤
+            ResizeFileColumn();
         }
 
         private void RefreshCsvFileListDiff_Virtual()
@@ -912,7 +824,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             ScheduleFreqUpdate();
         }
 
-        private void SafeRefreshListPreservingChecks() { RefreshCsvFileListDiff_Virtual(); }
+        private void SafeRefreshListPreservingChecks() { RefreshCsvTree(); }
 
         // ===========================
         // UI Handlers
@@ -931,8 +843,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
                 string path = Path.GetDirectoryName(dialog.FileName);
                 currentFolder = path;
+                if (_txtCsvRoot != null) _txtCsvRoot.Text = path;
 
-                LoadCsvFileListInitial_Virtual();
+                RefreshCsvTree();
                 if (_allFiles.Count > 30000) StopWatching(); else StartWatching(currentFolder);
             }
         }
@@ -941,12 +854,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             lock (chartSync) chart.Series.Clear();
 
-            var yColumn = cmbYColumn.SelectedItem != null ? cmbYColumn.SelectedItem.ToString() : null;
-            foreach (var fileName in GetCheckedFileNames())
-            {
-                string filePath = Path.Combine(currentFolder, fileName);
-                AddCsvSeriesToChart(fileName, filePath, yColumn);
-            }
+            var yColumn = cmbYColumn.SelectedItem?.ToString();
+            foreach (var filePath in GetCheckedFileNames())
+                AddCsvSeriesToChart(Path.GetFileName(filePath), filePath, yColumn);
 
             if (cmbYColumn.SelectedItem != null)
                 chart.ChartAreas["MainArea"].AxisY.Title = cmbYColumn.SelectedItem.ToString();
@@ -1090,21 +1000,34 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // ---------------------------
         private IEnumerable<string> GetCheckedFileNames()
         {
-            for (int i = 0; i < _allFiles.Count; i++)
-                if (_checked[i]) yield return _allFiles[i];
+            if (_tvCsv == null) yield break;
+            foreach (var p in GetCheckedLeafPaths(_tvCsv.Nodes))
+                yield return p;
+        }
+
+        private static IEnumerable<string> GetCheckedLeafPaths(TreeNodeCollection nodes)
+        {
+            foreach (TreeNode n in nodes)
+            {
+                if (n.Nodes.Count == 0) { if (n.Checked && n.Tag is string p) yield return p; }
+                else foreach (var p in GetCheckedLeafPaths(n.Nodes)) yield return p;
+            }
         }
 
         private void RebuildChartFromCheckedFiles(bool forceReload = false)
         {
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action(() => RebuildChartFromCheckedFiles(forceReload)));
+                SafeBeginInvoke(new Action(() => RebuildChartFromCheckedFiles(forceReload)));
                 return;
             }
 
-            string yColumn = cmbYColumn.SelectedItem != null ? cmbYColumn.SelectedItem.ToString() : null;
+            string yColumn = cmbYColumn.SelectedItem?.ToString();
 
-            var desired = new HashSet<string>(GetCheckedFileNames(), StringComparer.OrdinalIgnoreCase);
+            // GetCheckedFileNames() 는 전체 경로를 반환 — 시리즈 이름은 파일명
+            var desiredPaths = GetCheckedFileNames().ToList();
+            var desiredNames = new HashSet<string>(
+                desiredPaths.Select(Path.GetFileName), StringComparer.OrdinalIgnoreCase);
 
             var current = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (Series s in chart.Series) current.Add(s.Name);
@@ -1112,51 +1035,29 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (forceReload)
             {
                 using (SuspendPainting(chart))
-                {
                     lock (chartSync) chart.Series.Clear();
-                }
-                foreach (var name in desired)
-                {
-                    string path = Path.Combine(currentFolder, name);
-                    AddCsvSeriesToChart(name, path, yColumn);
-                }
+                foreach (var fp in desiredPaths)
+                    AddCsvSeriesToChart(Path.GetFileName(fp), fp, yColumn);
                 AutoAdjustYAxis();
                 ScheduleFreqUpdate();
                 return;
             }
 
-            var toRemove = new List<string>();
-            foreach (var name in current)
-                if (!desired.Contains(name)) toRemove.Add(name);
-
-            var toAdd = new List<string>();
-            foreach (var name in desired)
-                if (!current.Contains(name)) toAdd.Add(name);
+            var toRemove = current.Where(n => !desiredNames.Contains(n)).ToList();
+            var toAdd = desiredPaths.Where(p => !current.Contains(Path.GetFileName(p))).ToList();
 
             if (toRemove.Count == 0 && toAdd.Count == 0) return;
 
             if (toRemove.Count > 0)
             {
                 using (SuspendPainting(chart))
-                {
                     lock (chartSync)
-                    {
-                        for (int i = 0; i < toRemove.Count; i++)
-                        {
-                            string name = toRemove[i];
-                            if (chart.Series.IndexOf(name) >= 0)
-                                chart.Series.Remove(chart.Series[name]);
-                        }
-                    }
-                }
+                        foreach (var n in toRemove)
+                            if (chart.Series.IndexOf(n) >= 0) chart.Series.Remove(chart.Series[n]);
             }
 
-            for (int i = 0; i < toAdd.Count; i++)
-            {
-                string name = toAdd[i];
-                string path = Path.Combine(currentFolder, name);
-                AddCsvSeriesToChart(name, path, yColumn);
-            }
+            foreach (var fp in toAdd)
+                AddCsvSeriesToChart(Path.GetFileName(fp), fp, yColumn);
 
             AutoAdjustYAxis();
             ScheduleFreqUpdate();
@@ -1251,7 +1152,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     double[] dx, dy;
                     DownsampleMinMax(xs, ys, MaxDisplayPointsPerSeries, out dx, out dy);
 
-                    this.BeginInvoke(new Action(() =>
+                    SafeBeginInvoke(new Action(() =>
                     {
                         chart.BeginInit();
                         try
@@ -1317,6 +1218,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                                     })
                                     .ToList();
 
+            // UI 컨트롤 값은 Task.Run 진입 전 UI 스레드에서 미리 캡처
+            double capturedSampleRate = CurrentSampleRate();
+
             Task.Run(new Action(() =>
             {
                 var results = new List<(string Name, double[] F, double[] S)>(targets.Count);
@@ -1325,12 +1229,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     var t = targets[i];
                     if (t.Y.Length < 4) continue;
                     double[] freq;
-                    double sr = CurrentSampleRate();
+                    double sr = capturedSampleRate;
                     var spec = SignalFeatures.ComputeMagnitudeSpectrum(t.Y, sr, out freq);
                     results.Add((t.Name, freq, spec));
                 }
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     chartFreq.BeginInit();
                     try
@@ -1446,6 +1350,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private void ComputeAndRenderFeatures()
         {
+            // InfluxDB 모드이면 별도 경로
+            if (InfluxMode)
+            {
+                ComputeFeaturesFromInfluxSegments();
+                return;
+            }
+
             if (cmbYColumn.SelectedItem == null)
             {
                 MessageBox.Show("Y 컬럼을 먼저 선택하세요.");
@@ -1488,8 +1399,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             {
                 for (int idx = 0; idx < targets.Count; idx++)
                 {
-                    var fileName = targets[idx];
-                    var path = Path.Combine(currentFolder, fileName);
+                    var fileName = targets[idx]; // 전체 경로
+                    var path = fileName;
                     var headers = GetCachedHeaders(path);
                     if (headers == null) continue;
 
@@ -1526,14 +1437,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     int avail = Math.Min(ys.Count, MaxFftSamples);
                     var yarr = ys.Take(avail).ToArray();
                     double[] freq;
-                    double sr = SampleRateFor(yColumn);
+                    // time_s 컬럼으로 실제 샘플레이트 자동 감지 (fallback: AppState)
+                    double sr = SignalFeatures.DetectSampleRateFromCsv(path, SampleRateFor(yColumn));
                     var spec = SignalFeatures.ComputeMagnitudeSpectrum(yarr, sr, out freq);
                     SignalFeatures.FillPeakFeatures(freq, spec, row);
 
                     _featureTable.Add(row);
                 }
 
-                this.BeginInvoke(new Action(() =>
+                SafeBeginInvoke(new Action(() =>
                 {
                     gridFeatures.DataSource = null;
                     gridFeatures.DataSource = _featureTable;
@@ -2137,6 +2049,1588 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             int g = (int)Math.Round(a.G + (b.G - a.G) * t);
             int bch = (int)Math.Round(a.B + (b.B - a.B) * t);
             return Color.FromArgb(255, r, g, bch);
+        }
+
+        // =====================================================================
+        // CSV 트리 뷰
+        // =====================================================================
+        private Panel BuildCsvTreePanel()
+        {
+            var pnl = new Panel { Dock = DockStyle.Fill };
+
+            // ── 상단 툴바: 루트 폴더 + 새로고침 ─────────────────────────────
+            var toolbar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top, Height = 28, AutoSize = false,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Padding = new Padding(2, 2, 2, 0)
+            };
+            _txtCsvRoot = new TextBox
+            {
+                Text = currentFolder,
+                Width = 160, Height = 22, Margin = new Padding(0, 1, 2, 0)
+            };
+            btnSelectFolder = new Button { Text = "…", Width = 26, Height = 22, Margin = new Padding(0, 1, 2, 0) };
+            btnSelectFolder.Click += BtnSelectFolder_Click;
+            var btnCsvRefresh = new Button { Text = "↺", Width = 26, Height = 22, Margin = new Padding(0, 1, 0, 0) };
+            btnCsvRefresh.Click += (s, e) => RefreshCsvTree();
+            toolbar.Controls.AddRange(new Control[] { _txtCsvRoot, btnSelectFolder, btnCsvRefresh });
+
+            // ── 하단 툴바: Y컬럼 + 전체 체크/해제 ──────────────────────────
+            var bottomBar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom, Height = 28, AutoSize = false,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Padding = new Padding(2, 2, 2, 0)
+            };
+            cmbYColumn = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 80, Height = 22, Margin = new Padding(0, 2, 4, 0)
+            };
+            cmbYColumn.SelectedIndexChanged += CmbYColumn_SelectedIndexChanged;
+
+            btnCheckAll = new Button { Text = "전체 체크", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 2, 0) };
+            btnCheckAll.Click += async (s, e) =>
+            {
+                if (_tvCsv == null) return;
+                _tvCsv.AfterCheck -= TvCsv_AfterCheck;
+                SetAllTreeChecked(_tvCsv.Nodes, true);
+                _tvCsv.AfterCheck += TvCsv_AfterCheck;
+                lock (chartSync) chart.Series.Clear();
+                var paths = new List<string>();
+                CollectLeafPaths(_tvCsv.Nodes, paths);
+                if (paths.Count > MaxAutoVisualizeFiles)
+                {
+                    AppEvents.RaiseLog(
+                        $"[신호 탐색기] 파일 {paths.Count}개 선택 — 시각화 한도({MaxAutoVisualizeFiles}개) 초과로 " +
+                        "차트 표시를 건너뜁니다. 데이터 정제 탭은 정상 사용 가능합니다.");
+                    return;
+                }
+                await StartBatchedLoadAsync(paths, cmbYColumn?.SelectedItem?.ToString());
+            };
+
+            btnUncheckAll = new Button { Text = "전체 해제", Height = 22, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
+            btnUncheckAll.Click += (s, e) =>
+            {
+                if (_tvCsv == null) return;
+                CancelCsvLoad();
+                _tvCsv.AfterCheck -= TvCsv_AfterCheck;
+                SetAllTreeChecked(_tvCsv.Nodes, false);
+                _tvCsv.AfterCheck += TvCsv_AfterCheck;
+                lock (chartSync) chart.Series.Clear();
+                AutoAdjustYAxis();
+                ClearFrequencyChart();
+            };
+
+            var btnDeleteChecked = new Button
+            {
+                Text = "🗑 삭제", Height = 22, AutoSize = true,
+                Margin = new Padding(10, 2, 0, 0), ForeColor = Color.Firebrick
+            };
+            btnDeleteChecked.Click += (s, e) =>
+            {
+                var toDelete = GetCheckedFileNames().ToList();
+                if (toDelete.Count == 0)
+                {
+                    MessageBox.Show("삭제할 파일을 먼저 체크하세요.", "알림",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                if (MessageBox.Show(
+                    $"체크된 {toDelete.Count}개 파일을 영구 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
+                    "파일 삭제 확인", MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                    return;
+
+                CancelCsvLoad();
+                int deleted = 0;
+                var errors = new List<string>();
+                foreach (var fp in toDelete)
+                {
+                    try
+                    {
+                        string sn = Path.GetFileName(fp);
+                        lock (chartSync)
+                            if (chart.Series.IndexOf(sn) >= 0)
+                                chart.Series.Remove(chart.Series[sn]);
+                        if (File.Exists(fp)) { File.Delete(fp); deleted++; }
+                    }
+                    catch (Exception ex) { errors.Add($"{Path.GetFileName(fp)}: {ex.Message}"); }
+                }
+                RefreshCsvTree();
+                string msg = $"{deleted}개 파일이 삭제되었습니다.";
+                if (errors.Count > 0)
+                    msg += $"\n\n오류 {errors.Count}건:\n" + string.Join("\n", errors.Take(5));
+                MessageBox.Show(msg, "삭제 완료", MessageBoxButtons.OK,
+                    errors.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            };
+
+            bottomBar.Controls.AddRange(new Control[] { cmbYColumn, btnCheckAll, btnUncheckAll, btnDeleteChecked });
+
+            // ── 트리 뷰 ──────────────────────────────────────────────────────
+            _tvCsv = new TreeView
+            {
+                Dock = DockStyle.Fill,
+                CheckBoxes = true,
+                ShowLines = true, ShowPlusMinus = true,
+                Font = new Font(Font.FontFamily, 8.5f),
+                HideSelection = false
+            };
+            _tvCsv.AfterCheck += TvCsv_AfterCheck;
+
+            // 파일 노드 선택 시 해당 파일의 헤더로 Y컬럼 콤보 갱신
+            _tvCsv.AfterSelect += (s, e) =>
+            {
+                if (e.Node?.Nodes.Count == 0 && e.Node.Tag is string fp)
+                {
+                    var headers = GetCachedHeaders(fp);
+                    if (headers == null) return;
+                    string prev = cmbYColumn.SelectedItem?.ToString();
+                    LoadYColumnCombo(headers);
+                    // 이전 컬럼이 새 헤더에 있으면 선택 유지
+                    if (!string.IsNullOrEmpty(prev))
+                    {
+                        int idx = cmbYColumn.FindStringExact(prev);
+                        if (idx >= 0) cmbYColumn.SelectedIndex = idx;
+                    }
+                }
+            };
+
+            pnl.Controls.Add(_tvCsv);
+            pnl.Controls.Add(bottomBar);
+            pnl.Controls.Add(toolbar);
+
+            // 초기 스캔
+            RefreshCsvTree();
+            return pnl;
+        }
+
+        private void RefreshCsvTree()
+        {
+            if (_tvCsv == null) return;
+            string root = _txtCsvRoot?.Text?.Trim() ?? currentFolder;
+            if (!Directory.Exists(root)) return;
+
+            CancelCsvLoad();    // 폴더 변경 시 이전 로드 취소
+            currentFolder = root;
+            _tvCsv.BeginUpdate();
+            _tvCsv.Nodes.Clear();
+            _allFiles.Clear();
+            try
+            {
+                AddCsvTreeNodes(_tvCsv.Nodes, root);
+                if (_tvCsv.Nodes.Count > 0) _tvCsv.Nodes[0].Expand();
+                if (_allFiles.Count > 0)
+                {
+                    var headers = GetCachedHeaders(_allFiles[0]);
+                    if (headers != null) LoadYColumnCombo(headers);
+                }
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
+            finally
+            {
+                _checked = new BitArray(_allFiles.Count, false);
+                _tvCsv.EndUpdate();
+            }
+        }
+
+        private void AddCsvTreeNodes(TreeNodeCollection nodes, string dir)
+        {
+            foreach (string subDir in Directory.GetDirectories(dir).OrderBy(d => d))
+            {
+                string subName = Path.GetFileName(subDir);
+                var folderNode = new TreeNode(subName) { Tag = subDir };
+                AddCsvTreeNodes(folderNode.Nodes, subDir);
+                if (folderNode.Nodes.Count > 0)
+                    nodes.Add(folderNode);
+            }
+            foreach (string file in Directory.GetFiles(dir, "*.csv").OrderBy(f => f))
+            {
+                _allFiles.Add(file);
+                nodes.Add(new TreeNode(Path.GetFileName(file)) { Tag = file });
+            }
+        }
+
+        private async void TvCsv_AfterCheck(object sender, TreeViewEventArgs e)
+        {
+            if (e.Action == TreeViewAction.Unknown) return;
+            _tvCsv.AfterCheck -= TvCsv_AfterCheck;
+            SetChildChecked(e.Node, e.Node.Checked);
+            _tvCsv.AfterCheck += TvCsv_AfterCheck;
+
+            if (!e.Node.Checked)
+            {
+                // 체크 해제: 진행 중인 로드 취소 + 즉시 차트에서 제거 (I/O 없음, 빠름)
+                CancelCsvLoad();
+                RemoveChartSeriesForNode(e.Node);
+                AutoAdjustYAxis();
+                ScheduleFreqUpdate();
+                return;
+            }
+
+            // 체크: 해당 노드의 리프 경로 수집 후 배치 비동기 로드
+            var paths = new List<string>();
+            CollectLeafPaths(e.Node, paths);
+
+            if (paths.Count > MaxAutoVisualizeFiles)
+            {
+                AppEvents.RaiseLog(
+                    $"[신호 탐색기] 파일 {paths.Count}개 선택 — 시각화 한도({MaxAutoVisualizeFiles}개) 초과로 " +
+                    "차트 표시를 건너뜁니다. 데이터 정제 탭은 정상 사용 가능합니다.");
+                return;
+            }
+
+            await StartBatchedLoadAsync(paths, cmbYColumn?.SelectedItem?.ToString());
+        }
+
+        /// <summary>파일 경로 목록을 배치로 나눠 비동기 로드 — UI 블로킹 없음.</summary>
+        private async Task StartBatchedLoadAsync(IReadOnlyList<string> paths, string ycol)
+        {
+            if (paths.Count == 0) return;
+
+            // 이전 로드 취소 후 새 토큰 발행
+            CancelCsvLoad();
+            var cts = new CancellationTokenSource();
+            _csvLoadCts = cts;
+            var ct = cts.Token;
+
+            // 첫 파일 헤더로 Y컬럼 콤보 갱신 (컬럼이 달라졌을 경우 반영)
+            {
+                var h = GetCachedHeaders(paths[0]);
+                if (h != null)
+                {
+                    string prev = cmbYColumn.SelectedItem?.ToString();
+                    LoadYColumnCombo(h);
+                    if (!string.IsNullOrEmpty(prev))
+                    {
+                        int idx = cmbYColumn.FindStringExact(prev);
+                        if (idx >= 0) cmbYColumn.SelectedIndex = idx;
+                    }
+                }
+            }
+
+            // 차트 표시 한도 체크
+            int alreadyInChart;
+            lock (chartSync) alreadyInChart = chart.Series.Count;
+            int capacity = MaxSeriesOnChart - alreadyInChart;
+            if (capacity <= 0) return;
+            var limited = (paths.Count > capacity) ? paths.Take(capacity).ToList() : paths;
+            if (paths.Count > capacity)
+                MessageBox.Show($"성능을 위해 최대 {MaxSeriesOnChart}개까지만 표시합니다.",
+                    "표시 한도", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            const int BatchSize = 6;   // 배치당 동시 로드 수 (디스크 I/O 제한)
+            const int BatchDelayMs = 40; // 배치 사이 UI 숨 고르기 (ms)
+
+            try
+            {
+                for (int i = 0; i < limited.Count; i += BatchSize)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    int end = Math.Min(i + BatchSize, limited.Count);
+                    for (int j = i; j < end; j++)
+                    {
+                        if (ct.IsCancellationRequested) return;
+                        AddCsvSeriesToChart(Path.GetFileName(limited[j]), limited[j], ycol);
+                    }
+
+                    // UI 메시지 펌프에 숨 고르기 (마우스/키보드 이벤트 처리)
+                    await Task.Delay(BatchDelayMs, ct);
+                }
+
+                if (!ct.IsCancellationRequested)
+                {
+                    AutoAdjustYAxis();
+                    ScheduleFreqUpdate();
+                }
+            }
+            catch (OperationCanceledException) { /* 정상 취소 */ }
+        }
+
+        private void CancelCsvLoad()
+        {
+            _csvLoadCts.Cancel();
+            _csvLoadCts = new CancellationTokenSource();
+        }
+
+        private static void CollectLeafPaths(TreeNode node, List<string> result)
+        {
+            if (node.Nodes.Count == 0) { if (node.Tag is string p) result.Add(p); }
+            else foreach (TreeNode child in node.Nodes) CollectLeafPaths(child, result);
+        }
+
+        private static void CollectLeafPaths(TreeNodeCollection nodes, List<string> result)
+        {
+            foreach (TreeNode n in nodes) CollectLeafPaths(n, result);
+        }
+
+        private void RemoveChartSeriesForNode(TreeNode node)
+        {
+            if (node.Nodes.Count == 0)
+            {
+                if (node.Tag is string fp)
+                {
+                    string sn = Path.GetFileName(fp);
+                    lock (chartSync)
+                        if (chart.Series.IndexOf(sn) >= 0)
+                            chart.Series.Remove(chart.Series[sn]);
+                }
+            }
+            else foreach (TreeNode child in node.Nodes) RemoveChartSeriesForNode(child);
+        }
+
+        private static void SetChildChecked(TreeNode node, bool state)
+        {
+            foreach (TreeNode child in node.Nodes)
+            {
+                child.Checked = state;
+                SetChildChecked(child, state);
+            }
+        }
+
+        private static void SetAllTreeChecked(TreeNodeCollection nodes, bool state)
+        {
+            foreach (TreeNode n in nodes)
+            {
+                n.Checked = state;
+                SetAllTreeChecked(n.Nodes, state);
+            }
+        }
+
+        // =====================================================================
+        // 데이터 정제 탭
+        // =====================================================================
+        private Panel BuildDataCleaningPanel()
+        {
+            var pnl = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
+
+            // ── 옵션 패널 ──────────────────────────────────────────────────
+            var optPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1, Padding = new Padding(4, 4, 4, 2)
+            };
+            optPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+            // Row 0: 결측치 처리
+            var rowMissing = new FlowLayoutPanel
+            {
+                AutoSize = true, Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 2, 0, 2)
+            };
+            rowMissing.Controls.Add(new Label { Text = "결측치 처리:", AutoSize = true, Margin = new Padding(0, 3, 8, 0) });
+            _rdoMissingDrop = new RadioButton { Text = "행 제거", AutoSize = true, Checked = true, Margin = new Padding(0, 1, 12, 0) };
+            _rdoMissingZero = new RadioButton { Text = "0 채우기", AutoSize = true, Margin = new Padding(0, 1, 12, 0) };
+            _rdoMissingFill = new RadioButton { Text = "앞 값으로 채우기", AutoSize = true, Margin = new Padding(0, 1, 0, 0) };
+            rowMissing.Controls.AddRange(new Control[] { _rdoMissingDrop, _rdoMissingZero, _rdoMissingFill });
+
+            // Row 1: 이상치 제거
+            var rowOutlier = new FlowLayoutPanel
+            {
+                AutoSize = true, Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 2, 0, 2)
+            };
+            _chkOutlierEnable = new CheckBox { Text = "이상치 제거", AutoSize = true, Margin = new Padding(0, 2, 12, 0) };
+            rowOutlier.Controls.Add(_chkOutlierEnable);
+            rowOutlier.Controls.Add(new Label { Text = "방법:", AutoSize = true, Margin = new Padding(0, 4, 4, 0) });
+            _cmbOutlierMethod = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList, Width = 82, Margin = new Padding(0, 1, 12, 0)
+            };
+            _cmbOutlierMethod.Items.AddRange(new object[] { "Z-score", "IQR" });
+            _cmbOutlierMethod.SelectedIndex = 0;
+            rowOutlier.Controls.Add(_cmbOutlierMethod);
+            rowOutlier.Controls.Add(new Label { Text = "임계값:", AutoSize = true, Margin = new Padding(0, 4, 4, 0) });
+            _nudOutlierThreshold = new NumericUpDown
+            {
+                Value = 3, Minimum = 1, Maximum = 10, DecimalPlaces = 1,
+                Increment = 0.5m, Width = 62, Margin = new Padding(0, 1, 0, 0)
+            };
+            rowOutlier.Controls.Add(_nudOutlierThreshold);
+
+            // Row 2: 출력 + 버튼
+            var rowAction = new FlowLayoutPanel
+            {
+                AutoSize = true, Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 4, 0, 2)
+            };
+            rowAction.Controls.Add(new Label { Text = "출력:", AutoSize = true, Margin = new Padding(0, 4, 4, 0) });
+            _cmbCleanOutput = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList, Width = 110, Margin = new Padding(0, 1, 12, 0)
+            };
+            _cmbCleanOutput.Items.AddRange(new object[] { "덮어쓰기", "_cleaned 폴더" });
+            _cmbCleanOutput.SelectedIndex = 1;
+            _btnCleanPreview = new Button { Text = "▶ 미리보기", AutoSize = true, Margin = new Padding(0, 1, 4, 0) };
+            _btnCleanPreview.Click += BtnCleanPreview_Click;
+            _btnCleanApply = new Button { Text = "✓ 적용", AutoSize = true, Margin = new Padding(0, 1, 0, 0) };
+            _btnCleanApply.Click += BtnCleanApply_Click;
+            rowAction.Controls.AddRange(new Control[] { _cmbCleanOutput, _btnCleanPreview, _btnCleanApply });
+
+            optPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            optPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            optPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            optPanel.Controls.Add(rowMissing,  0, 0);
+            optPanel.Controls.Add(rowOutlier,  0, 1);
+            optPanel.Controls.Add(rowAction,   0, 2);
+
+            // ── 결과 그리드 ────────────────────────────────────────────────
+            _gridClean = new DataGridView
+            {
+                Dock = DockStyle.Fill, ReadOnly = true,
+                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Color.WhiteSmoke },
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 24
+            };
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "File",    HeaderText = "파일명",     FillWeight = 200 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Total",   HeaderText = "전체 행",    FillWeight = 60 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Missing", HeaderText = "결측 행",    FillWeight = 60 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Outlier", HeaderText = "이상치 행",  FillWeight = 70 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "After",   HeaderText = "정제 후 행", FillWeight = 70 });
+            _gridClean.Columns.Add(new DataGridViewTextBoxColumn { Name = "Rate",    HeaderText = "제거율(%)",  FillWeight = 60 });
+
+            pnl.Controls.Add(_gridClean);
+            pnl.Controls.Add(optPanel);
+            return pnl;
+        }
+
+        private async void BtnCleanPreview_Click(object sender, EventArgs e)
+        {
+            var paths = GetCheckedFileNames().ToList();
+            if (paths.Count == 0)
+            {
+                MessageBox.Show("왼쪽 트리에서 분석할 CSV 파일을 체크하세요.", "알림",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            _btnCleanPreview.Enabled = false;
+            _btnCleanApply.Enabled = false;
+            _gridClean.Rows.Clear();
+
+            bool removeMissing = _rdoMissingDrop.Checked;
+            bool fillZero      = _rdoMissingZero.Checked;
+            bool useOutlier    = _chkOutlierEnable.Checked;
+            string method      = _cmbOutlierMethod.SelectedItem?.ToString() ?? "Z-score";
+            double threshold   = (double)_nudOutlierThreshold.Value;
+
+            var results = await Task.Run(() =>
+                paths.Select(fp => CleanFile(fp, false, null, removeMissing, fillZero, useOutlier, method, threshold))
+                     .ToList());
+
+            _gridClean.SuspendLayout();
+            foreach (var r in results)
+            {
+                double rate = r.TotalRows > 0
+                    ? Math.Round(100.0 * (r.TotalRows - r.CleanedRows) / r.TotalRows, 1)
+                    : 0;
+                var row = _gridClean.Rows.Add(
+                    Path.GetFileName(r.FilePath),
+                    r.TotalRows, r.MissingRows, r.OutlierRows, r.CleanedRows,
+                    $"{rate:F1}");
+                if (rate > 20)
+                    _gridClean.Rows[row].DefaultCellStyle.ForeColor = Color.Firebrick;
+            }
+            _gridClean.ResumeLayout();
+
+            _btnCleanPreview.Enabled = true;
+            _btnCleanApply.Enabled = true;
+        }
+
+        private async void BtnCleanApply_Click(object sender, EventArgs e)
+        {
+            var paths = GetCheckedFileNames().ToList();
+            if (paths.Count == 0)
+            {
+                MessageBox.Show("왼쪽 트리에서 적용할 CSV 파일을 체크하세요.", "알림",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            bool overwrite     = _cmbCleanOutput.SelectedIndex == 0;
+            bool removeMissing = _rdoMissingDrop.Checked;
+            bool fillZero      = _rdoMissingZero.Checked;
+            bool useOutlier    = _chkOutlierEnable.Checked;
+            string method      = _cmbOutlierMethod.SelectedItem?.ToString() ?? "Z-score";
+            double threshold   = (double)_nudOutlierThreshold.Value;
+
+            string confirm = overwrite
+                ? $"{paths.Count}개 파일에 정제를 적용하고 덮어씁니다.\n계속하시겠습니까?"
+                : $"{paths.Count}개 파일을 정제하여 '_cleaned' 폴더에 저장합니다.\n계속하시겠습니까?";
+            if (MessageBox.Show(confirm, "적용 확인",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+
+            _btnCleanPreview.Enabled = false;
+            _btnCleanApply.Enabled = false;
+            _gridClean.Rows.Clear();
+
+            var results = await Task.Run(() =>
+            {
+                return paths.Select(fp =>
+                {
+                    string outPath = overwrite
+                        ? fp
+                        : Path.Combine(Path.GetDirectoryName(fp), "_cleaned", Path.GetFileName(fp));
+                    return CleanFile(fp, true, outPath, removeMissing, fillZero, useOutlier, method, threshold);
+                }).ToList();
+            });
+
+            _gridClean.SuspendLayout();
+            foreach (var r in results)
+            {
+                double rate = r.TotalRows > 0
+                    ? Math.Round(100.0 * (r.TotalRows - r.CleanedRows) / r.TotalRows, 1)
+                    : 0;
+                _gridClean.Rows.Add(
+                    Path.GetFileName(r.FilePath),
+                    r.TotalRows, r.MissingRows, r.OutlierRows, r.CleanedRows,
+                    $"{rate:F1}");
+            }
+            _gridClean.ResumeLayout();
+
+            if (overwrite) RefreshCsvTree();
+            MessageBox.Show($"{results.Count}개 파일 정제 완료.", "완료",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            _btnCleanPreview.Enabled = true;
+            _btnCleanApply.Enabled = true;
+        }
+
+        private struct CleanStats
+        {
+            public string FilePath;
+            public int TotalRows, MissingRows, OutlierRows, CleanedRows;
+        }
+
+        /// <summary>
+        /// CSV 파일 정제. doWrite=false 이면 통계만 반환, true 이면 outPath 에 저장.
+        /// </summary>
+        private static CleanStats CleanFile(string filePath, bool doWrite, string outPath,
+            bool removeMissing, bool fillZero, bool useOutlier, string method, double threshold)
+        {
+            var stats = new CleanStats { FilePath = filePath };
+            try
+            {
+                string[] allLines = File.ReadAllLines(filePath, Encoding.UTF8);
+                if (allLines.Length < 2) return stats;
+
+                string headerLine  = allLines[0];
+                string[] headers   = headerLine.Split(new[] { ',', '\t', ';' });
+                int[] dataColIdx   = Enumerable.Range(0, headers.Length)
+                                               .Where(i => !IsTimeColumn(headers[i].Trim()))
+                                               .ToArray();
+                if (dataColIdx.Length == 0) { stats.TotalRows = allLines.Length - 1; return stats; }
+
+                stats.TotalRows = allLines.Length - 1;
+
+                // ── 1차 패스: 파싱 + 결측 처리 ───────────────────────────
+                var parsedRows   = new List<(string[] Parts, double[] Vals, bool HadMissing)>();
+                double[] lastOk  = new double[dataColIdx.Length];
+
+                for (int li = 1; li < allLines.Length; li++)
+                {
+                    string line = allLines[li];
+                    if (string.IsNullOrWhiteSpace(line)) { stats.TotalRows--; continue; }
+
+                    var parts = line.Split(new[] { ',', '\t', ';' });
+                    bool hadMissing = false;
+                    var vals = new double[dataColIdx.Length];
+
+                    for (int j = 0; j < dataColIdx.Length; j++)
+                    {
+                        int ci = dataColIdx[j];
+                        if (ci < parts.Length
+                            && double.TryParse(parts[ci].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out double v)
+                            && !double.IsNaN(v) && !double.IsInfinity(v))
+                        {
+                            vals[j] = v;
+                            lastOk[j] = v;
+                        }
+                        else
+                        {
+                            hadMissing = true;
+                            vals[j] = fillZero ? 0.0 : lastOk[j]; // 0채우기 or 앞값채우기
+                        }
+                    }
+
+                    if (hadMissing) stats.MissingRows++;
+                    parsedRows.Add((parts, vals, hadMissing));
+                }
+
+                // ── keep 마스크: 결측 행 제거 여부 ────────────────────────
+                var keep = new bool[parsedRows.Count];
+                for (int i = 0; i < parsedRows.Count; i++)
+                    keep[i] = !removeMissing || !parsedRows[i].HadMissing;
+
+                // ── 2차 패스: 이상치 탐지 (생존 행 기준 통계) ─────────────
+                if (useOutlier)
+                {
+                    var alive = Enumerable.Range(0, parsedRows.Count).Where(i => keep[i]).ToList();
+
+                    for (int col = 0; col < dataColIdx.Length; col++)
+                    {
+                        double[] colVals = alive
+                            .Select(i => parsedRows[i].Vals[col])
+                            .Where(v => !double.IsNaN(v))
+                            .OrderBy(v => v)
+                            .ToArray();
+                        if (colVals.Length < 4) continue;
+
+                        double lo, hi;
+                        if (method == "IQR")
+                        {
+                            double q1 = Percentile(colVals, 25), q3 = Percentile(colVals, 75);
+                            double iqr = q3 - q1;
+                            lo = q1 - threshold * iqr; hi = q3 + threshold * iqr;
+                        }
+                        else // Z-score
+                        {
+                            double mean = colVals.Average();
+                            double std  = Math.Sqrt(colVals.Select(v => (v - mean) * (v - mean)).Average());
+                            if (std < 1e-10) continue;
+                            lo = mean - threshold * std; hi = mean + threshold * std;
+                        }
+
+                        foreach (int i in alive)
+                        {
+                            double v = parsedRows[i].Vals[col];
+                            if (v < lo || v > hi) keep[i] = false;
+                        }
+                    }
+
+                    // 이상치 카운트 = 결측 필터 통과 후 이상치로 제거된 수
+                    stats.OutlierRows = alive.Count(i => !keep[i]);
+                }
+
+                stats.CleanedRows = keep.Count(b => b);
+
+                // ── 파일 쓰기 ─────────────────────────────────────────────
+                if (doWrite && outPath != null)
+                {
+                    var outLines = new List<string> { headerLine };
+                    for (int i = 0; i < parsedRows.Count; i++)
+                    {
+                        if (!keep[i]) continue;
+                        var (parts, vals, hadMissing) = parsedRows[i];
+                        if (hadMissing && !removeMissing)
+                        {
+                            // 채워진 값을 원래 부분에 반영
+                            var newParts = (string[])parts.Clone();
+                            for (int j = 0; j < dataColIdx.Length; j++)
+                            {
+                                int ci = dataColIdx[j];
+                                if (ci < newParts.Length)
+                                    newParts[ci] = vals[j].ToString("G", CultureInfo.InvariantCulture);
+                            }
+                            outLines.Add(string.Join(",", newParts));
+                        }
+                        else
+                        {
+                            outLines.Add(string.Join(",", parts));
+                        }
+                    }
+
+                    string dir = Path.GetDirectoryName(outPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+                    File.WriteAllLines(outPath, outLines, new UTF8Encoding(false));
+                }
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
+            return stats;
+        }
+
+        private static double Percentile(double[] sorted, double p)
+        {
+            if (sorted.Length == 0) return 0;
+            double idx = (p / 100.0) * (sorted.Length - 1);
+            int lo = (int)idx, hi = Math.Min(lo + 1, sorted.Length - 1);
+            return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+        }
+
+        // =====================================================================
+        // InfluxDB 데이터 소스
+        // =====================================================================
+        private Panel BuildInfluxPanel()
+        {
+            var pnl = new Panel { Dock = DockStyle.Fill };
+
+            // ── 상단 쿼리 영역: TableLayoutPanel 2열(레이블|컨트롤) ──────────
+            var tbl = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 2,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(4, 4, 4, 2)
+            };
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));  // 레이블 열
+            tbl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // 컨트롤 열
+
+            // ── 연결 상태 행 (InfluxDB URL + 연결 인디케이터) ───────────────
+            tbl.RowCount++;
+            tbl.RowStyles.Insert(0, new RowStyle(SizeType.AutoSize));
+            var connRow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill, AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                Margin = new Padding(0, 2, 0, 4)
+            };
+            _lblConnDot = new Label
+            {
+                Text = "●", ForeColor = Color.LightGray,
+                AutoSize = true, Font = new Font(Font.FontFamily, 10f, FontStyle.Bold),
+                Margin = new Padding(0, 1, 4, 0)
+            };
+            var lblConnUrl = new Label
+            {
+                AutoSize = true, ForeColor = Color.DimGray,
+                Font = new Font(Font.FontFamily, 8f),
+                Margin = new Padding(0, 3, 6, 0)
+            };
+            // URL 표시 (ServerSettings에서)
+            lblConnUrl.Text = ServerSettings.Current?.InfluxUrl ?? "localhost:8086";
+            AppEvents.ServerSettingsChanged += ss =>
+            {
+                SafeBeginInvoke(() =>
+                {
+                    lblConnUrl.Text = ss?.InfluxUrl ?? "?";
+                    _influxSource = null; // 설정 바뀌면 재연결
+                    SetConnectionIndicator(ConnectionState.Connecting);
+                    LoadInfluxMetadataAsync();
+                });
+            };
+            var btnRefresh = new Button
+            {
+                Text = "↺", Width = 24, Height = 22,
+                Margin = new Padding(0, 1, 0, 0), FlatStyle = FlatStyle.Flat,
+                Font = new Font(Font.FontFamily, 9f)
+            };
+            btnRefresh.FlatAppearance.BorderSize = 0;
+            btnRefresh.Click += (s, e) => { _influxSource = null; LoadInfluxMetadataAsync(); };
+            connRow.Controls.AddRange(new Control[] { _lblConnDot, lblConnUrl, btnRefresh });
+            tbl.Controls.Add(new Label { Text = "상태:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 0);
+            tbl.Controls.Add(connRow, 1, 0);
+
+            // Device
+            tbl.Controls.Add(new Label { Text = "Device:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 1);
+            _cmbInfluxDevice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
+            tbl.Controls.Add(_cmbInfluxDevice, 1, 1);
+
+            // 레이블
+            tbl.Controls.Add(new Label { Text = "레이블:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 2);
+            _cmbInfluxLabel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
+            _cmbInfluxLabel.Items.Add("(전체)");
+            _cmbInfluxLabel.SelectedIndex = 0;
+            tbl.Controls.Add(_cmbInfluxLabel, 1, 2);
+
+            // 채널
+            tbl.Controls.Add(new Label { Text = "채널:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 3);
+            _cmbInfluxChannel = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2) };
+            _cmbInfluxChannel.Items.AddRange(new object[] { "x", "y", "z", "torque" });
+            _cmbInfluxChannel.SelectedIndex = 0;
+            tbl.Controls.Add(_cmbInfluxChannel, 1, 3);
+
+            // 시작
+            tbl.Controls.Add(new Label { Text = "시작:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 4);
+            _dtpFrom = new DateTimePicker
+            {
+                Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
+                Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now.AddDays(-1)
+            };
+            tbl.Controls.Add(_dtpFrom, 1, 4);
+
+            // 종료
+            tbl.Controls.Add(new Label { Text = "종료:", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 5);
+            _dtpTo = new DateTimePicker
+            {
+                Format = DateTimePickerFormat.Custom, CustomFormat = "yy-MM-dd HH:mm:ss",
+                Dock = DockStyle.Fill, Margin = new Padding(0, 2, 0, 2), Value = DateTime.Now
+            };
+            tbl.Controls.Add(_dtpTo, 1, 5);
+
+            // 세그(초) + 조회 버튼 — 같은 셀에 FlowLayout
+            tbl.Controls.Add(new Label { Text = "세그(초):", AutoSize = true, Margin = new Padding(0, 5, 4, 2), Anchor = AnchorStyles.Left }, 0, 6);
+            var segRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0, 1, 0, 2) };
+            _nudSegSeconds = new NumericUpDown
+            {
+                Width = 68, Minimum = 0.1m, Maximum = 60m, DecimalPlaces = 1,
+                Value = 1.0m, Increment = 0.5m, Margin = new Padding(0, 1, 4, 0)
+            };
+            _btnInfluxQuery = new Button { Text = "조회 ▶", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 4, 0) };
+            _btnInfluxQuery.Click += BtnInfluxQuery_Click;
+            _btnInfluxFullRange = new Button { Text = "전체 기간", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0) };
+            _btnInfluxFullRange.Click += BtnInfluxFullRange_Click;
+            segRow.Controls.Add(_nudSegSeconds);
+            segRow.Controls.Add(_btnInfluxQuery);
+            segRow.Controls.Add(_btnInfluxFullRange);
+            tbl.Controls.Add(segRow, 1, 6);
+
+            // ── 상태 레이블 ───────────────────────────────────────────────────
+            _lblInfluxStatus = new Label
+            {
+                Dock = DockStyle.Top, Height = 20,
+                ForeColor = Color.Gray, Padding = new Padding(4, 2, 0, 0),
+                Font = new Font(this.Font.FontFamily, 8f)
+            };
+
+            // ── CRUD 버튼: 2줄 (선택/해제/업로드 | 선택삭제/레이블삭제/전체삭제) ─
+            var rowCrud1 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom, Height = 28,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                BackColor = SystemColors.ControlLight, Padding = new Padding(2, 2, 2, 0)
+            };
+            var rowCrud2 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom, Height = 28,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+                BackColor = SystemColors.ControlLight, Padding = new Padding(2, 0, 2, 2)
+            };
+
+            _btnInfluxCheckAll = new Button { Text = "전체 선택", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0) };
+            _btnInfluxCheckAll.Click += (s, e) => { for (int i = 0; i < _lstSegments.Items.Count; i++) _lstSegments.SetItemChecked(i, true); };
+
+            _btnInfluxUncheckAll = new Button { Text = "전체 해제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0) };
+            _btnInfluxUncheckAll.Click += (s, e) => { for (int i = 0; i < _lstSegments.Items.Count; i++) _lstSegments.SetItemChecked(i, false); };
+
+            _btnInfluxUploadCsv = new Button
+            {
+                Text = "CSV→DB", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0),
+                BackColor = Color.FromArgb(220, 240, 220)
+            };
+            _btnInfluxUploadCsv.Click += BtnInfluxUploadCsv_Click;
+
+            _btnInfluxDeleteSelected = new Button
+            {
+                Text = "선택 삭제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0),
+                BackColor = Color.FromArgb(255, 230, 220)
+            };
+            _btnInfluxDeleteSelected.Click += BtnInfluxDeleteSelected_Click;
+
+            _btnInfluxDeleteLabel = new Button
+            {
+                Text = "레이블 삭제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 2, 0),
+                BackColor = Color.FromArgb(255, 220, 200)
+            };
+            _btnInfluxDeleteLabel.Click += BtnInfluxDeleteLabel_Click;
+
+            _btnInfluxDeleteAll = new Button
+            {
+                Text = "전체 삭제", Height = 24, AutoSize = true, Margin = new Padding(0, 0, 0, 0),
+                BackColor = Color.FromArgb(255, 200, 180)
+            };
+            _btnInfluxDeleteAll.Click += BtnInfluxDeleteAll_Click;
+
+            rowCrud1.Controls.Add(_btnInfluxCheckAll);
+            rowCrud1.Controls.Add(_btnInfluxUncheckAll);
+            rowCrud1.Controls.Add(_btnInfluxUploadCsv);
+
+            rowCrud2.Controls.Add(_btnInfluxDeleteSelected);
+            rowCrud2.Controls.Add(_btnInfluxDeleteLabel);
+            rowCrud2.Controls.Add(_btnInfluxDeleteAll);
+
+            // ── 세그먼트 목록 ─────────────────────────────────────────────────
+            _lstSegments = new CheckedListBox
+            {
+                Dock = DockStyle.Fill,
+                IntegralHeight = false,
+                CheckOnClick = true,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            _lstSegments.ItemCheck += LstSegments_ItemCheck;
+
+            // 역순 추가 (Bottom→Fill→Top 순)
+            pnl.Controls.Add(rowCrud2);   // Bottom (마지막)
+            pnl.Controls.Add(rowCrud1);   // Bottom (첫번째)
+            pnl.Controls.Add(_lstSegments);
+            pnl.Controls.Add(_lblInfluxStatus);
+            pnl.Controls.Add(tbl);
+            return pnl;
+        }
+
+        // ── CRUD 핸들러 ───────────────────────────────────────────────────────
+        private async void BtnInfluxUploadCsv_Click(object sender, EventArgs e)
+        {
+            string device = _cmbInfluxDevice.SelectedItem?.ToString() ?? "unknown";
+
+            // 레이블 입력
+            string label = "";
+            using (var dlgLabel = new Form
+            {
+                Text = "CSV → InfluxDB 업로드",
+                Size = new Size(340, 150),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false, MinimizeBox = false
+            })
+            {
+                var lbl = new Label { Text = "레이블:", Left = 10, Top = 18, AutoSize = true };
+                var txt = new TextBox { Left = 70, Top = 14, Width = 220, Text = "normal" };
+                var ok  = new Button  { Text = "업로드", Left = 155, Top = 80, Width = 80, DialogResult = DialogResult.OK };
+                var cancel = new Button { Text = "취소", Left = 245, Top = 80, Width = 60, DialogResult = DialogResult.Cancel };
+                dlgLabel.Controls.AddRange(new Control[] { lbl, txt, ok, cancel });
+                dlgLabel.AcceptButton = ok;
+                if (dlgLabel.ShowDialog(this) != DialogResult.OK) return;
+                label = txt.Text.Trim();
+            }
+
+            // CSV 파일 선택 (다중 선택)
+            string[] csvFiles;
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "업로드할 CSV 파일 선택",
+                Filter = "CSV 파일 (*.csv)|*.csv",
+                Multiselect = true
+            })
+            {
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+                csvFiles = ofd.FileNames;
+            }
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.DarkBlue;
+            _lblInfluxStatus.Text = "업로드 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                var progress = new Progress<string>(msg =>
+                {
+                    if (!IsDisposed) BeginInvoke(new Action(() => _lblInfluxStatus.Text = msg));
+                });
+
+                // 기준 시각 = 파일명에서 추출 불가 → 파일 수정시각 사용
+                for (int i = 0; i < csvFiles.Length; i++)
+                {
+                    string path = csvFiles[i];
+                    DateTime baseTime = File.GetLastWriteTimeUtc(path);
+                    await _influxSource.WriteCsvAsync(path, device, label,
+                        AppState.Accel, baseTime, progress).ConfigureAwait(false);
+                    SafeBeginInvoke(new Action(() =>
+                        _lblInfluxStatus.Text = $"업로드 완료: {i + 1}/{csvFiles.Length}"));
+                }
+
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"업로드 완료 ({csvFiles.Length}개 파일)";
+                    LoadInfluxMetadataAsync(); // 메타 갱신
+                }));
+            }
+            catch (Exception ex)
+            {
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"업로드 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private async void BtnInfluxDeleteSelected_Click(object sender, EventArgs e)
+        {
+            if (_lstSegments.CheckedIndices.Count == 0)
+            {
+                MessageBox.Show("삭제할 세그먼트를 체크하세요.", "알림",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var selected = _lstSegments.CheckedIndices.Cast<int>()
+                                       .Where(i => i < _influxSegments.Count)
+                                       .Select(i => _influxSegments[i])
+                                       .ToList();
+
+            if (MessageBox.Show(
+                $"선택한 세그먼트 {selected.Count}개를 삭제합니다.\n(각 세그먼트의 시간 범위 내 해당 device/label 데이터 삭제)\n\n계속하시겠습니까?",
+                "삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.DarkOrange;
+            _lblInfluxStatus.Text = "삭제 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                foreach (var seg in selected)
+                {
+                    DateTime from = seg.StartTime;
+                    DateTime to   = seg.StartTime.AddSeconds(
+                        seg.Time != null && seg.Time.Length > 0
+                            ? seg.Time[seg.Time.Length - 1] + 0.01
+                            : (double)_nudSegSeconds.Value + 0.01);
+                    await _influxSource.DeleteAsync(seg.Device, seg.Label, from, to)
+                                       .ConfigureAwait(false);
+                }
+
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"삭제 완료 ({selected.Count}개 세그먼트)";
+                    // 리스트에서 제거
+                    var indices = _lstSegments.CheckedIndices.Cast<int>().OrderByDescending(i => i).ToList();
+                    foreach (int i in indices)
+                    {
+                        _lstSegments.Items.RemoveAt(i);
+                        _influxSegments.RemoveAt(i);
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private async void BtnInfluxDeleteLabel_Click(object sender, EventArgs e)
+        {
+            string device = _cmbInfluxDevice.SelectedItem?.ToString();
+
+            // 삭제할 레이블 선택 다이얼로그
+            var allLabels = new List<string>();
+            for (int i = 1; i < _cmbInfluxLabel.Items.Count; i++)
+                allLabels.Add(_cmbInfluxLabel.Items[i].ToString());
+
+            if (allLabels.Count == 0)
+            {
+                MessageBox.Show("조회된 레이블이 없습니다. 먼저 '조회'를 실행하세요.",
+                    "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string chosenLabel = null;
+            using (var dlg = new Form
+            {
+                Text = "레이블별 삭제",
+                Size = new Size(300, 180),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MaximizeBox = false, MinimizeBox = false
+            })
+            {
+                dlg.Controls.Add(new Label { Text = "삭제할 레이블:", Left = 10, Top = 16, AutoSize = true });
+                var cmb = new ComboBox { Left = 10, Top = 36, Width = 260,
+                    DropDownStyle = ComboBoxStyle.DropDownList };
+                foreach (var l in allLabels) cmb.Items.Add(l);
+                cmb.SelectedIndex = 0;
+                var ok     = new Button { Text = "삭제", Left = 140, Top = 100, Width = 70, DialogResult = DialogResult.OK, BackColor = Color.LightCoral };
+                var cancel = new Button { Text = "취소", Left = 220, Top = 100, Width = 60, DialogResult = DialogResult.Cancel };
+                dlg.Controls.AddRange(new Control[] { cmb, ok, cancel });
+                dlg.AcceptButton = ok;
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                chosenLabel = cmb.SelectedItem?.ToString();
+            }
+
+            if (string.IsNullOrEmpty(chosenLabel)) return;
+
+            if (MessageBox.Show(
+                $"device={device ?? "(전체)"}, label={chosenLabel}\n의 모든 데이터를 삭제합니다.\n\n계속하시겠습니까?",
+                "삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.DarkOrange;
+            _lblInfluxStatus.Text = $"레이블 '{chosenLabel}' 삭제 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                await _influxSource.DeleteAsync(device, chosenLabel).ConfigureAwait(false);
+
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"삭제 완료: label={chosenLabel}";
+                    // 세그먼트 목록에서 해당 레이블 제거
+                    for (int i = _influxSegments.Count - 1; i >= 0; i--)
+                    {
+                        if (_influxSegments[i].Label == chosenLabel)
+                        {
+                            _lstSegments.Items.RemoveAt(i);
+                            _influxSegments.RemoveAt(i);
+                        }
+                    }
+                    // 콤보에서도 제거
+                    _cmbInfluxLabel.Items.Remove(chosenLabel);
+                }));
+            }
+            catch (Exception ex)
+            {
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private async void BtnInfluxDeleteAll_Click(object sender, EventArgs e)
+        {
+            string device = _cmbInfluxDevice.SelectedItem?.ToString();
+
+            if (MessageBox.Show(
+                $"device={device ?? "(전체)"}의 모든 accel + torque 데이터를 삭제합니다.\n\n⚠ 이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
+                "전체 삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            // 두 번 확인
+            if (MessageBox.Show("정말로 삭제하시겠습니까?",
+                "최종 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Error) != DialogResult.Yes) return;
+
+            SetCrudButtonsEnabled(false);
+            _lblInfluxStatus.ForeColor = Color.Red;
+            _lblInfluxStatus.Text = "전체 삭제 중...";
+
+            try
+            {
+                EnsureInfluxSource();
+                await _influxSource.DeleteAsync(device, null).ConfigureAwait(false);
+
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = "전체 삭제 완료";
+                    _lstSegments.Items.Clear();
+                    _influxSegments.Clear();
+                    LoadInfluxMetadataAsync();
+                }));
+            }
+            catch (Exception ex)
+            {
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"삭제 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                SafeBeginInvoke(new Action(() => SetCrudButtonsEnabled(true)));
+            }
+        }
+
+        private void SetCrudButtonsEnabled(bool enabled)
+        {
+            _btnInfluxQuery.Enabled          = enabled;
+            _btnInfluxFullRange.Enabled      = enabled;
+            _btnInfluxCheckAll.Enabled       = enabled;
+            _btnInfluxUncheckAll.Enabled     = enabled;
+            _btnInfluxUploadCsv.Enabled      = enabled;
+            _btnInfluxDeleteSelected.Enabled = enabled;
+            _btnInfluxDeleteLabel.Enabled    = enabled;
+            _btnInfluxDeleteAll.Enabled      = enabled;
+        }
+
+        private void RdoInflux_CheckedChanged(object sender, EventArgs e)
+        {
+            bool influx = _rdoInflux.Checked;
+            _pnlCsvContent.Visible    = !influx;
+            _pnlInfluxContent.Visible =  influx;
+
+            if (influx)
+            {
+                lock (chartSync) chart.Series.Clear();
+                AutoAdjustYAxis();
+                ClearFrequencyChart();
+                LoadInfluxMetadataAsync();
+            }
+        }
+
+        private async void LoadInfluxMetadataAsync()
+        {
+            SafeBeginInvoke(() =>
+            {
+                _lblInfluxStatus.ForeColor = Color.Gray;
+                _lblInfluxStatus.Text = "메타데이터 로드 중...";
+                SetConnectionIndicator(ConnectionState.Connecting);
+            });
+            try
+            {
+                EnsureInfluxSource();
+                var devTask   = _influxSource.GetDevicesAsync();
+                var labelTask = _influxSource.GetLabelsAsync();
+                await Task.WhenAll(devTask, labelTask).ConfigureAwait(false);
+
+                var devices = devTask.Result;
+                var labels  = labelTask.Result;
+
+                SafeBeginInvoke(() =>
+                {
+                    _cmbInfluxDevice.Items.Clear();
+                    foreach (var d in devices) _cmbInfluxDevice.Items.Add(d);
+                    if (_cmbInfluxDevice.Items.Count > 0) _cmbInfluxDevice.SelectedIndex = 0;
+
+                    _cmbInfluxLabel.Items.Clear();
+                    _cmbInfluxLabel.Items.Add("(전체)");
+                    foreach (var l in labels) _cmbInfluxLabel.Items.Add(l);
+                    _cmbInfluxLabel.SelectedIndex = 0;
+
+                    string url = ServerSettings.Current?.InfluxUrl ?? "?";
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"연결됨 ({url})  Device {devices.Count}개, 레이블 {labels.Count}개";
+                    SetConnectionIndicator(ConnectionState.Connected);
+                });
+
+                // 시간 범위 자동 설정
+                if (devices.Count > 0)
+                {
+                    var (first, last) = await _influxSource.GetTimeRangeAsync().ConfigureAwait(false);
+                    SafeBeginInvoke(() =>
+                    {
+                        _dtpFrom.Value = first.ToLocalTime();
+                        _dtpTo.Value   = last.ToLocalTime();
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                string url = ServerSettings.Current?.InfluxUrl ?? "?";
+                string msg = ex.InnerException?.Message ?? ex.Message;
+                // 연결 오류와 데이터 없음 구분
+                bool isConnErr = msg.Contains("connect") || msg.Contains("refused")
+                              || msg.Contains("timeout") || msg.Contains("reach")
+                              || msg.Contains("연결") || msg.Contains("호스트");
+                SafeBeginInvoke(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = isConnErr
+                        ? $"연결 실패 ({url}) — {msg}"
+                        : $"오류: {msg}";
+                    SetConnectionIndicator(isConnErr ? ConnectionState.Failed : ConnectionState.Error);
+                });
+            }
+        }
+
+        private enum ConnectionState { Connecting, Connected, Failed, Error }
+        private Label _lblConnDot;   // ● 색상 인디케이터
+
+        private void SetConnectionIndicator(ConnectionState state)
+        {
+            if (_lblConnDot == null) return;
+            switch (state)
+            {
+                case ConnectionState.Connecting:
+                    _lblConnDot.ForeColor = Color.Goldenrod; _lblConnDot.Text = "●"; break;
+                case ConnectionState.Connected:
+                    _lblConnDot.ForeColor = Color.LimeGreen;  _lblConnDot.Text = "●"; break;
+                case ConnectionState.Failed:
+                    _lblConnDot.ForeColor = Color.Red;         _lblConnDot.Text = "●"; break;
+                case ConnectionState.Error:
+                    _lblConnDot.ForeColor = Color.OrangeRed;   _lblConnDot.Text = "●"; break;
+            }
+        }
+
+        private async void BtnInfluxFullRange_Click(object sender, EventArgs e)
+        {
+            _btnInfluxFullRange.Enabled = false;
+            _lblInfluxStatus.ForeColor = Color.Gray;
+            _lblInfluxStatus.Text = "전체 기간 조회 중...";
+            try
+            {
+                EnsureInfluxSource();
+                string device = _cmbInfluxDevice.SelectedItem?.ToString();
+                string label  = (_cmbInfluxLabel.SelectedIndex > 0)
+                                ? _cmbInfluxLabel.SelectedItem?.ToString()
+                                : null;
+                var (first, last) = await _influxSource.GetTimeRangeAsync(device, label).ConfigureAwait(false);
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _dtpFrom.Value = first.ToLocalTime();
+                    _dtpTo.Value   = last.ToLocalTime();
+                    _lblInfluxStatus.ForeColor = Color.DarkGreen;
+                    _lblInfluxStatus.Text = $"기간: {first.ToLocalTime():yy-MM-dd HH:mm} ~ {last.ToLocalTime():yy-MM-dd HH:mm}";
+                }));
+            }
+            catch (Exception ex)
+            {
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"기간 조회 오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                SafeBeginInvoke(new Action(() => _btnInfluxFullRange.Enabled = true));
+            }
+        }
+
+        private async void BtnInfluxQuery_Click(object sender, EventArgs e)
+        {
+            _btnInfluxQuery.Enabled = false;
+            _lblInfluxStatus.ForeColor = Color.Gray;
+            _lblInfluxStatus.Text = "조회 중...";
+            _lstSegments.Items.Clear();
+            _influxSegments.Clear();
+
+            // 차트 초기화
+            lock (chartSync) chart.Series.Clear();
+            AutoAdjustYAxis();
+            ClearFrequencyChart();
+
+            try
+            {
+                EnsureInfluxSource();
+                string device = _cmbInfluxDevice.SelectedItem?.ToString();
+                string label  = (_cmbInfluxLabel.SelectedIndex > 0)
+                                ? _cmbInfluxLabel.SelectedItem?.ToString()
+                                : null;
+                DateTime from   = _dtpFrom.Value.ToUniversalTime();
+                DateTime to     = _dtpTo.Value.ToUniversalTime();
+                double segSecs  = (double)_nudSegSeconds.Value;
+
+                var progress = new Progress<string>(msg =>
+                {
+                    if (!IsDisposed) BeginInvoke(new Action(() => _lblInfluxStatus.Text = msg));
+                });
+
+                string selectedChannel = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
+                bool isTorqueQuery = selectedChannel == "torque";
+
+                var segs = isTorqueQuery
+                    ? await _influxSource.QueryTorqueSegmentsAsync(device, label, from, to, segSecs, progress).ConfigureAwait(false)
+                    : await _influxSource.QuerySegmentsAsync(device, label, from, to, segSecs, progress).ConfigureAwait(false);
+
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _influxSegments = segs;
+                    foreach (var seg in segs)
+                    {
+                        string lbl = string.IsNullOrEmpty(seg.Label) ? "" : $"[{seg.Label}] ";
+                        _lstSegments.Items.Add($"{lbl}{seg.Name}  ({seg.SampleCount} pts)");
+                    }
+
+                    _lblInfluxStatus.ForeColor = segs.Count > 0 ? Color.DarkGreen : Color.Gray;
+                    _lblInfluxStatus.Text = $"총 {segs.Count}개 세그먼트";
+                }));
+            }
+            catch (Exception ex)
+            {
+                SafeBeginInvoke(new Action(() =>
+                {
+                    _lblInfluxStatus.ForeColor = Color.Red;
+                    _lblInfluxStatus.Text = $"오류: {ex.Message}";
+                }));
+            }
+            finally
+            {
+                SafeBeginInvoke(new Action(() => _btnInfluxQuery.Enabled = true));
+            }
+        }
+
+        private void LstSegments_ItemCheck(object sender, ItemCheckEventArgs e)
+        {
+            int idx = e.Index;
+            if (idx < 0 || idx >= _influxSegments.Count) return;
+            var seg = _influxSegments[idx];
+            string seriesName = seg.Name;
+
+            if (e.NewValue == CheckState.Checked)
+            {
+                string ch = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
+                AddInfluxSeriesToChart(seg, ch);
+            }
+            else
+            {
+                // 체크 해제 → Time domain + Frequency 차트에서 시리즈 제거
+                lock (chartSync)
+                {
+                    var s = chart.Series.FindByName(seriesName);
+                    if (s != null) chart.Series.Remove(s);
+                }
+                AutoAdjustYAxis();
+                ScheduleFreqUpdate();   // 주파수 차트도 동기화
+            }
+        }
+
+        private void AddInfluxSeriesToChart(SignalSegment seg, string channel)
+        {
+            if (seg == null) return;
+            double[] arr = seg.GetChannel(channel);
+            if (arr == null || arr.Length == 0) return;
+
+            string seriesName = seg.Name;
+            lock (_loadingSeries)
+            {
+                if (_loadingSeries.Contains(seriesName)) return;
+                _loadingSeries.Add(seriesName);
+            }
+
+            var time = seg.Time ?? Enumerable.Range(0, arr.Length)
+                                             .Select(i => (double)i / AppState.Accel)
+                                             .ToArray();
+
+            Task.Run(new Action(() =>
+            {
+                try
+                {
+                    double[] dx, dy;
+                    DownsampleMinMax(time, arr, MaxDisplayPointsPerSeries, out dx, out dy);
+
+                    SafeBeginInvoke(new Action(() =>
+                    {
+                        chart.BeginInit();
+                        try
+                        {
+                            var series = chart.Series.FindByName(seriesName);
+                            if (series == null)
+                            {
+                                series = new Series(seriesName)
+                                {
+                                    ChartType = SeriesChartType.FastLine,
+                                    BorderWidth = 1,
+                                    IsVisibleInLegend = false
+                                };
+                                series.SmartLabelStyle.Enabled = false;
+                                chart.Series.Add(series);
+                            }
+                            series.Points.DataBindXY(dx, dy);
+                            chart.ChartAreas["MainArea"].AxisY.Title =
+                                (channel == "torque" || channel == "fbtrq") ? "torque (%)" : channel + " (g)";
+                            AutoAdjustYAxis();
+                            ScheduleFreqUpdate();
+                        }
+                        finally { chart.EndInit(); }
+                    }));
+                }
+                finally
+                {
+                    lock (_loadingSeries) _loadingSeries.Remove(seriesName);
+                }
+            }));
+        }
+
+        private void ComputeFeaturesFromInfluxSegments()
+        {
+            if (_influxSegments.Count == 0)
+            {
+                MessageBox.Show("먼저 InfluxDB 조회 버튼을 눌러 세그먼트를 가져오세요.");
+                return;
+            }
+
+            string channel = _cmbInfluxChannel?.SelectedItem?.ToString() ?? "x";
+            bool isTorque = channel == "torque" || channel == "fbtrq";
+            // 토크는 AjinCsvLogger 폴링 주기로 결정 (기본 100Hz), 가속도는 AppState.Accel
+            double sr = isTorque ? 100.0 : AppState.Accel;
+
+            var segments = _influxSegments.ToList(); // snapshot
+            _featureTable.Clear();
+
+            Task.Run(new Action(() =>
+            {
+                foreach (var seg in segments)
+                {
+                    double[] arr = seg.GetChannel(channel);
+                    if (arr == null || arr.Length < 4) continue;
+
+                    // InfluxDB 타임스탬프로 실제 샘플레이트 추정
+                    // (InfluxDB가 1ms 단위로 집계하면 estSr ≈ 1000 Hz)
+                    double estSr = sr;
+                    if (seg.Time != null && seg.Time.Length >= 2)
+                    {
+                        double dur = seg.Time[seg.Time.Length - 1] - seg.Time[0];
+                        if (dur > 0) estSr = (seg.Time.Length - 1) / dur;
+                    }
+
+                    var ys = arr.ToList();
+                    var row = new SignalFeatures.FeatureRow
+                    {
+                        FileName = seg.Name,
+                        Label    = seg.Label ?? ""
+                    };
+                    SignalFeatures.FillTimeDomainFeatures(ys, row);
+
+                    int avail = Math.Min(ys.Count, MaxFftSamples);
+                    double[] yarr = ys.Take(avail).ToArray();
+                    double[] freq;
+                    var spec = SignalFeatures.ComputeMagnitudeSpectrum(yarr, estSr, out freq);
+                    SignalFeatures.FillPeakFeatures(freq, spec, row);
+
+                    _featureTable.Add(row);
+                }
+
+                SafeBeginInvoke(new Action(() =>
+                {
+                    gridFeatures.DataSource = null;
+                    gridFeatures.DataSource = _featureTable;
+                    ApplyNumericFormat(gridFeatures);
+                    RenderFeatureDistribution();
+                    lblFeatureInfo.Text = $"샘플: {_featureTable.Count}개 (InfluxDB)";
+                    EnsureAIForm();
+                    _aiForm.SetYColumnName(channel);
+                    _aiForm.SetFeatureData(_featureTable.Cast<object>(), FeatureList);
+                }));
+            }));
+        }
+
+        private void EnsureInfluxSource()
+        {
+            if (_influxSource != null) return;
+            // ServerSettings.Current 우선 → 없으면 파일 폴백
+            var ss = ServerSettings.Current;
+            InfluxConfig cfg;
+            if (!string.IsNullOrWhiteSpace(ss?.InfluxUrl) && ss.InfluxUrl != "http://localhost:8086")
+                cfg = ss.ToInfluxConfig();
+            else
+            {
+                string cfgPath = FindInfluxConfig();
+                cfg = InfluxConfig.LoadOrDefault(cfgPath);
+            }
+            _influxSource = new InfluxDbDataSource(cfg);
+        }
+
+        /// <summary>핸들 생성 전/Dispose 후 BeginInvoke 크래시 방지</summary>
+        private void SafeBeginInvoke(Action action)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try { BeginInvoke(action); }
+            catch (InvalidOperationException) { /* 핸들 소멸 타이밍 */ }
+        }
+
+        private static string FindInfluxConfig()
+        {
+            var candidates = new[]
+            {
+                System.IO.Path.Combine(ResolveLogRoot(), "Tests", "influx_config.json"),
+                @"D:\Dev\hvs\WorkingSource\DAQ_Test\infra\influx_config.json",
+                System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "influx_config.json"),
+            };
+            foreach (var p in candidates)
+                if (System.IO.File.Exists(p)) return p;
+            return candidates[0];
+        }
+
+        private static string ResolveLogRoot()
+        {
+            foreach (var r in new[] { @"E:\Data\PHM_Logs", @"C:\Data\PHM_Logs", @"C:\PHM_Logs" })
+                if (System.IO.Directory.Exists(r)) return r;
+            return @"C:\Data\PHM_Logs";
         }
     }
 }

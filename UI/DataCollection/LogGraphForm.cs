@@ -42,9 +42,10 @@ namespace PHM_Project_DockPanel.Windows
         // Torque 데이터
         private List<double> _pos, _vel, _trq;
         private List<double> _cmdPos, _cmdVel, _cmdTrq;
+        private bool _hasCmdData; // CmdPos/CmdVel 컬럼이 실제로 CSV에 있었는지
 
-        // AjinMotion 다축 데이터 (축 번호 → Pos/Vel/Trq 리스트)
-        private Dictionary<int, (List<double> Pos, List<double> Vel, List<double> Trq)> _ajinAxesData;
+        // AjinMotion 다축 데이터 (축 번호 → Pos/Vel/Trq/CmdPos/CmdVel 리스트)
+        private Dictionary<int, (List<double> Pos, List<double> Vel, List<double> Trq, List<double> CmdPos, List<double> CmdVel)> _ajinAxesData;
         private ComboBox _cmbAjinAxis;
         private Label _lblAjinAxis;
         private bool _suppressAjinAxisEvent;
@@ -245,7 +246,9 @@ namespace PHM_Project_DockPanel.Windows
                 {
                     var d = _ajinAxesData[ax];
                     _pos = d.Pos; _vel = d.Vel; _trq = d.Trq;
-                    _cmdPos = d.Pos; _cmdVel = d.Vel; _cmdTrq = d.Trq;
+                    _cmdPos = d.CmdPos;
+                    _cmdVel = d.CmdVel;
+                    _cmdTrq = d.Trq;
                     DrawFeedbackView();
                 }
             };
@@ -317,7 +320,7 @@ namespace PHM_Project_DockPanel.Windows
             }
 
             _btnFeedback.Enabled = true;
-            _btnResidual.Enabled = true;
+            _btnResidual.Enabled = _hasCmdData;
         }
 
         private void BuildAccelLayout()
@@ -431,6 +434,17 @@ namespace PHM_Project_DockPanel.Windows
 
         public void LoadCsv(string filePath, LogKind? forceKind)
         {
+            // ── 경로 캐시는 항상 업데이트 ─────────────────────────────────────
+            if (forceKind == LogKind.Accel)  _lastAccelPath  = filePath;
+            if (forceKind == LogKind.Torque) _lastTorquePath = filePath;
+
+            // ── 사용자 콤보 선택 우선 적용 ─────────────────────────────────────
+            // 사용자가 이미 종류를 선택했고(preferred != Unknown), 자동 push 종류가 다르면
+            // 뷰 전환을 생략하고 경로만 기억한다.
+            LogKind preferred = AppState.LogGraphPreferredKind;
+            if (preferred != LogKind.Unknown && forceKind.HasValue && forceKind.Value != preferred)
+                return;
+
             if (!TryDetectAndParse(filePath, forceKind))
             {
                 MessageBox.Show("CSV 파싱 실패 또는 지원하지 않는 포맷입니다.", "오류",
@@ -448,14 +462,14 @@ namespace PHM_Project_DockPanel.Windows
 
             if (_kind == LogKind.Torque)
             {
-                _lastTorquePath = filePath;   // 경로 저장
+                _lastTorquePath = filePath;
                 BuildTorqueLayout();
                 DrawFeedbackView();
                 UpdateAccelFileComboVisibility();
             }
             else if (_kind == LogKind.Accel)
             {
-                _lastAccelPath = filePath;    // 경로 저장
+                _lastAccelPath = filePath;
                 BuildAccelLayout();
                 DrawAccelView();
 
@@ -591,6 +605,7 @@ namespace PHM_Project_DockPanel.Windows
                     _time[i] = (_time[i] - t0) + sp;
             }
 
+            _hasCmdData = true; // WMX3 CSV는 항상 CmdPos/CmdVel/CmdTrq 컬럼 포함
             return _time.Count > 1;
         }
 
@@ -617,22 +632,24 @@ namespace PHM_Project_DockPanel.Windows
             if (axisIndices.Count == 0) return false;
 
             // 각 축의 컬럼 인덱스 조회
-            var axColMap = new Dictionary<int, (int pos, int vel, int trq)>();
+            var axColMap = new Dictionary<int, (int pos, int vel, int trq, int cmdPos, int cmdVel)>();
             foreach (int ax in axisIndices)
             {
-                int pi = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_pos"));
-                int vi = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_vel"));
-                int ti = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_trq"));
+                int pi   = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_pos("));
+                int vi   = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_vel("));
+                int ti   = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_trq("));
+                int cpi  = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_cmdpos("));
+                int cvi  = Array.FindIndex(lower, h => h.StartsWith($"ax{ax}_cmdvel("));
                 if (pi >= 0 && vi >= 0 && ti >= 0)
-                    axColMap[ax] = (pi, vi, ti);
+                    axColMap[ax] = (pi, vi, ti, cpi, cvi); // cpi/cvi may be -1 (older files)
             }
             if (axColMap.Count == 0) return false;
 
             // 공통 시간 리스트
             _time = new List<double>();
-            _ajinAxesData = new Dictionary<int, (List<double>, List<double>, List<double>)>();
+            _ajinAxesData = new Dictionary<int, (List<double>, List<double>, List<double>, List<double>, List<double>)>();
             foreach (int ax in axColMap.Keys)
-                _ajinAxesData[ax] = (new List<double>(), new List<double>(), new List<double>());
+                _ajinAxesData[ax] = (new List<double>(), new List<double>(), new List<double>(), new List<double>(), new List<double>());
 
             for (int i = 1; i < lines.Length; i++)
             {
@@ -643,17 +660,23 @@ namespace PHM_Project_DockPanel.Windows
                     continue;
 
                 bool allOk = true;
-                var rowData = new Dictionary<int, (double p, double v, double tq)>();
+                var rowData = new Dictionary<int, (double p, double v, double tq, double cp, double cv)>();
                 foreach (var kv in axColMap)
                 {
                     int ax = kv.Key;
-                    var (pi, vi, ti) = kv.Value;
+                    var (pi, vi, ti, cpi, cvi) = kv.Value;
                     if (cols.Length <= Math.Max(pi, Math.Max(vi, ti))) { allOk = false; break; }
                     if (!double.TryParse(cols[pi], NumberStyles.Any, CultureInfo.InvariantCulture, out double p) ||
                         !double.TryParse(cols[vi], NumberStyles.Any, CultureInfo.InvariantCulture, out double v) ||
                         !double.TryParse(cols[ti], NumberStyles.Any, CultureInfo.InvariantCulture, out double tq))
                     { allOk = false; break; }
-                    rowData[ax] = (p, v, tq);
+                    double cp = (cpi >= 0 && cpi < cols.Length &&
+                                 double.TryParse(cols[cpi], NumberStyles.Any, CultureInfo.InvariantCulture, out double cpVal))
+                                ? cpVal : p;
+                    double cv = (cvi >= 0 && cvi < cols.Length &&
+                                 double.TryParse(cols[cvi], NumberStyles.Any, CultureInfo.InvariantCulture, out double cvVal))
+                                ? cvVal : v; // CmdVel 없으면 ActVel로 대체
+                    rowData[ax] = (p, v, tq, cp, cv);
                 }
                 if (!allOk) continue;
 
@@ -664,6 +687,8 @@ namespace PHM_Project_DockPanel.Windows
                     lists.Pos.Add(kv.Value.p);
                     lists.Vel.Add(kv.Value.v);
                     lists.Trq.Add(kv.Value.tq);
+                    lists.CmdPos.Add(kv.Value.cp);
+                    lists.CmdVel.Add(kv.Value.cv);
                 }
             }
 
@@ -677,9 +702,14 @@ namespace PHM_Project_DockPanel.Windows
             int firstAxis = axColMap.Keys.First();
             UpdateAjinAxisCombo(axColMap.Keys.ToList(), firstAxis);
 
+            // CmdPos 컬럼이 실제로 존재하는지 확인 (cpi >= 0 인 축이 하나라도 있으면)
+            _hasCmdData = axColMap.Values.Any(v => v.cmdPos >= 0);
+
             var first = _ajinAxesData[firstAxis];
             _pos = first.Pos; _vel = first.Vel; _trq = first.Trq;
-            _cmdPos = first.Pos; _cmdVel = first.Vel; _cmdTrq = first.Trq;
+            _cmdPos = first.CmdPos;
+            _cmdVel = first.CmdVel;
+            _cmdTrq = first.Trq; // 토크 command 없음 → following error = 0
 
             return true;
         }
@@ -705,6 +735,7 @@ namespace PHM_Project_DockPanel.Windows
         private void DrawFeedbackView()
         {
             if (_kind != LogKind.Torque) return;
+            RestoreFeedbackTitles();
             DrawTimeAndFreq(_time, _pos, 0);
             DrawTimeAndFreq(_time, _vel, 1);
             DrawTimeAndFreq(_time, _trq, 2);
@@ -713,6 +744,20 @@ namespace PHM_Project_DockPanel.Windows
         private void DrawResidualView()
         {
             if (_kind != LogKind.Torque) return;
+
+            // 차트 타이틀을 Following Error 표기로 변경
+            if (_charts != null)
+            {
+                string[] errTitles = { "Pos Error (mm)", "Vel Error (mm/s)", "Trq Error (%)" };
+                for (int row = 0; row < 3; row++)
+                {
+                    if (_charts[row, 0]?.Titles.Count > 0)
+                        _charts[row, 0].Titles[0].Text = errTitles[row] + " (Time)";
+                    if (_charts[row, 1]?.Titles.Count > 0)
+                        _charts[row, 1].Titles[0].Text = errTitles[row] + " (Freq)";
+                }
+            }
+
             var posRes = ZipResidual(_cmdPos, _pos);
             var velRes = ZipResidual(_cmdVel, _vel);
             var trqRes = ZipResidual(_cmdTrq, _trq);
@@ -721,8 +766,24 @@ namespace PHM_Project_DockPanel.Windows
             DrawTimeAndFreq(_time, trqRes, 2);
         }
 
+        private void RestoreFeedbackTitles()
+        {
+            if (_charts == null) return;
+            string[] titles = { "Pos", "Vel", "Trq" };
+            for (int row = 0; row < 3; row++)
+            {
+                if (_charts[row, 0]?.Titles.Count > 0)
+                    _charts[row, 0].Titles[0].Text = titles[row] + " (Time)";
+                if (_charts[row, 1]?.Titles.Count > 0)
+                    _charts[row, 1].Titles[0].Text = titles[row] + " (Freq)";
+            }
+        }
+
         private static List<double> ZipResidual(List<double> cmd, List<double> fb)
-            => Enumerable.Zip(cmd, fb, (c, f) => c - f).ToList();
+            => cmd == null || fb == null
+               ? new List<double>()
+               : Enumerable.Zip(cmd, fb, (c, f) => c - f).ToList();
+
 
         // ======================= Accel =======================
         private bool TryParseAccelCsv(string[] lines, string[] headers)

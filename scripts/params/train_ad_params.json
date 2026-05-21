@@ -1,0 +1,26 @@
+{
+  "_comment": "이상 탐지 모델 (AD) — sklearn Isolation Forest. 정상 데이터만으로 학습.",
+  "_usage": "python scripts/train_model.py --params scripts/params/train_ad_params.json",
+
+  "csv":     "C:/Data/PHM_Logs/features/features_axis0.csv",
+  "output":  "C:/Data/PHM_Logs/models/isoforest_ad_axis0.onnx",
+  "session": "AD",
+  "model":   "isoforest",
+  "y_column": "x",
+
+  "class_names": ["Normal", "Anomaly"],
+
+  "features": [
+    "RMS", "AbsMean", "AbsMax", "P2P",
+    "Skewness", "Kurtosis", "Crest", "Shape", "Impulse",
+    "Peak1Freq", "Peak1Amp",
+    "Peak2Freq", "Peak2Amp",
+    "Peak3Freq", "Peak3Amp",
+    "Peak4Freq", "Peak4Amp"
+  ],
+
+  "standardize": true,
+
+  "mlflow_tracking_uri": "http://localhost:5000",
+  "mlflow_experiment":   "PHM-SKL"
+}

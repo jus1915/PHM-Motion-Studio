@@ -1,5 +1,6 @@
 ﻿using PHM_Project_DockPanel.Controller;
 using PHM_Project_DockPanel.DebugTools;
+using PHM_Project_DockPanel.Services.Core;
 using PHM_Project_DockPanel.Services.WMX;
 using PHM_Project_DockPanel.Services.DAQ;
 using System;
@@ -23,12 +24,19 @@ namespace PHM_Project_DockPanel.Services
 
         private WmxTorqueLogger _torqueLogger;
         private DaqAccelCsvLogger _accelLogger;
-        private DaqAccelHttpSender _accelHttpSender;
-        private AjinCsvLogger _ajinLogger;   // Ajin 전용 폴링 로거
+        private AccelInfluxPublisher _accelInfluxPublisher;
+        private AjinCsvLogger _ajinLogger;         // Ajin 전용 폴링 로거
+        private CombinedCsvLogger _combinedLogger; // 통합 CSV 로거 (accel+torque 동시)
+        // 통합 모드에서 교체하기 전 BlockReceived 백업 (Stop 시 복원용)
+        private Action<string, double[,], DateTime> _savedBlockReceived;
 
         // ▶ 분리된 로깅 토글 (주입식)
         private readonly Func<bool> _isAccelEnabled;   // 가속도 수집 여부
         private readonly Func<bool> _isTorqueEnabled;  // 토크 수집 여부
+
+        // ▶ 연속 수집 상태
+        private bool _continuousLoggingActive;
+        private ContinuousInferenceService _inferenceService;
 
         public ControllerManager Controller => _controller;
         public AxisConfig[] AxisConfigs => _axisConfigs;
@@ -66,9 +74,9 @@ namespace PHM_Project_DockPanel.Services
             _accelLogger = accelLogger;
         }
 
-        public void SetAccelHttpSender(DaqAccelHttpSender accelHttpSender)
+        public void SetAccelInfluxPublisher(AccelInfluxPublisher publisher)
         {
-            _accelHttpSender = accelHttpSender;
+            _accelInfluxPublisher = publisher;
         }
 
         /// <summary>Ajin 전용 폴링 로거를 주입합니다. MainForm에서 Ajin 선택 시 호출.</summary>
@@ -146,9 +154,15 @@ namespace PHM_Project_DockPanel.Services
             if (values.Length != axes.Length)
                 throw new ArgumentException("values length must be 1 or equal to axes length.");
 
-            bool logAccel = ShouldLogAccel();
+            bool logAccel  = ShouldLogAccel();
             bool logTorque = ShouldLogTorque();
-            bool anyLog = (logAccel || logTorque) && _axisConfigs != null;
+            bool anyLog    = (logAccel || logTorque) && _axisConfigs != null;
+
+            // 연속 수집 중이면 모션별 파일 생성 억제 (NI-DAQ 채널 충돌 방지)
+            if (_continuousLoggingActive)
+            {
+                logAccel = false; logTorque = false; anyLog = false;
+            }
 
             var status = _controller.GetStatus();
             var active = new List<int>();
@@ -190,7 +204,7 @@ namespace PHM_Project_DockPanel.Services
                 string sessionId = $"{robotId}_{DateTime.Now:yyyyMMdd_HHmmssfff}";
 
                 if (logAccel) // logAccel이 true일 때만 실행
-                    _accelHttpSender?.BeginSession(sessionId, robotId, active.ToArray());
+                    _accelInfluxPublisher?.BeginSession(sessionId, robotId, active.ToArray());
 
                 MotionStarted?.Invoke(active.ToArray());
             }
@@ -220,7 +234,9 @@ namespace PHM_Project_DockPanel.Services
                         : $"Axes{string.Join("-", active)}";
                     string folderName = $"{DateTime.Now:yyyyMMdd}_{axisTag}";
                     string baseRoot = @"C:\Data\PHM_Logs\Signals";
-                    string rootDir = Path.Combine(baseRoot, folderName);
+                    // 레이블이 있으면 서브폴더로 분류 — DL 학습 시 폴더명 = 레이블로 자동 인식
+                    string labelTag = string.IsNullOrEmpty(AppState.CurrentLabel) ? "unlabeled" : AppState.CurrentLabel;
+                    string rootDir = Path.Combine(baseRoot, folderName, labelTag);
                     string torqueDir = Path.Combine(rootDir, "Torque");
                     string accelDir = Path.Combine(rootDir, "Accel");
                     Directory.CreateDirectory(torqueDir);
@@ -258,6 +274,10 @@ namespace PHM_Project_DockPanel.Services
                     // ── DAQ 가속도 CSV 로거 (공통) ─────────────────────────
                     if (logAccel && _accelLogger != null)
                     {
+                        // Passive Monitor가 같은 NI 모듈을 사용 중일 수 있으므로 먼저 해제 요청
+                        AppEvents.RaisePassiveMonitorSuspend();
+                        await Task.Delay(300); // DAQmx 리소스 해제 대기
+
                         try { startedAccelCsvRun = _accelLogger.Start(active.ToArray(), accelDir, baseName, 0); }
                         catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (DAQ CSV) {ex.Message}"); }
                     }
@@ -274,7 +294,7 @@ namespace PHM_Project_DockPanel.Services
                 try
                 {
                     if (logAccel) // logAccel이 true일 때만 실행
-                        _accelHttpSender?.EndSession();
+                        _accelInfluxPublisher?.EndSession();
 
                     MotionEnded?.Invoke();
                 }
@@ -300,6 +320,10 @@ namespace PHM_Project_DockPanel.Services
                     stopTasks.Add(Task.Run(() => { try { _accelLogger.Stop(); } catch { } }));
 
                 if (stopTasks.Count > 0) await Task.WhenAll(stopTasks);
+
+                // Passive Monitor 재시작 (모션 전에 suspend 했던 경우)
+                if (startedAccelCsvRun)
+                    AppEvents.RaisePassiveMonitorResume();
 
                 // 로깅 완료 → Log Graph Viewer에 파일 전달
                 if (!string.IsNullOrEmpty(ajinOutputPath) && File.Exists(ajinOutputPath))
@@ -372,6 +396,309 @@ namespace PHM_Project_DockPanel.Services
                 return ta + td;
             }
         }
+
+        // ======================= 연속 수집 =======================
+
+        /// <summary>
+        /// 모션 트리거 없이 DAQ/토크 로거를 연속으로 시작합니다.
+        /// _isAccelEnabled / _isTorqueEnabled 플래그를 그대로 존중합니다.
+        /// </summary>
+        /// <param name="forceAccel">null이면 _isAccelEnabled 델리게이트 사용. UI 스레드 외부에서 호출 시 미리 캡처한 값을 전달하세요.</param>
+        /// <param name="forceTorque">null이면 _isTorqueEnabled 델리게이트 사용.</param>
+        public bool StartContinuousLogging(string label = "", bool? forceAccel = null, bool? forceTorque = null)
+        {
+            if (_continuousLoggingActive) return true;
+
+            bool logAccel  = forceAccel  ?? ShouldLogAccel();
+            bool logTorque = forceTorque ?? ShouldLogTorque();
+
+            if (!logAccel && !logTorque)
+            {
+                AppEvents.RaiseLog("[연속 수집] 가속도 또는 토크 수집 체크박스를 먼저 활성화하세요.");
+                return false;
+            }
+
+            // ── 연속 수집 모드 즉시 활성화 ───────────────────────────────
+            // CSV 저장 성공 여부와 무관하게, 체크박스를 켠 순간부터
+            // 모션별(RunMotionWithLogging) 수집을 억제합니다.
+            _continuousLoggingActive = true;
+
+            string labelTag  = string.IsNullOrEmpty(label) ? "unlabeled" : label;
+            string today     = DateTime.Now.ToString("yyyyMMdd");
+            string baseRoot  = ServerSettings.Current.ContinuousDataPath;
+            if (string.IsNullOrWhiteSpace(baseRoot))
+                baseRoot = @"C:\Data\PHM_Logs\Signals";
+            string rootDir   = Path.Combine(baseRoot, today + "_Continuous", labelTag);
+            string accelDir  = Path.Combine(rootDir, "Accel");
+            string torqueDir = Path.Combine(rootDir, "Torque");
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            string baseName  = timestamp + "_AllAxes_Continuous";
+
+            // ── InfluxDB label 태그 설정 (연속 수집 기간 동안 유지) ──────────
+            if (_accelInfluxPublisher != null)
+                _accelInfluxPublisher.Label = labelTag;
+
+            // ── 저장 경로 접근성 사전 확인 ────────────────────────────────
+            bool pathOk = false;
+            try
+            {
+                Directory.CreateDirectory(rootDir);
+                pathOk = true;
+            }
+            catch (Exception ex)
+            {
+                string hint = baseRoot.StartsWith(@"\\")
+                    ? $"\n[해결 방법] 서버 PC에서 해당 폴더를 Windows 공유(우클릭→공유)하거나\n"
+                      + "연결 설정의 '연속 수집 데이터 저장 경로'를 로컬 경로로 변경하세요."
+                    : "";
+                AppEvents.RaiseLog($"[연속 수집] ⚠ 저장 경로 접근 실패 — CSV는 저장되지 않습니다.\n"
+                                 + $"  경로: {rootDir}\n  오류: {ex.Message}{hint}");
+            }
+
+            bool anyStarted = false;
+
+            // WMX / Ajin 두 제어기 모두 미연결이면 Op_Ax 컬럼 생략
+            // (pathOk 블록 안팎 모두 사용하므로 먼저 선언)
+            bool controllerConnected = _controller.IsConnected;
+
+            if (pathOk)
+            {
+                int axisCount = AxisConfig.AxisCount > 0
+                    ? AxisConfig.AxisCount
+                    : Math.Max(1, _axisConfigs?.Length ?? 1);
+                int[] allAxes = new int[axisCount];
+                for (int i = 0; i < axisCount; i++) allAxes[i] = i;
+
+                bool canPollingTorque = _ajinLogger != null &&
+                                        (_controller.IsAjin || _controller.IsSimulationMode);
+                bool useCombined = logAccel && logTorque && _accelLogger != null && canPollingTorque;
+
+                if (useCombined)
+                {
+                    // ── 통합 모드: Accel + Torque → 단일 CSV ─────────────
+                    try
+                    {
+                        var combined = new CombinedCsvLogger(
+                            getTorque: ax => _ajinLogger.ReadTorque(ax),
+                            getAxisOp: controllerConnected ? (Func<int, string>)GetAxisOperation : null,
+                            axes:      allAxes,
+                            log:       msg => AppEvents.RaiseLog(msg));
+
+                        // DAQ 하드웨어 시작 (CSV 쓰기는 억제, 블록만 combined로 전달)
+                        _accelLogger.SuppressCsvWrite = true;
+                        string[] modules = _accelLogger.Modules;
+                        double accelRate = _accelLogger.SampleRate > 0
+                            ? _accelLogger.SampleRate : 1000.0;
+                        // ★ 기존 MainForm의 InfluxDB 구독(BlockReceived)을 보존하면서 combined 처리 추가
+                        _savedBlockReceived = _accelLogger.BlockReceived;
+                        var prevBlockReceived = _savedBlockReceived;
+                        _accelLogger.BlockReceived = (module, block, ts) =>
+                        {
+                            // 1) InfluxDB 피드 (MainForm 구독 체이닝)
+                            prevBlockReceived?.Invoke(module, block, ts);
+
+                            // 2) Combined CSV 기록 (원해상도)
+                            int modIdx = System.Array.IndexOf(modules, module);
+                            if (modIdx < 0) return;
+                            int n = block.GetLength(1);
+                            if (n <= 0) return;
+                            combined.ProcessAccelBlock(modIdx, block, n, accelRate);
+                        };
+                        // ★ InfluxDB 토크 피드 연결: combined 내부 1ms 폴링 → InfluxDB
+                        {
+                            string influxModule = _accelLogger.Modules.Length > 0
+                                ? _accelLogger.Modules[0] : "combined";
+                            combined.TorqueSampled = (axisIdx, torqueVal, utcTs) =>
+                            {
+                                // 실시간 신호 모니터 브로드캐스트
+                                AppEvents.RaiseTorqueSample(axisIdx, torqueVal, utcTs);
+                                if (_accelInfluxPublisher != null)
+                                    _accelInfluxPublisher.FeedTorqueSample(
+                                        influxModule, axisIdx, torqueVal, utcTs);
+                            };
+                        }
+
+                        bool accelOk = _accelLogger.Start(new int[0], rootDir, baseName, 0);
+
+                        // 통합 CSV 시작
+                        bool combOk = combined.Start(rootDir, baseName);
+                        if (combOk)
+                        {
+                            _combinedLogger = combined;
+                            anyStarted = true;
+                            AppEvents.RaiseLog("[연속 수집] 통합 CSV 시작 → " + rootDir
+                                + $"  (DAQ 하드웨어: {(accelOk ? "OK" : "실패")})");
+                        }
+                        else
+                        {
+                            AppEvents.RaiseLog("[연속 수집] 통합 CSV 시작 실패");
+                            _accelLogger.SuppressCsvWrite = false;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        AppEvents.RaiseLog("[연속 수집] 통합 오류: " + ex.Message);
+                        _accelLogger.SuppressCsvWrite = false;
+                    }
+                }
+                else
+                {
+                    // ── 단독 모드: 각각 별도 CSV ─────────────────────────
+
+                    // DAQ 가속도
+                    if (logAccel && _accelLogger != null)
+                    {
+                        try
+                        {
+                            _accelLogger.SuppressCsvWrite = false;
+                            // ★ Start() 전에 Op 컬럼 설정 — 헤더에 반영되도록
+                            // (Start() 내부에서 헤더를 즉시 작성하므로, 이후에 설정하면 헤더/데이터 컬럼 수 불일치)
+                            _accelLogger.GetAxisOperation = controllerConnected ? (Func<int, string>)GetAxisOperation : null;
+                            int _axCntAccel = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
+                            _accelLogger.LoggedAxes = controllerConnected
+                                ? System.Linq.Enumerable.Range(0, _axCntAccel).ToArray()
+                                : null;
+                            Directory.CreateDirectory(accelDir);
+                            bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);
+                            if (ok)
+                            {
+                                anyStarted = true;
+                                AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 → " + accelDir);
+                            }
+                            else AppEvents.RaiseLog("[연속 수집] DAQ 가속도 시작 실패");
+                        }
+                        catch (Exception ex)
+                        {
+                            AppEvents.RaiseLog("[연속 수집] DAQ 오류: " + ex.Message);
+                        }
+                    }
+
+                    // 토크
+                    if (logTorque && canPollingTorque)
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(torqueDir);
+                            bool ok = _ajinLogger.Start(allAxes, torqueDir, baseName);
+                            if (ok)
+                            {
+                                anyStarted = true;
+                                AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 → " + torqueDir);
+                            }
+                            else AppEvents.RaiseLog("[연속 수집] 토크 로거 시작 실패");
+                        }
+                        catch (Exception ex)
+                        {
+                            AppEvents.RaiseLog("[연속 수집] 토크 오류: " + ex.Message);
+                        }
+                    }
+                    else if (logTorque && !_controller.IsAjin && !_controller.IsSimulationMode)
+                    {
+                        AppEvents.RaiseLog("[연속 수집] WMX3 토크 로거는 연속 수집을 지원하지 않습니다.");
+                    }
+                }
+            }
+
+            if (!anyStarted)
+                AppEvents.RaiseLog("[연속 수집] 모드 활성화 — 모션별 수집 억제 중 (CSV 저장 없음)");
+
+            // ── 추론 서비스 시작 ─────────────────────────────────────────────
+            string inferUrl = ServerSettings.Current.InferenceServerUrl;
+            if (!string.IsNullOrWhiteSpace(inferUrl))
+            {
+                _inferenceService?.Dispose();
+                if (_accelLogger != null)
+                {
+                    // 단독 모드에서는 이미 Start() 전에 설정됨.
+                    // 통합(combined) 모드에서는 SuppressCsvWrite=true이므로 CSV 헤더 불일치 없음.
+                    // 여기서는 추론 서비스가 참조하는 콜백/축 목록만 최신 상태로 동기화.
+                    if (_accelLogger.LoggedAxes == null && controllerConnected)
+                    {
+                        _accelLogger.GetAxisOperation = (Func<int, string>)GetAxisOperation;
+                        int _axCnt = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
+                        _accelLogger.LoggedAxes = System.Linq.Enumerable.Range(0, _axCnt).ToArray();
+                    }
+                }
+                if (_ajinLogger != null)
+                    _ajinLogger.GetAxisOperation = controllerConnected ? (Func<int, string>)GetAxisOperation : null;
+
+                int _axCntInfer = AxisConfig.AxisCount > 0 ? AxisConfig.AxisCount : (_axisConfigs?.Length ?? 0);
+                // 제어기 연결 시: per-axis 추론 / 미연결 시: axis 없이 단일 추론
+                int[] _inferAxes = controllerConnected
+                    ? System.Linq.Enumerable.Range(0, _axCntInfer).ToArray()
+                    : null;
+                _inferenceService = new ContinuousInferenceService(
+                    inferUrl,
+                    _combinedLogger ?? (object)null,
+                    _accelLogger,
+                    _ajinLogger,
+                    getAxisOperation: controllerConnected ? (Func<int, string>)GetAxisOperation : null,
+                    axes:             _inferAxes);
+                _inferenceService.Start();
+            }
+
+            return true;  // 플래그 활성화 성공 → 항상 true 반환
+        }
+
+        /// <summary>?뱀젙 異뺤쓽 ?숈옉 ?곹깭瑜?諛섑솚?⑸땲?? "Pos" ?먮뒗 "Idle".</summary>
+        public string GetAxisOperation(int axisIndex)
+        {
+            try
+            {
+                var status = _controller.GetStatus();
+                if (status?.AxesStatus == null || axisIndex >= status.AxesStatus.Length) return "Idle";
+                return status.AxesStatus[axisIndex].OpState != OperationState.Idle ? "Pos" : "Idle";
+            }
+            catch { return "Idle"; }
+        }
+
+        /// <summary>?섎굹?쇰룄 ?吏곸씠硫?"Pos", ?꾨? Idle?대㈃ "Idle".</summary>
+        public string GetCurrentOperation()
+        {
+            try
+            {
+                var status = _controller.GetStatus();
+                if (status?.AxesStatus == null) return "Idle";
+                foreach (var ax in status.AxesStatus)
+                    if (ax.OpState != OperationState.Idle) return "Pos";
+                return "Idle";
+            }
+            catch { return "Idle"; }
+        }
+        /// <summary>연속 수집을 중지하고 CSV를 닫습니다.</summary>
+        public void StopContinuousLogging()
+        {
+            if (!_continuousLoggingActive) return;
+
+            try { if (_combinedLogger?.IsLogging  == true) _combinedLogger.Stop(); } catch { }
+            try { if (_accelLogger?.IsRunning   == true) _accelLogger.Stop();   } catch { }
+            try { if (_ajinLogger?.IsLogging    == true) _ajinLogger.Stop();    } catch { }
+
+            // 통합 모드 상태 정리
+            if (_combinedLogger != null)
+            {
+                _accelLogger.SuppressCsvWrite = false;
+                // 통합 모드에서 교체한 BlockReceived를 원래 구독(InfluxDB Feed 등)으로 복원
+                _accelLogger.BlockReceived    = _savedBlockReceived;
+                _savedBlockReceived           = null;
+                _combinedLogger               = null;
+            }
+
+            // ── InfluxDB label 태그 초기화 ───────────────────────────────
+            if (_accelInfluxPublisher != null)
+                _accelInfluxPublisher.Label = "";
+
+            // ── 추론 서비스 중지 ─────────────────────────────────────────────
+            _inferenceService?.Stop();
+            _inferenceService?.Dispose();
+            _inferenceService = null;
+
+            _continuousLoggingActive = false;
+            AppEvents.RaiseLog("[연속 수집] 종료");
+        }
+
+        /// <summary>현재 연속 수집 중 여부.</summary>
+        public bool IsContinuousLogging => _continuousLoggingActive;
 
         string ResolveRobotIdForActiveAxes(IList<int> activeAxes)
         {
