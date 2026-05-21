@@ -494,6 +494,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Dictionary<string, DateTime> _lastAnomalyLogTime = new Dictionary<string, DateTime>();
         private TimeSpan _anomalyLogCooldown = TimeSpan.FromSeconds(30);
 
+        // ── 모델별 경고/위험 기준 (없으면 전역 _warnMultiplier/_dangerMultiplier 사용) ──
+        private Dictionary<string, double> _modelWarnThr   = new Dictionary<string, double>();
+        private Dictionary<string, double> _modelDangerThr = new Dictionary<string, double>();
+
+        private double GetWarnThr(string key)
+            => _modelWarnThr.TryGetValue(key,   out double v) ? v : _warnMultiplier;
+        private double GetDangerThr(string key)
+            => _modelDangerThr.TryGetValue(key, out double v) ? v : _dangerMultiplier;
+
         // ── 연속 이상 카운터 (N회 연속 threshold 초과 시 경보 확정) ──────────
         private int _anomalyConfirmCount = 1;  // 1=즉시 확정, 5≈1.3초 연속
         private static readonly string AnomalySettingsFile =
@@ -5021,6 +5030,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 if (root.TryGetProperty("spikeWarmup",        out var p4) && p4.TryGetInt32(out i))  _spikeWarmup        = i;
                 if (root.TryGetProperty("anomalyConfirmCount",out var p5) && p5.TryGetInt32(out i))  _anomalyConfirmCount= i;
                 if (root.TryGetProperty("cooldownSec",        out var p6) && p6.TryGetDouble(out d)) _anomalyLogCooldown = TimeSpan.FromSeconds(d);
+                // 모델별 경고/위험 기준 복원
+                if (root.TryGetProperty("modelWarnThr", out var mwProp) && mwProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    foreach (var kv in mwProp.EnumerateObject())
+                    { if (kv.Value.TryGetDouble(out double mv)) _modelWarnThr[kv.Name] = mv; }
+                if (root.TryGetProperty("modelDangerThr", out var mdProp) && mdProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    foreach (var kv in mdProp.EnumerateObject())
+                    { if (kv.Value.TryGetDouble(out double mv)) _modelDangerThr[kv.Name] = mv; }
             }
             catch { }
         }
@@ -5039,7 +5055,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     spikeEmaAlpha       = _spikeEmaAlpha,
                     spikeWarmup         = _spikeWarmup,
                     anomalyConfirmCount = _anomalyConfirmCount,
-                    cooldownSec         = _anomalyLogCooldown.TotalSeconds
+                    cooldownSec         = _anomalyLogCooldown.TotalSeconds,
+                    modelWarnThr        = _modelWarnThr,
+                    modelDangerThr      = _modelDangerThr,
                 };
                 var json = System.Text.Json.JsonSerializer.Serialize(obj,
                     new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
@@ -5139,6 +5157,82 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             var nudCooldown = MakeRow("이벤트 쿨다운  (초)",
                 "같은 센서 재기록 최소 간격",     _anomalyLogCooldown.TotalSeconds, 5, 300, 5, 0);
 
+            // ── 모델별 경고/위험 기준 ─────────────────────────────────────────
+            rowY += 4;
+            AddSeparator("▌ 모델별 경고/위험 기준  (빈 칸 = 전역 기준 사용)");
+
+            // 현재 활성 모델 키 수집 (라이브 칩 + 저장된 per-model 설정)
+            var modelKeys = new System.Collections.Generic.LinkedList<string>();
+            foreach (var k in _liveStatusLabels.Keys) modelKeys.AddLast(k);
+            foreach (var k in _modelWarnThr.Keys.Concat(_modelDangerThr.Keys))
+                if (!modelKeys.Contains(k)) modelKeys.AddLast(k);
+            // 표시명 변환
+            string ModelLabel(string k)
+            {
+                if (k == "accel")    return "가속도";
+                if (k == "torque")   return "토크 전역";
+                if (k.StartsWith("torque_ax"))   return "토크 Ax"   + k.Substring(9);
+                if (k.StartsWith("combined_ax")) return "결합 Ax"   + k.Substring(11);
+                return k;
+            }
+
+            var dgv = new DataGridView
+            {
+                Left = LEFT, Top = rowY, Width = dlg.Width - LEFT * 2,
+                Height = Math.Min(140, Math.Max(50, modelKeys.Count * 22 + 28)),
+                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+                RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.CellSelect,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                BackgroundColor = Color.White, BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Segoe UI", 8.5f),
+            };
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "key",    Visible = false });
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "model",  HeaderText = "모델",      ReadOnly = true, FillWeight = 35 });
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "warn",   HeaderText = "경고 기준", FillWeight = 32 });
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "danger", HeaderText = "위험 기준", FillWeight = 32 });
+            dgv.Columns["model"].DefaultCellStyle.BackColor = Color.FromArgb(248, 248, 252);
+            foreach (var k in modelKeys)
+            {
+                double? mw = _modelWarnThr.TryGetValue(k,   out double wv) ? (double?)wv : null;
+                double? md = _modelDangerThr.TryGetValue(k, out double dv) ? (double?)dv : null;
+                dgv.Rows.Add(k, ModelLabel(k),
+                    mw.HasValue ? mw.Value.ToString("F2") : "",
+                    md.HasValue ? md.Value.ToString("F2") : "");
+            }
+            dlg.Controls.Add(dgv);
+
+            // "전역 적용" 버튼
+            rowY += dgv.Height + 4;
+            var btnApplyGlobal = new Button
+            {
+                Text = "전역값으로 채우기", Left = LEFT, Top = rowY, Width = 130, Height = 24,
+                BackColor = Color.FromArgb(240, 240, 245), FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 8.5f)
+            };
+            btnApplyGlobal.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 210);
+            btnApplyGlobal.Click += (s, e) =>
+            {
+                foreach (DataGridViewRow r in dgv.Rows)
+                {
+                    r.Cells["warn"].Value   = nudWarn.Value.ToString("F2");
+                    r.Cells["danger"].Value = nudDanger.Value.ToString("F2");
+                }
+            };
+            var btnClearModel = new Button
+            {
+                Text = "모두 초기화", Left = LEFT + 138, Top = rowY, Width = 90, Height = 24,
+                BackColor = Color.FromArgb(240, 240, 245), FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 8.5f)
+            };
+            btnClearModel.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 210);
+            btnClearModel.Click += (s, e) =>
+            {
+                foreach (DataGridViewRow r in dgv.Rows)
+                    r.Cells["warn"].Value = r.Cells["danger"].Value = "";
+            };
+            dlg.Controls.AddRange(new Control[] { btnApplyGlobal, btnClearModel });
+            rowY += 30;
+
             // ── 서버 스코어링 파라미터 ────────────────────────────────────────
             rowY += 4;
             string srvStatus = serverReachable ? "서버 연결됨" : "서버 미연결 — 기본값 표시";
@@ -5176,6 +5270,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 nudWarmup.Value  = 30;     nudConfirm.Value = 1;
                 nudCooldown.Value= 30;
                 if (serverReachable) { nudRmsWeight.Value = 0.30m; nudAnomalyThr.Value = 1.0m; }
+                // 모델별 기준 초기화 (빈 칸 = 전역 사용)
+                foreach (DataGridViewRow r in dgv.Rows)
+                    r.Cells["warn"].Value = r.Cells["danger"].Value = "";
             };
 
             var btnOk = new Button
@@ -5201,6 +5298,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             dlg.Height = rowY + 28 + 40;
 
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+            // ── 모델별 기준 반영 ─────────────────────────────────────────────
+            _modelWarnThr.Clear();
+            _modelDangerThr.Clear();
+            foreach (DataGridViewRow r in dgv.Rows)
+            {
+                string mkey = r.Cells["key"].Value as string;
+                if (string.IsNullOrEmpty(mkey)) continue;
+                if (double.TryParse(r.Cells["warn"].Value as string,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double mw) && mw > 0)
+                    _modelWarnThr[mkey] = mw;
+                if (double.TryParse(r.Cells["danger"].Value as string,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double md) && md > 0)
+                    _modelDangerThr[mkey] = md;
+            }
 
             // ── C# 파라미터 반영 ─────────────────────────────────────────────
             _warnMultiplier      = (double)nudWarn.Value;
@@ -5323,7 +5437,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 // 클라이언트 임계값 기준 이상 판정 (per-axis threshold 반영)
                 double clientThr = _axisThresholds.TryGetValue(key, out double ct) ? ct : 1.0;
                 double rawScore  = (double)result.AnomalyScore;
-                bool   threshAnomaly = rawScore >= clientThr;
+                // normScore = rawScore / clientThr (1.0 = 모델 threshold 기준점)
+                // per-model 경고 기준(WarnThr)으로 판정 (없으면 전역 _warnMultiplier)
+                bool   threshAnomaly = normScore >= GetWarnThr(key);
 
                 // ── 연속 카운터: N회 연속 초과 시 확정 (단발 노이즈 제거) ──────────
                 int prevConsec;
@@ -5405,7 +5521,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 if (anomaly)
                 {
-                    bool isDanger  = normScore >= _dangerMultiplier;
+                    bool isDanger  = normScore >= GetDangerThr(key);
                     string spikeInfo = spikeAnomaly && !threshAnomaly
                         ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
                     string levelTag  = isDanger ? "🔴 위험" : "🟡 경고";
@@ -5515,7 +5631,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     // 연속 카운터 + 스파이크 감지
                     bool cThreshAnom;
                     { int prev; _consecutiveAnomalyCount.TryGetValue(chipKey, out prev);
-                      cThreshAnom = (double)combined.AnomalyScore >= cAxThr;
+                      cThreshAnom = cNorm >= GetWarnThr(chipKey);
                       int nc = cThreshAnom ? prev + 1 : 0;
                       _consecutiveAnomalyCount[chipKey] = nc;
                       cThreshAnom = nc >= _anomalyConfirmCount; }
@@ -5541,7 +5657,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     // 이상 이벤트 기록 (쿨다운 + 이벤트 카운트)
                     if (cAnomaly)
                     {
-                        bool cIsDanger  = cNorm >= _dangerMultiplier;
+                        bool cIsDanger  = cNorm >= GetDangerThr(chipKey);
                         bool cWasAnom   = _prevAnomalyState.TryGetValue(chipKey, out bool _ca) && _ca;
                         bool cCooldownOk = !_lastAnomalyLogTime.TryGetValue(chipKey, out DateTime _ct)
                                            || (DateTime.Now - _ct) >= _anomalyLogCooldown;
