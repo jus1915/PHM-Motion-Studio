@@ -164,8 +164,8 @@ namespace PHM_Project_DockPanel.UI.DataCollection
             if (cnt > 0)
             {
                 var area = _chartAccel.ChartAreas[0];
-                double xMin = sx.Points[0].XValue;
-                area.AxisX.Minimum = xMin;
+                // 토크와 동일하게 cutOA 기준 → 배치 도착 시 X축 점프 방지
+                area.AxisX.Minimum = cutOA;
                 area.AxisX.Maximum = nowOA + 0.5 / 86400.0;
 
                 // Y 자동 범위

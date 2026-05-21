@@ -26,7 +26,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private string _aiRange = "ai0:2";      // 각 모듈 3채널(X/Y/Z)
         private double _rate = 0;         // 로깅 샘플레이트
         private static double AccelRate => 1.0 / AppState.GetPeriodForColumn("x");
-        private int _readBlock = 2048;       // 채널당 블록 크기
+        private int _readBlock = 256;        // 채널당 블록 크기 (256@1kHz = 256ms, 부드러운 스트리밍)
         private double _minG = -5, _maxG = 5;       // 측정 범위 (g)
         private double _iepeCurrentAmps = 0.004;     // IEPE excitation current (A), typical 4 mA
 
@@ -170,6 +170,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
         private AsyncCallback _cb;
         private bool _running;
         private long _samples;
+        private DateTime _startUtc;         // 첫 블록 기준 절대 시작 시간
+        private bool _startUtcSet;
 
         private string[] _csvPathByMod;
         private FileStream[] _fsByMod;
@@ -274,6 +276,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 _aiTask.Start();
                 _samples = 0;
+                _startUtcSet = false;
 
 
                 _running = true;
@@ -419,7 +422,17 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 var br = BlockReceived;
                 if (br != null)
                 {
-                    DateTime ts = DateTime.UtcNow;
+                    // 하드웨어 클록 기반 타임스탬프:
+                    // 첫 블록은 UtcNow로 시작 시간을 확정하고,
+                    // 이후 블록은 샘플 카운터로 정확히 계산 → CPU 지연과 무관하게 연속성 보장
+                    double rate2 = (_rate > 0) ? _rate : AccelRate;
+                    if (!_startUtcSet)
+                    {
+                        _startUtc    = DateTime.UtcNow - TimeSpan.FromSeconds(n / rate2);
+                        _startUtcSet = true;
+                    }
+                    DateTime ts = _startUtc + TimeSpan.FromSeconds((_samples) / rate2);
+
                     for (int m = 0; m < modulesInBuffer; m++)
                     {
                         int baseIdx = m * 3;
