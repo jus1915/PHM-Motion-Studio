@@ -725,16 +725,14 @@ def train_ae(
     windows: List[Tuple[np.ndarray, int]],
     n_channels: int,
     mlflow_run=None,
-) -> Tuple["AE1DCNN", float, int, float, float, float]:
-    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr)를 반환합니다.
+    ae_threshold_percentile: float = 99,
+) -> Tuple["AE1DCNN", float, int, float, float, float, float, np.ndarray, np.ndarray]:
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std)를 반환합니다.
 
     정규화 전략:
-        - 윈도우별 per-sample z-score 로 학습 (형태·주파수 패턴 학습, 수렴 안정).
-        - 진폭(에너지) 이상은 별도 RMS 통계로 감지 → 복합 스코어 사용.
-
-    스코어 = mae_score + alpha * rms_score  (C# 에서 계산)
-        mae_score  = ae_mae  / mae_thr    (형태 이상)
-        rms_score  = max(0, (rms - rms_mean) / rms_std)  (진폭 이상)
+        - 전역(global) 정규화: 훈련 데이터 전체의 채널별 mean/std 로 정규화.
+          → 절대 진폭·에너지 정보가 보존되어 AE 재구성 오차로 이상 탐지 가능.
+        - norm_mean / norm_std 는 _meta.json 에 저장되어 평가 시 동일하게 적용.
     """
     seed = int(params.get("seed", 42))
     torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
@@ -761,8 +759,14 @@ def train_ae(
         file=sys.stderr,
     )
 
-    # ── per-sample z-score 적용 (형태 학습) ─────────────────────────────────
-    windows_norm = [(_zscore_normalize(w), lbl) for w, lbl in windows]
+    # ── 전역 정규화 (진폭 보존) ──────────────────────────────────────────────
+    norm_mean, norm_std = _compute_global_stats(windows)
+    print(
+        f"[train_ae] 전역 정규화 — mean={np.round(norm_mean, 4).tolist()}  "
+        f"std={np.round(norm_std, 4).tolist()}",
+        file=sys.stderr,
+    )
+    windows_norm = _apply_global_norm(windows, norm_mean, norm_std)
 
     # 랜덤 분할 (레이블 불필요)
     n = len(windows_norm)
@@ -844,17 +848,23 @@ def train_ae(
             per_sample_maes.extend(mae_per.cpu().numpy().tolist())
 
     if per_sample_maes:
-        err_arr   = np.array(per_sample_maes, dtype=np.float64)
-        mae_thr   = float(err_arr.mean() + 2.0 * err_arr.std())
+        err_arr = np.array(per_sample_maes, dtype=np.float64)
+        # 퍼센타일 기반 임계값: mean+2σ보다 분포 형태에 덜 민감하고 해석이 명확함
+        mae_thr = float(np.percentile(err_arr, ae_threshold_percentile))
+        print(
+            f"[train_ae] MAE 임계값 ({ae_threshold_percentile}th pct) = {mae_thr:.6f}  "
+            f"(mean={err_arr.mean():.6f}  std={err_arr.std():.6f})",
+            file=sys.stderr,
+        )
     else:
-        mae_thr   = float(best_val_mae * 2.0)
+        mae_thr = float(best_val_mae * 2.0)
 
     print(
         f"[train_ae] 완료 — best_val_mae={best_val_mae:.6f}  "
         f"mae_thr={mae_thr:.6f}  rms_mean={rms_mean:.4f}  rms_std={rms_std:.4f}  rms_thr={rms_thr:.4f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std
+    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -1126,11 +1136,13 @@ def save_meta(
     rms_mean: Optional[float] = None,
     rms_thr:  Optional[float] = None,
     rms_std:  Optional[float] = None,
+    norm_mean: Optional[np.ndarray] = None,  # 전역 정규화 채널별 mean (AE 전용)
+    norm_std:  Optional[np.ndarray] = None,  # 전역 정규화 채널별 std  (AE 전용)
     n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
-    session="AD" (AE) 인 경우 kind=AE-CNN1D, output_name=recon, threshold 포함.
+    session="AD" (AE) 인 경우 kind=AE-CNN1D, output_name=recon, threshold/norm_mean/norm_std 포함.
     session="FD" (CLS) 인 경우 kind=CNN1D, output_name=logits, val_accuracy 포함.
 
     Returns:
@@ -1152,13 +1164,20 @@ def save_meta(
         "window_size": int(params.get("window_size", 1024)),
         "input_name":  "input",
         "output_name": "recon" if is_ae else "logits",
-        "standardize_per_sample": True,
+        # norm_mean이 있으면 전역 정규화 → per-sample 불필요
+        "standardize_per_sample": norm_mean is None,
         "epochs_trained": epochs_trained,
     }
 
+    # 전역 정규화 통계 저장 (추론 시 동일 정규화 적용)
+    if norm_mean is not None:
+        meta["norm_mean"] = [round(float(v), 8) for v in norm_mean]
+    if norm_std is not None:
+        meta["norm_std"]  = [round(float(v), 8) for v in norm_std]
+
     if is_ae:
         meta["val_mae"]   = round(val_mse or 0.0, 6)   # val_mse 인수가 실제로는 val_mae 값
-        meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (z-score 공간)
+        meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (global norm 공간)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
         # RMS 진폭 이상 감지용 통계 (외력 등 진폭 변화 감지)
@@ -1485,11 +1504,12 @@ def main() -> None:
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
-        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std = train_ae(
+        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std, norm_mean, norm_std = train_ae(
             params=params,
             windows=windows,
             n_channels=n_channels,
             mlflow_run=mlflow_run,
+            ae_threshold_percentile=float(params.get("ae_threshold_percentile", 99)),
         )
 
         export_onnx_ae(
@@ -1512,6 +1532,8 @@ def main() -> None:
             rms_mean=rms_mean,
             rms_thr=rms_thr,
             rms_std=rms_std,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
             n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
         )
 
