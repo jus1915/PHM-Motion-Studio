@@ -5521,9 +5521,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 if (anomaly)
                 {
-                    bool isDanger  = normScore >= GetDangerThr(key);
+                    double warnThr   = GetWarnThr(key);
+                    double dangerThr = GetDangerThr(key);
+                    bool isDanger    = normScore >= dangerThr;
                     string spikeInfo = spikeAnomaly && !threshAnomaly
-                        ? $"  ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})" : "";
+                        ? $"  [급증: ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})]" : "";
                     string levelTag  = isDanger ? "🔴 위험" : "🟡 경고";
 
                     // 상태 전환(정상→이상) 또는 쿨다운 경과 시만 기록 — AE(이상탐지) 전 센서 대상
@@ -5537,9 +5539,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         cardWarning.ValueText = cntWarning + " 건";
                         if (isDanger) ShowToast(AlarmLevel.Danger, displayName, displayScore);
 
+                        // ── 명확한 로그 포맷 (실제 판정 기준을 명시) ──────────────────────
+                        // normScore: 실제 판정에 사용되는 점수 (= result.AnomalyScore / modelThreshold)
+                        // warn/danger: 판정 임계값 (normScore와 직접 비교)
+                        // [raw]: 참고용 raw 값 (= rawMae / rawThreshold)
                         AppendEventLog(
                             $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
-                            $"score={displayScore:F3}  thr={clientThr:F3}{cls}{spikeInfo}");
+                            $"normScore={normScore:F3}  warn={warnThr:F2}/danger={dangerThr:F2}  " +
+                            $"[raw={displayScore:F3}/thr={clientThr:F3}]{cls}{spikeInfo}");
                         _lastAnomalyLogTime[key] = DateTime.Now;
 
                         // 이벤트 카운트 표 갱신
@@ -5564,7 +5571,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 {
                     // 이상→정상 복귀 시 1회 기록
                     AppendEventLog(
-                        $"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 {displayName}  score={displayScore:F3}");
+                        $"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 {displayName}  normScore={normScore:F3}  [raw={displayScore:F3}]");
                 }
                 _prevAnomalyState[key] = anomaly;
             }));
@@ -5657,22 +5664,26 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     // 이상 이벤트 기록 (쿨다운 + 이벤트 카운트)
                     if (cAnomaly)
                     {
-                        bool cIsDanger  = cNorm >= GetDangerThr(chipKey);
-                        bool cWasAnom   = _prevAnomalyState.TryGetValue(chipKey, out bool _ca) && _ca;
-                        bool cCooldownOk = !_lastAnomalyLogTime.TryGetValue(chipKey, out DateTime _ct)
+                        double cWarnThr   = GetWarnThr(chipKey);
+                        double cDangerThr = GetDangerThr(chipKey);
+                        bool cIsDanger    = cNorm >= cDangerThr;
+                        bool cWasAnom     = _prevAnomalyState.TryGetValue(chipKey, out bool _ca) && _ca;
+                        bool cCooldownOk  = !_lastAnomalyLogTime.TryGetValue(chipKey, out DateTime _ct)
                                            || (DateTime.Now - _ct) >= _anomalyLogCooldown;
                         if (!cWasAnom || cCooldownOk)
                         {
                             string cLevel = cIsDanger ? "🔴 위험" : "🟡 경고";
                             if (cIsDanger) { Interlocked.Increment(ref cntDanger);  cardDanger.ValueText  = cntDanger  + " 건"; }
                             else           { Interlocked.Increment(ref cntWarning); cardWarning.ValueText = cntWarning + " 건"; }
-                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] {cLevel} 결합 Ax{combined.Axis.Value} 이상  score={cRawScore:F3}  thr={cAxThr:F3}");
+                            AppendEventLog($"[{DateTime.Now:HH:mm:ss}] {cLevel} 결합 Ax{combined.Axis.Value} 이상  " +
+                                          $"normScore={cNorm:F3}  warn={cWarnThr:F2}/danger={cDangerThr:F2}  " +
+                                          $"[raw={cRawScore:F3}/thr={cAxThr:F3}]");
                             _lastAnomalyLogTime[chipKey] = DateTime.Now;
                             UpdateEventCount(combined.Axis.Value + 100, cIsDanger);
                         }
                     }
                     else if (_prevAnomalyState.TryGetValue(chipKey, out bool _cWas) && _cWas)
-                        AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 결합 Ax{combined.Axis.Value}  score={cRawScore:F3}");
+                        AppendEventLog($"[{DateTime.Now:HH:mm:ss}] ✅ 복귀 결합 Ax{combined.Axis.Value}  normScore={cNorm:F3}  [raw={cRawScore:F3}]");
                     _prevAnomalyState[chipKey] = cAnomaly;
 
                     // DGV 이상탐지 현황에 결합 모델 행 갱신 (axis key = 100 + axisValue)
