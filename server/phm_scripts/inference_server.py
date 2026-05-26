@@ -64,7 +64,7 @@ _active_profile: str = "default"
 
 # ── 런타임 튜닝 가능 스코어링 파라미터 ────────────────────────────────────────
 # GET /config 로 조회, POST /config 로 변경 가능
-_RMS_WEIGHT:        float = 0.3   # RMS 기여 가중치 (0.0 ~ 1.0)
+_RMS_WEIGHT:        float = 0.0   # RMS 기여 가중치 (0.0 ~ 1.0) — 진단용 0 (순수 AE 재구성 오차만 평가)
 _ANOMALY_THRESHOLD: float = 1.0   # 이상 판정 기준값 (log₂ 스코어 ≥ 이 값 → 이상)
 
 def _models_root() -> Path:

@@ -488,6 +488,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _chartMaEma = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
         private const double ChartMaAlpha = 0.05;
 
+        // ── 진단 모드: 순수 AE 재구성 오차만 차트에 반영 ──────────────────────
+        // true 일 때:
+        //   1) 차트값 = raw_mae / raw_threshold  (서버 RMS 기여 / log₂ 압축 우회)
+        //   2) EMA 평활화 비활성 — 매 사이클 원시 값 그대로 적재
+        //   3) "이평" 보조선도 동일 값 (별도 평활화 없음)
+        // 가반(부하) 유무에 따른 AE 재구성 오차의 변화를 그대로 관찰하기 위한
+        // 진단용 플래그. 운영 모드로 복귀하려면 false 로 변경.
+        // (서버 측 RMS 기여는 _RMS_WEIGHT=0.0 으로 별도 비활성화되어 있음.)
+        private const bool DiagnosticPureAeMode = true;
+
         // ── 이상 이벤트 로그 중복 방지 ──────────────────────────────────────
         // 상태 전환(정상→이상) 시 즉시, 이상 지속 시 쿨다운마다 1회씩만 로그
         private readonly Dictionary<string, bool>     _prevAnomalyState   = new Dictionary<string, bool>();
@@ -5400,8 +5410,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             double axThr      = _axisThresholds.TryGetValue(key, out double t) ? t : 1.0;
             double normScore  = axThr > 0 ? (double)result.AnomalyScore / axThr : (double)result.AnomalyScore;
 
-            double prevEma    = _chartEma.GetOrAdd(key, normScore);
-            double smoothed   = ChartEmaAlpha * normScore + (1.0 - ChartEmaAlpha) * prevEma;
+            // 진단 모드: 순수 AE 재구성 오차(raw_mae / raw_threshold) 만 차트 적재
+            // RMS 기여(서버)·log₂ 압축(서버)·EMA 평활화(클라) 모두 우회한다.
+            double chartScore = (DiagnosticPureAeMode
+                                 && result.RawMae.HasValue
+                                 && result.RawThreshold.HasValue
+                                 && result.RawThreshold.Value > 0)
+                ? (double)result.RawMae.Value / (double)result.RawThreshold.Value
+                : normScore;
+
+            double prevEma    = _chartEma.GetOrAdd(key, chartScore);
+            double smoothed   = DiagnosticPureAeMode
+                                ? chartScore   // 평활화 없음 — 원시 값 그대로
+                                : ChartEmaAlpha * chartScore + (1.0 - ChartEmaAlpha) * prevEma;
             _chartEma[key]    = smoothed;
 
             _liveScoreQueue.Enqueue(Tuple.Create(key, DateTime.Now, smoothed));
@@ -5411,8 +5432,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _liveScoreQueue.TryDequeue(out _discard);
             }
 
-            double prevMa  = _chartMaEma.GetOrAdd(key, normScore);
-            double maScore = ChartMaAlpha * normScore + (1.0 - ChartMaAlpha) * prevMa;
+            double prevMa  = _chartMaEma.GetOrAdd(key, chartScore);
+            double maScore = DiagnosticPureAeMode
+                             ? chartScore   // 이평선도 동일 값 (별도 평활화 없음)
+                             : ChartMaAlpha * chartScore + (1.0 - ChartMaAlpha) * prevMa;
             _chartMaEma[key] = maScore;
 
             _liveMaQueue.Enqueue(Tuple.Create(key, DateTime.Now, maScore));
@@ -5605,15 +5628,28 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     _axisThresholds.TryAdd(chartKey, (double)combined.Threshold);
                 double axThr2   = _axisThresholds.TryGetValue(chartKey, out double tv) ? tv : 1.0;
                 double norm2    = axThr2 > 0 ? (double)combined.AnomalyScore / axThr2 : (double)combined.AnomalyScore;
-                double prevEma2 = _chartEma.GetOrAdd(chartKey, norm2);
-                double smooth2  = ChartEmaAlpha * norm2 + (1.0 - ChartEmaAlpha) * prevEma2;
+
+                // 진단 모드: 순수 AE 재구성 오차(raw_mae / raw_threshold) 만 차트 적재
+                double chart2 = (DiagnosticPureAeMode
+                                 && combined.RawMae.HasValue
+                                 && combined.RawThreshold.HasValue
+                                 && combined.RawThreshold.Value > 0)
+                    ? (double)combined.RawMae.Value / (double)combined.RawThreshold.Value
+                    : norm2;
+
+                double prevEma2 = _chartEma.GetOrAdd(chartKey, chart2);
+                double smooth2  = DiagnosticPureAeMode
+                                  ? chart2
+                                  : ChartEmaAlpha * chart2 + (1.0 - ChartEmaAlpha) * prevEma2;
                 _chartEma[chartKey] = smooth2;
                 _liveScoreQueue.Enqueue(Tuple.Create(chartKey, DateTime.Now, smooth2));
                 while (_liveScoreQueue.Count > 6000)
                 { Tuple<string, DateTime, double> _d; _liveScoreQueue.TryDequeue(out _d); }
 
-                double prevMa2 = _chartMaEma.GetOrAdd(chartKey, norm2);
-                double ma2     = ChartMaAlpha * norm2 + (1.0 - ChartMaAlpha) * prevMa2;
+                double prevMa2 = _chartMaEma.GetOrAdd(chartKey, chart2);
+                double ma2     = DiagnosticPureAeMode
+                                 ? chart2
+                                 : ChartMaAlpha * chart2 + (1.0 - ChartMaAlpha) * prevMa2;
                 _chartMaEma[chartKey] = ma2;
                 _liveMaQueue.Enqueue(Tuple.Create(chartKey, DateTime.Now, ma2));
             }
