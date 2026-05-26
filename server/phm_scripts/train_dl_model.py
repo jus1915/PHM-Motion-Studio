@@ -1796,8 +1796,10 @@ def main() -> None:
     filter_op_column: Optional[str] = params.get("filter_op_column", None)
     # 가속도는 정지/운동 전부 학습 — Op 컬럼이 있어도 필터링 안 함
     # 토크/결합은 Pos 구간만 학습 (정지 중 토크≈0 이 패턴을 희석하지 않도록)
+    # conf 의 use_op_filter 가 명시되면 그 값을 우선 사용한다 (AE 학습에서
+    # Idle 행에서 구간이 끊겨 윈도우가 부족해지는 문제를 방지하려면 False 지정).
     _sensor_type_for_op = params.get("sensor_type", "accel")
-    use_op_filter: bool = (_sensor_type_for_op != "accel")
+    use_op_filter: bool = bool(params.get("use_op_filter", _sensor_type_for_op != "accel"))
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
