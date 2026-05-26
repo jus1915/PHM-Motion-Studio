@@ -2604,6 +2604,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private async System.Threading.Tasks.Task TriggerAirflowAsync()
         {
+            // NumericUpDown 등의 사용자 입력값이 .Value 에 commit 되지 않은 채로
+            // 트리거 버튼을 누르면 이전 .Value 가 사용되는 WinForms quirk 방지.
+            // ValidateChildren() 은 모든 자식 컨트롤의 Validating 이벤트를 발생시켜
+            // NumericUpDown 등의 Text → Value commit 을 강제한다.
+            // (예: "임계값 퍼센타일" 90 입력 → Enter 안 누르고 트리거 시 99.5/99.9 가 전송되던 버그)
+            try { this.ValidateChildren(); } catch { /* 무시 */ }
+
             string dataDir    = _dlDataDir?.Text?.Trim() ?? "";
             string outputPath = _dlOutputPath?.Text?.Trim() ?? "";
             string dagId      = _aflDagId?.Text?.Trim() ?? "phm_retrain";
