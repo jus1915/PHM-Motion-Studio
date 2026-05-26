@@ -1463,6 +1463,7 @@ def save_meta(
     add_abs_channels: bool = False,
     n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
     augment_mode: Optional[str] = None,         # 전처리 증강 모드 ("standard"|"mixed"|None)
+    activity_threshold: Optional[float] = None, # 활동성 게이팅 임계값 (AE 전용, 0 또는 None = 미적용)
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
@@ -1514,6 +1515,11 @@ def save_meta(
             meta["rms_thr"]  = round(float(rms_thr),  6)
         if rms_std is not None:
             meta["rms_std"]  = round(float(rms_std),  6)
+        # 활동성 게이팅 임계값 — 추론 시 윈도우 활동성 < 이 값이면 점수=0
+        # (정지 윈도우 false alarm 방지). 0 또는 None = 게이팅 미적용.
+        if activity_threshold is not None and activity_threshold > 0:
+            meta["activity_threshold"] = round(float(activity_threshold), 8)
+            meta["activity_percentile"] = float(params.get("activity_percentile", 0.0))
     else:
         meta["class_names"] = class_names
         meta["n_classes"]   = len(class_names)
@@ -1979,7 +1985,54 @@ def main() -> None:
     # ══════════════════════════════════════════════════════════════════════════
     # AE (이상탐지) 경로
     # ══════════════════════════════════════════════════════════════════════════
+    activity_threshold: float = 0.0   # 0 = 활동성 필터 미적용
     if is_ae:
+        # ── 활동성 기반 윈도우 필터 ─────────────────────────────────────────
+        # 정지 구간(가속도/토크 ≈ 0)이 학습 분포에 포함되면 AE가 "0~구동값"
+        # 까지의 넓은 범위를 정상으로 학습해, 외부 충격/부하 변화처럼 정상
+        # 구동 범위 안에서 일어나는 변동에 둔감해진다. 정상 분포를 "구동 중"
+        # 으로 좁혀 이상 탐지 민감도를 끌어올리기 위해 활동성 점수가 낮은
+        # 윈도우는 학습에서 제외한다.
+        #
+        #   활동성 점수 = max_over_channels( std(window[:, ch]) )
+        #     · 채널별 시간축 표준편차 → 채널 중 최댓값
+        #     · 정지 시 ≈ 0, 구동 시 ≫ 0  (가속도·토크 공통)
+        #   임계값 = 학습 윈도우 활동성의 N-th percentile
+        #     · conf["activity_percentile"] 로 제어 (기본 0 = 비활성)
+        #     · 권장 25 — 하위 25% 정지 윈도우 제거
+        #
+        # 임계값은 _meta.json 에 저장되어 추론 측에서 동일 게이팅 적용 가능.
+        activity_pctile = float(params.get("activity_percentile", 0.0))
+        if activity_pctile > 0.0 and windows:
+            activity_scores = np.array(
+                [float(w.std(axis=0).max()) for w, _ in windows],
+                dtype=np.float64,
+            )
+            activity_threshold = float(np.percentile(activity_scores, activity_pctile))
+            kept = [(w, lbl) for (w, lbl), s in zip(windows, activity_scores)
+                    if s >= activity_threshold]
+            n_before = len(windows)
+            n_after  = len(kept)
+            print(
+                f"[main] 활동성 필터 적용 (percentile={activity_pctile}): "
+                f"임계값={activity_threshold:.6f}, "
+                f"활동성 분포 min={activity_scores.min():.6f} / "
+                f"med={np.median(activity_scores):.6f} / "
+                f"max={activity_scores.max():.6f}",
+                file=sys.stderr,
+            )
+            print(
+                f"[main] 활동성 필터 결과: {n_before} → {n_after}개 윈도우 "
+                f"({n_before - n_after}개 정지 윈도우 제외)",
+                file=sys.stderr,
+            )
+            windows = kept
+            if not windows:
+                print(json.dumps({
+                    "warning": "활동성 필터 후 윈도우가 없습니다. activity_percentile 을 낮추거나 구동 중 데이터를 추가 수집하세요."
+                }), flush=True)
+                sys.exit(0)
+
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
@@ -2018,6 +2071,7 @@ def main() -> None:
             add_abs_channels=add_abs,
             n_channels_override=n_channels,
             augment_mode=params.get("augment_mode"),
+            activity_threshold=activity_threshold,
         )
 
         _try_end_mlflow(

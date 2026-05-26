@@ -819,9 +819,23 @@ def _ae_score(
     Returns:
         (is_anomaly, score_normed, mae, thr)
     """
+    thr = float(meta.get("threshold", 0.1))
+
+    # ── 활동성 게이팅 ────────────────────────────────────────────────────────
+    # 학습 시 적용한 활동성 임계값보다 낮으면 정지 상태로 간주하고 점수=0.
+    # 학습 분포에 정지 구간이 포함되지 않았으므로(=구동만 학습) 추론 시에도
+    # 같은 게이팅을 적용해 정지 중 false alarm 을 방지하고, 모델 호출 비용도 절감.
+    activity_thr_val = float(meta.get("activity_threshold", 0.0))
+    if activity_thr_val > 0.0:
+        # raw_arr shape (1, T, C_raw) — 정규화 전 원본
+        # 활동성 = max over channels of std(time-axis)  (학습 시와 동일 공식)
+        activity = float(raw_arr[0].astype(np.float64).std(axis=0).max())
+        if activity < activity_thr_val:
+            # 정지 윈도우 — 정상, 점수 0
+            return False, 0.0, 0.0, thr
+
     input_name = sess.get_inputs()[0].name
     recon  = sess.run(None, {input_name: proc_arr})[0]
-    thr    = float(meta.get("threshold", 0.1))
 
     # ── 재구성 오차: 학습 임계값 캘리브레이션과 동일한 공식 사용 ────────────────
     # 학습 시: per_sample_mae = abs(model(x)-x).mean(dim=(1,2)) = 전체 (T,C) 평균

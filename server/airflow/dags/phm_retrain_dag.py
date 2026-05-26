@@ -87,6 +87,10 @@ _DEFAULT_CONF: dict = {
     ],
     # AE threshold: 99.9th pct (정상 기동 패턴 포함, false alarm 감소)
     "ae_threshold_percentile":  99.9,
+    # 활동성 기반 윈도우 필터 — 학습 윈도우의 활동성(채널별 std max) 분포에서
+    # 하위 N% 윈도우를 학습/추론에서 제외해 정지 구간이 정상 분포에 섞이는 것을
+    # 방지한다. 0 = 비활성, 25 = 하위 25% (정지 윈도우) 제거. AE 학습에만 적용됨.
+    "activity_percentile":      25.0,
     # MLflow 추적 서버 — 컨테이너 내부 서비스명 사용 (--serve-artifacts 프록시 모드)
     # MLFLOW_TRACKING_URI env var 로도 설정됨 (docker-compose); 여기선 명시적 override
     "mlflow_tracking_uri":      "http://mlflow:5000",
