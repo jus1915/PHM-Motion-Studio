@@ -158,6 +158,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                          _aflChkClsComb;
         private bool     _aflUpdatingAll;
 
+        // 축별 학습 — 단일 축만 학습하려면 ComboBox 에서 "Ax{N}" 선택
+        // (전체 선택 시 DAG 가 axis_count 를 자동 감지해 모든 축 학습)
+        private ComboBox _aflAxisCombo;
+
         public AIForm()
         {
             Text = "AI";
@@ -2397,6 +2401,29 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflChkClsTorque = AflMakeChk("Torque",   true); _aflChkClsTorque.CheckedChanged += (s, e) => onModelChk();
             _aflChkClsComb   = AflMakeChk("Combined", true); _aflChkClsComb.CheckedChanged   += (s, e) => onModelChk();
 
+            // ── 축 선택 ComboBox (축별 모델용 단일 축 학습 지원) ─────────────────
+            // "전체" 선택 시 DAG 가 axis_count 자동 감지 → 모든 축 학습
+            // "Ax{N}" 선택 시 conf["axes"]=[N] 으로 해당 축만 학습
+            var lblAxis = new Label
+            {
+                Text = "│ 축:", AutoSize = true,
+                Margin = new Padding(10, 5, 2, 0),
+                ForeColor = SystemColors.ControlText,
+            };
+            _aflAxisCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 70, Margin = new Padding(0, 2, 0, 0),
+            };
+            _aflAxisCombo.Items.AddRange(new object[] { "전체", "Ax0", "Ax1", "Ax2" });
+            _aflAxisCombo.SelectedIndex = 0;
+            _aflAxisCombo.SelectedIndexChanged += (s, e) => UpdateTriggerButtonText();
+            var tipAxis = new System.Windows.Forms.ToolTip();
+            tipAxis.SetToolTip(_aflAxisCombo,
+                "축별 모델(Torque 축별 / Comb 축별 / CLS Accel-Torque-Combined) 학습 시 대상 축을 선택합니다.\n" +
+                "전체: 모든 축(0~N-1) 학습 (기본)\n" +
+                "Ax{N}: 해당 축 하나만 학습");
+
             _aflModelFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill, AutoSize = false,
@@ -2409,6 +2436,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 _aflChkAeAccelG, _aflChkAeTorqueG, _aflChkAeTorqueAx,
                 _aflChkAeCombG,  _aflChkAeCombAx,
                 _aflChkClsAccel, _aflChkClsTorque, _aflChkClsComb,
+                lblAxis, _aflAxisCombo,
             });
 
             // 프로파일 컨트롤
@@ -2559,9 +2587,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             string preview = tasks.Count > 0
                 ? string.Join(" + ", tasks)
                 : "⚠ 없음 (1개 이상 선택 필요)";
-            string tipText = $"[{label}] 실행 태스크: {preview}";
+            string axisSel = _aflAxisCombo?.SelectedItem?.ToString() ?? "전체";
+            string axisSfx = (axisSel == "전체") ? "" : $" / 축={axisSel}";
+            string tipText = $"[{label}{axisSfx}] 실행 태스크: {preview}";
 
-            _aflBtnTrigger.Text = $"▶ 트리거 [{label}]";
+            _aflBtnTrigger.Text = $"▶ 트리거 [{label}{axisSfx}]";
             if (_aflBtnTrigger.Tag is System.Windows.Forms.ToolTip tt)
                 tt.SetToolTip(_aflBtnTrigger, tipText);
             else
@@ -2625,6 +2655,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             paramsObj["train_modes"] = trainModes;
             // Airflow DAG 태스크는 session을 내부 고정값 사용 → conf의 session 제거
             paramsObj.Remove("session");
+
+            // ── 축 선택: "Ax{N}" 단일 선택 시 conf["axes"]=[N] 전송 ────────────
+            // "전체" 선택이면 conf 에 axes 미전송 → DAG 가 axis_count 자동 감지
+            string axisSel = _aflAxisCombo?.SelectedItem?.ToString();
+            if (!string.IsNullOrEmpty(axisSel) && axisSel.StartsWith("Ax") &&
+                int.TryParse(axisSel.Substring(2), out int axIdx))
+            {
+                paramsObj["axes"] = new int[] { axIdx };
+            }
 
             // ── 프로파일 설정 ────────────────────────────────────────────────
             string profileName = _aflProfile?.Text?.Trim();

@@ -260,6 +260,24 @@ def _get_axis_count(conf: dict) -> int:
     return _detect_axis_count(data_dir)
 
 
+def _get_axes(conf: dict) -> list:
+    """학습 대상 축 인덱스 목록을 반환합니다.
+
+    우선순위:
+      1. conf["axes"] 가 지정되면 (예: [0] 또는 [0, 2]) 그 리스트만 학습
+      2. 없으면 _get_axis_count(conf) 결과로 [0, 1, ..., N-1] 생성
+    """
+    raw = conf.pop("axes", None)
+    if raw is not None:
+        try:
+            axes = [int(x) for x in raw]
+            print(f"[PHM] axes conf 지정: {axes} (선택 학습)", flush=True)
+            return axes
+        except (TypeError, ValueError):
+            print(f"[PHM] axes conf 파싱 실패({raw!r}) → 전체 축으로 폴백", flush=True)
+    return list(range(_get_axis_count(conf)))
+
+
 def _is_mode_enabled(conf: dict, mode: str) -> bool:
     """train_modes 목록에 mode 가 포함되어 있으면 True."""
     modes = conf.get("train_modes", _DEFAULT_CONF["train_modes"])
@@ -313,12 +331,12 @@ def run_training_accel(**context) -> None:
         print("[PHM] train_modes 에 'accel' 없음 → 가속도 CLS 학습 건너뜀", flush=True)
         return
 
-    axis_count = _get_axis_count(conf)
+    axes = _get_axes(conf)
     run_id     = str(context.get("run_id", "manual"))
     profile_dir = _get_profile_dir(conf)
 
-    for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ 가속도 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+    for i, ax in enumerate(axes):
+        print(f"\n[PHM] ━━━ 가속도 CLS Ax{ax} 학습 시작 ({i+1}/{len(axes)}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "accel"
         params["channels"]         = ["x", "y", "z"]
@@ -330,7 +348,7 @@ def run_training_accel(**context) -> None:
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_accel_ax{ax}")
 
-    print(f"\n[PHM] 가속도 CLS 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] 가속도 CLS 축별 학습 완료 (총 {len(axes)}개 축: {axes})", flush=True)
 
 
 def run_training_torque(**context) -> None:
@@ -352,12 +370,12 @@ def run_training_torque(**context) -> None:
         print("[PHM] train_modes 에 'torque' 없음 → 토크 CLS 학습 건너뜀", flush=True)
         return
 
-    axis_count = _get_axis_count(conf)
+    axes = _get_axes(conf)
     run_id     = str(context.get("run_id", "manual"))
     profile_dir = _get_profile_dir(conf)
 
-    for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ 토크 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+    for i, ax in enumerate(axes):
+        print(f"\n[PHM] ━━━ 토크 CLS Ax{ax} 학습 시작 ({i+1}/{len(axes)}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "torque"
         params["channels"]         = [f"Ax{ax}_Trq(%)"]
@@ -369,7 +387,7 @@ def run_training_torque(**context) -> None:
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_torque_ax{ax}")
 
-    print(f"\n[PHM] 토크 CLS 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] 토크 CLS 축별 학습 완료 (총 {len(axes)}개 축: {axes})", flush=True)
 
 
 def run_training_combined(**context) -> None:
@@ -390,12 +408,12 @@ def run_training_combined(**context) -> None:
         print("[PHM] train_modes 에 'combined' 없음 → 결합 CLS 학습 건너뜀", flush=True)
         return
 
-    axis_count = _get_axis_count(conf)
+    axes = _get_axes(conf)
     run_id     = str(context.get("run_id", "manual"))
     profile_dir = _get_profile_dir(conf)
 
-    for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ 결합 CLS Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+    for i, ax in enumerate(axes):
+        print(f"\n[PHM] ━━━ 결합 CLS Ax{ax} 학습 시작 ({i+1}/{len(axes)}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["sensor_type"]      = "combined"
         params["channels"]         = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
@@ -407,7 +425,7 @@ def run_training_combined(**context) -> None:
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_combined_ax{ax}")
 
-    print(f"\n[PHM] 결합 CLS 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] 결합 CLS 축별 학습 완료 (총 {len(axes)}개 축: {axes})", flush=True)
 
 
 def run_training_ae_accel(**context) -> None:
@@ -475,17 +493,18 @@ def run_training_ae_torque(**context) -> None:
         print("[PHM] train_modes 에 'ae_torque' 없음 → AE 토크 학습 건너뜀", flush=True)
         return
 
-    axis_count = _get_axis_count(conf)
+    axes = _get_axes(conf)
     run_id     = str(context.get("run_id", "manual"))
     profile_dir = _get_profile_dir(conf)
 
-    for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ AE 토크 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+    for i, ax in enumerate(axes):
+        print(f"\n[PHM] ━━━ AE 토크 Ax{ax} 학습 시작 ({i+1}/{len(axes)}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["session"]                = "AE"
         params["sensor_type"]            = "torque"
         params["channels"]               = [f"Ax{ax}_Trq(%)"]
         params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간으로 수집 (Idle 행에서 끊지 않음)
         params["augment_mode"]           = "mixed"
         params["normalize"]              = False
         params["window_size"]            = 512    # v3 복원
@@ -494,7 +513,7 @@ def run_training_ae_torque(**context) -> None:
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
 
-    print(f"\n[PHM] AE 토크 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] AE 토크 축별 학습 완료 (총 {len(axes)}개 축: {axes})", flush=True)
 
 
 def run_training_ae_torque_global(**context) -> None:
@@ -528,6 +547,7 @@ def run_training_ae_torque_global(**context) -> None:
     params["sensor_type"]            = "torque"
     params["channels"]               = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
     params["filter_op_column"]       = None   # 전체 행 — 어느 축이 동작 중이어도 학습
+    params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간 수집 (Idle 끊김 방지)
     params["augment_mode"]           = "mixed"
     params["normalize"]              = False
     params["window_size"]            = 512    # v3 복원
@@ -569,6 +589,7 @@ def run_training_ae_combined_global(**context) -> None:
     params["sensor_type"]            = "combined"
     params["channels"]               = ["x", "y", "z"] + [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
     params["filter_op_column"]       = None   # 전체 행 학습
+    params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간 수집 (Idle 끊김 방지)
     params["augment_mode"]           = "standard"
     params["normalize"]              = True
     params["window_size"]            = 512    # v3 복원
@@ -602,17 +623,18 @@ def run_training_ae_combined(**context) -> None:
         print("[PHM] train_modes 에 'ae_combined' 없음 → AE 결합 축별 학습 건너뜀", flush=True)
         return
 
-    axis_count  = _get_axis_count(conf)
+    axes        = _get_axes(conf)
     run_id      = str(context.get("run_id", "manual"))
     profile_dir = _get_profile_dir(conf)
 
-    for ax in range(axis_count):
-        print(f"\n[PHM] ━━━ AE 결합 Ax{ax} 학습 시작 ({ax+1}/{axis_count}) ━━━", flush=True)
+    for i, ax in enumerate(axes):
+        print(f"\n[PHM] ━━━ AE 결합 Ax{ax} 학습 시작 ({i+1}/{len(axes)}) ━━━", flush=True)
         params = {**_DEFAULT_CONF, **conf}
         params["session"]                = "AE"
         params["sensor_type"]            = "combined"
         params["channels"]               = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
         params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간 수집 (Idle 끊김 방지)
         params["augment_mode"]           = "standard"
         params["normalize"]              = True
         params["window_size"]            = 512    # v3 복원
@@ -621,7 +643,7 @@ def run_training_ae_combined(**context) -> None:
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_combined_ax{ax}")
 
-    print(f"\n[PHM] AE 결합 축별 학습 완료 (총 {axis_count}개 축)", flush=True)
+    print(f"\n[PHM] AE 결합 축별 학습 완료 (총 {len(axes)}개 축: {axes})", flush=True)
 
 
 def reload_inference_cache(**context) -> None:

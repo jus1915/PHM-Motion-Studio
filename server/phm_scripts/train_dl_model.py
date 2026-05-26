@@ -443,35 +443,36 @@ def load_windows_from_dir(
 
     print(f"[data] rglob 결과: {len(csv_files)}개 CSV  (예: {csv_files[0] if csv_files else 'N/A'})", file=sys.stderr)
 
-    # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 파일명, (3) 헤더 기반 fallback
+    # sensor_type 필터 — (1) CSV 헤더 감지 우선, (2) 경로/파일명 fallback
+    #   이 프로젝트 데이터는 모든 센서를 한 파일에 담은 Combined CSV이므로
+    #   헤더 감지가 1차. 경로 필터는 Accel/Torque 폴더로 분리된 데이터셋용 fallback.
+    #   폴더명이 우연히 'torque' 등과 일치해 헤더 감지를 가로막는 문제를 방지한다.
     filter_kw = sensor_type.strip().lower()
     if filter_kw in ("accel", "torque", "combined"):
-        # combined: 파일명에 "_Combined" 포함 or 헤더 감지
         if filter_kw == "combined":
-            path_filtered = [f for f in csv_files
-                             if "_combined" in f.name.lower()]
-            if path_filtered:
-                csv_files = path_filtered
+            # 1차: 헤더 감지 (가속도+토크 채널 동시 존재)
+            header_matched = [f for f in csv_files
+                              if _detect_sensor_type_from_headers(str(f)) == "combined"]
+            if header_matched:
+                csv_files = header_matched
             else:
-                csv_files = [f for f in csv_files
-                             if _detect_sensor_type_from_headers(str(f)) == "combined"]
+                # 2차 fallback: 파일명에 "_Combined" 포함
+                csv_files = [f for f in csv_files if "_combined" in f.name.lower()]
             print(f"[data] sensor_type=combined 필터 → {len(csv_files)}개 파일", file=sys.stderr)
         else:
-            # 1차: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
-            path_filtered = [f for f in csv_files
-                             if any(p.lower() == filter_kw for p in f.parts)]
-            print(f"[data] 경로필터({filter_kw}): {len(path_filtered)}/{len(csv_files)}  "
-                  f"부분목록={[str(f.parts[-2:]) for f in path_filtered[:3]]}", file=sys.stderr)
-            if path_filtered:
-                csv_files = path_filtered
-                print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
+            # 1차: CSV 헤더 감지 — combined CSV는 accel+torque 채널을 모두
+            #       포함하므로 accel/torque 요청 시에도 허용
+            #       (채널 추출은 channels 파라미터로 제한)
+            header_matched = [f for f in csv_files
+                              if _detect_sensor_type_from_headers(str(f)) in (filter_kw, "combined")]
+            if header_matched:
+                csv_files = header_matched
+                print(f"[data] sensor_type={filter_kw} 헤더 감지 → {len(csv_files)}개 파일", file=sys.stderr)
             else:
-                # 2차 fallback: CSV 헤더를 읽어 센서 타입 추론 (평탄한 폴더 구조 대응)
-                # combined CSV는 accel+torque 채널을 모두 포함하므로
-                # accel/torque 요청 시에도 combined 파일을 허용 (채널 추출은 channels 파라미터로 제한)
+                # 2차 fallback: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
                 csv_files = [f for f in csv_files
-                             if _detect_sensor_type_from_headers(str(f)) in (filter_kw, "combined")]
-                print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
+                             if any(p.lower() == filter_kw for p in f.parts)]
+                print(f"[data] sensor_type={filter_kw} 경로 필터(헤더 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
         segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
@@ -717,21 +718,26 @@ def load_segments_from_dir(
         print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
         return []
 
+    # sensor_type 필터 — CSV 헤더 감지 우선, 경로/파일명은 fallback.
+    #   Combined CSV는 모든 센서 채널을 한 파일에 담으므로 헤더 감지가 1차.
+    #   폴더명이 우연히 'torque' 등과 일치해 헤더 감지를 가로막는 문제를 방지한다.
     filter_kw = sensor_type.strip().lower()
     if filter_kw in ("accel", "torque", "combined"):
         if filter_kw == "combined":
-            path_filtered = [f for f in csv_files if "_combined" in f.name.lower()]
-            csv_files = path_filtered if path_filtered else [
-                f for f in csv_files
-                if _detect_sensor_type_from_headers(str(f)) == "combined"
+            # 1차: 헤더 감지 / 2차 fallback: 파일명에 "_Combined" 포함
+            header_matched = [f for f in csv_files
+                              if _detect_sensor_type_from_headers(str(f)) == "combined"]
+            csv_files = header_matched if header_matched else [
+                f for f in csv_files if "_combined" in f.name.lower()
             ]
         else:
-            path_filtered = [f for f in csv_files
-                             if any(p.lower() == filter_kw for p in f.parts)]
-            # 경로 미매칭 시 헤더 기반 감지 — combined CSV도 accel/torque 채널 포함이므로 허용
-            csv_files = path_filtered if path_filtered else [
+            # 1차: 헤더 감지 — combined CSV도 accel/torque 채널 포함이므로 허용
+            # 2차 fallback: 경로에 "Accel"/"Torque" 폴더가 있는 구조적 데이터셋
+            header_matched = [f for f in csv_files
+                              if _detect_sensor_type_from_headers(str(f)) in (filter_kw, "combined")]
+            csv_files = header_matched if header_matched else [
                 f for f in csv_files
-                if _detect_sensor_type_from_headers(str(f)) in (filter_kw, "combined")
+                if any(p.lower() == filter_kw for p in f.parts)
             ]
         print(f"[data] sensor_type={filter_kw} 필터 → {len(csv_files)}개 파일", file=sys.stderr)
 
