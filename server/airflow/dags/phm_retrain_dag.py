@@ -460,10 +460,10 @@ def run_training_ae_accel(**context) -> None:
     params["filter_op_column"]       = None
     params["augment_mode"]           = "standard"
     params["normalize"]              = True
-    params["window_size"]            = 512    # v3 복원: raw 신호 충분한 컨텍스트
-    params["add_fft_channels"]       = False  # v3 복원: raw 3채널만 사용
-    params["add_derivative_channels"]= False  # v3 복원
-    params["ae_threshold_percentile"]= 99.9   # v3 복원
+    params.setdefault("window_size",             512)    # v3 복원: raw 신호 충분한 컨텍스트 (conf 우선)
+    params["add_fft_channels"]       = False              # v3 복원: raw 3채널만 사용
+    params["add_derivative_channels"]= False              # v3 복원
+    params.setdefault("ae_threshold_percentile", 99.9)    # v3 복원 (conf 우선)
     # 단일 모델: 축 suffix 없음
     profile_dir = _get_profile_dir(conf)
     params["output"] = str(profile_dir / "ae_accel.onnx")
@@ -511,8 +511,8 @@ def run_training_ae_torque(**context) -> None:
         params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간으로 수집 (Idle 행에서 끊지 않음)
         params["augment_mode"]           = "mixed"
         params["normalize"]              = False
-        params["window_size"]            = 512    # v3 복원
-        params["ae_threshold_percentile"]= 99.9   # 토크 축별
+        params.setdefault("window_size",             512)    # v3 복원 (conf 우선)
+        params.setdefault("ae_threshold_percentile", 99.9)   # 토크 축별 (conf 우선)
         params["output"] = str(profile_dir / f"ae_torque_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
@@ -554,8 +554,8 @@ def run_training_ae_torque_global(**context) -> None:
     params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간 수집 (Idle 끊김 방지)
     params["augment_mode"]           = "mixed"
     params["normalize"]              = False
-    params["window_size"]            = 512    # v3 복원
-    params["ae_threshold_percentile"]= 99.9   # 토크 전역
+    params.setdefault("window_size",             512)    # v3 복원 (conf 우선)
+    params.setdefault("ae_threshold_percentile", 99.9)   # 토크 전역 (conf 우선)
     params["output"] = str(profile_dir / "ae_torque_global.onnx")
     print(f"[PHM] AE 토크 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_torque_global")
@@ -596,8 +596,8 @@ def run_training_ae_combined_global(**context) -> None:
     params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간 수집 (Idle 끊김 방지)
     params["augment_mode"]           = "standard"
     params["normalize"]              = True
-    params["window_size"]            = 512    # v3 복원
-    params["ae_threshold_percentile"]= 99.9   # 결합 전역
+    params.setdefault("window_size",             512)    # v3 복원 (conf 우선)
+    params.setdefault("ae_threshold_percentile", 99.9)   # 결합 전역 (conf 우선)
     params["output"] = str(profile_dir / "ae_combined_global.onnx")
     print(f"[PHM] AE 결합 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_combined_global")
@@ -641,8 +641,8 @@ def run_training_ae_combined(**context) -> None:
         params["use_op_filter"]          = False  # Op 컬럼 무시 — 단일 구간 수집 (Idle 끊김 방지)
         params["augment_mode"]           = "standard"
         params["normalize"]              = True
-        params["window_size"]            = 512    # v3 복원
-        params["ae_threshold_percentile"]= 99.9   # 결합 축별
+        params.setdefault("window_size",             512)    # v3 복원 (conf 우선)
+        params.setdefault("ae_threshold_percentile", 99.9)   # 결합 축별 (conf 우선)
         params["output"] = str(profile_dir / f"ae_combined_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_combined_ax{ax}")
