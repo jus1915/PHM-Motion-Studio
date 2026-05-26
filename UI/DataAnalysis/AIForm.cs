@@ -1738,14 +1738,14 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     clsLooseness = _dlChkLooseness?.Checked ?? true,
                     clsOverspeed = _dlChkOverspeed?.Checked ?? false,
                     modelType    = isAe ? "AE" : "CLS",
-                    windowSize   = (int)(_dlWindowSize?.Value ?? 256),
-                    stride       = (int)(_dlStride?.Value     ?? 128),
-                    epochs       = (int)(_dlEpochs?.Value     ?? 30),
-                    batch        = (int)(_dlBatch?.Value      ?? 32),
+                    windowSize   = (int)NudCurrent(_dlWindowSize, 256m),
+                    stride       = (int)NudCurrent(_dlStride,     128m),
+                    epochs       = (int)NudCurrent(_dlEpochs,     30m),
+                    batch        = (int)NudCurrent(_dlBatch,      32m),
                     lr              = _dlLr?.Text           ?? "0.001",
-                    valSplit        = (int)(_dlValSplit?.Value      ?? 20),
-                    thresholdPct    = (double)(_dlThresholdPct?.Value ?? 99.5m),
-                    baseFilters     = (int)(_dlBaseFilters?.Value    ?? 32m),
+                    valSplit        = (int)NudCurrent(_dlValSplit,      20m),
+                    thresholdPct    = (double)NudCurrent(_dlThresholdPct, 99.5m),
+                    baseFilters     = (int)NudCurrent(_dlBaseFilters,    32m),
                     outputPath      = _dlOutputPath?.Text   ?? ""
                 };
                 var json = JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
@@ -1913,6 +1913,29 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // ── DL 학습 실행 ─────────────────────────────────────────────────────
 
         /// <summary>현재 UI 설정을 기반으로 학습 params를 빌드합니다. 실패 시 null 반환.</summary>
+        /// <summary>
+        /// NumericUpDown 의 현재 사용자 입력 값을 가져옵니다.
+        /// .Value 는 Enter/Tab 등으로 포커스를 잃을 때만 commit 되므로,
+        /// 사용자가 텍스트만 변경한 채 트리거하면 옛 값이 반환되는 문제가 있습니다.
+        /// 이 헬퍼는 .Text 를 우선 파싱하고, 실패 시 .Value 로 폴백합니다.
+        /// </summary>
+        private static decimal NudCurrent(NumericUpDown nud, decimal fallback)
+        {
+            if (nud == null) return fallback;
+            string txt = (nud.Text ?? "").Trim();
+            if (!string.IsNullOrEmpty(txt) &&
+                decimal.TryParse(txt,
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.CurrentCulture,
+                    out decimal v))
+            {
+                if (v < nud.Minimum) v = nud.Minimum;
+                if (v > nud.Maximum) v = nud.Maximum;
+                return v;
+            }
+            return nud.Value;
+        }
+
         private Dictionary<string, object> BuildDlParams(string dataDir, string outputPath)
         {
             var channels = new List<string>();
@@ -1948,12 +1971,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ["sensor_type"]         = isTorque ? "torque" : "accel",
                 ["label_column"]        = _dlLabelColumn?.Text?.Trim() ?? "Label",
                 ["class_names"]         = classNames.ToArray(),
-                ["window_size"]         = (int)_dlWindowSize.Value,
-                ["stride"]              = (int)_dlStride.Value,
-                ["epochs"]              = (int)_dlEpochs.Value,
-                ["batch_size"]          = (int)_dlBatch.Value,
+                ["window_size"]         = (int)NudCurrent(_dlWindowSize, 256m),
+                ["stride"]              = (int)NudCurrent(_dlStride,     128m),
+                ["epochs"]              = (int)NudCurrent(_dlEpochs,     30m),
+                ["batch_size"]          = (int)NudCurrent(_dlBatch,      32m),
                 ["lr"]                  = lr,
-                ["val_split"]           = (double)_dlValSplit.Value / 100.0,
+                ["val_split"]           = (double)NudCurrent(_dlValSplit, 20m) / 100.0,
                 ["seed"]                = 42,
                 ["mlflow_tracking_uri"] = Services.ServerSettings.Current.MlflowUrl ?? "",
                 ["mlflow_experiment"]   = "PHM-DL",
@@ -1963,8 +1986,8 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (isAe)
             {
                 p["normal_classes"]          = classNames.ToArray();
-                p["ae_threshold_percentile"] = (double)(_dlThresholdPct?.Value ?? 99.5m);
-                p["ae_base_filters"]         = (int)(_dlBaseFilters?.Value ?? 32m);
+                p["ae_threshold_percentile"] = (double)NudCurrent(_dlThresholdPct, 99.5m);
+                p["ae_base_filters"]         = (int)NudCurrent(_dlBaseFilters,    32m);
             }
             return p;
         }
@@ -2052,7 +2075,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = true }),
                     new System.Text.UTF8Encoding(false));
 
-                int totalEpochs = (int)_dlEpochs.Value;
+                int totalEpochs = (int)NudCurrent(_dlEpochs, 30m);
                 bool success = await System.Threading.Tasks.Task.Run(() => RunTrainingProcess(python, scriptPath, paramsPath, totalEpochs));
 
                 done++;
@@ -2180,7 +2203,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             // ── 출력 폴더 생성 + params JSON 저장 ─────────────────────────────
             try { System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(outputPath)); } catch { }
-            int totalEpochs = (int)_dlEpochs.Value;
+            int totalEpochs = (int)NudCurrent(_dlEpochs, 30m);
             string paramsPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "phm_dl_params.json");
             System.IO.File.WriteAllText(paramsPath,
                 JsonSerializer.Serialize(paramsObj, new JsonSerializerOptions { WriteIndented = true }),
