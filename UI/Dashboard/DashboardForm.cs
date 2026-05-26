@@ -5357,6 +5357,13 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             if (result == null) return;
 
+            // 모델 없음 (404): 학습되지 않은 (sensor_type, axis) — UI 변경 없이 조용히 반환
+            // 첫 호출 후 InferenceServerClient 가 캐시에 등록하므로 이후엔 네트워크 호출도 없음.
+            if (result.IsModelMissing)
+            {
+                return;
+            }
+
             // 서버 오류 응답: 칩에 오류 상태 표시 후 즉시 반환 (센서 표시 여부 무관)
             if (result.IsError)
             {

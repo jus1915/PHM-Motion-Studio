@@ -363,6 +363,11 @@ namespace PHM_Project_DockPanel.Services.Core
             InferenceResult result = await _client.PredictAsync(
                 window, ws, nCh, sensorType, axis, ct);
 
+            // 모델 없음 (404): 학습 안 된 (sensor_type, axis) — 조용히 무시.
+            // 클라이언트가 캐시에 등록하므로 이후엔 네트워크 호출도 없음.
+            if (result.IsModelMissing)
+                return;
+
             if (result.IsError)
                 AppEvents.RaiseLog(
                     $"[AE 추론 오류] sensorType={sensorType} axis={axis?.ToString() ?? "null"}" +
@@ -396,6 +401,10 @@ namespace PHM_Project_DockPanel.Services.Core
 
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
                 window, ws, nCh, sensorType, axis, ct);
+
+            // 모델 없음 (404): 조용히 무시 (이후엔 캐시로 차단)
+            if (combined.IsModelMissing)
+                return;
 
             if (combined.IsError)
             {

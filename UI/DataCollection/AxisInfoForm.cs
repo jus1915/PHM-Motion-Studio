@@ -580,6 +580,10 @@ namespace PHM_Project_DockPanel.Windows
             if (result.Axis.HasValue && _selectedAxis >= 0 && result.Axis.Value != _selectedAxis)
                 return;
 
+            // 모델 없음 (404): 학습되지 않은 축 — UI/로그에 표시하지 않고 조용히 무시
+            // (첫 호출 후 InferenceServerClient 캐시에 등록되어 이후 호출 자체가 차단됨)
+            if (result.IsModelMissing) return;
+
             if (result.IsError)
             {
                 // 오류 원인을 그대로 표시 (디버깅용)
