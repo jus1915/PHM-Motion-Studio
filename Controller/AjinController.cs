@@ -241,7 +241,9 @@ namespace PHM_Project_DockPanel.Controller
         {
             CheckConnected();
             double vel = 0;
-            AxmStatusReadActVel(axisNo, ref vel);
+            uint ret = AxmStatusReadActVel(axisNo, ref vel);
+            if (ret != AXT_RT_SUCCESS)
+                AppEvents.RaiseLog($"[Ajin] AxmStatusReadActVel axis={axisNo} 실패 (0x{ret:X})");
             return vel;
         }
 
