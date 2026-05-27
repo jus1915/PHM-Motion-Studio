@@ -260,6 +260,8 @@ namespace PHM_Project_DockPanel.Services
                     if ((logTorque || logVelocity) && usePollingLogger && _ajinLogger != null)
                     {
                         string ajinDir = logTorque ? torqueDir : velocityDir;
+                        _ajinLogger.IncludeTorque   = logTorque;
+                        _ajinLogger.IncludeVelocity = logVelocity;
                         try
                         {
                             startedAjinRun = _ajinLogger.Start(active.ToArray(), ajinDir, baseName);

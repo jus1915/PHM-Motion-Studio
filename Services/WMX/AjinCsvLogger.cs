@@ -49,6 +49,12 @@ namespace PHM_Project_DockPanel.Services.WMX
         /// <summary>장치 식별자 (InfluxDB device 태그). 미설정 시 _fileSuffix 사용.</summary>
         public string Device { get; set; }
 
+        /// <summary>CSV에 Ax{n}_Trq(%) 컬럼을 기록할지 여부. 기본 true.</summary>
+        public bool IncludeTorque { get; set; } = true;
+
+        /// <summary>CSV에 Ax{n}_Vel(mm/s) 컬럼을 기록할지 여부. 기본 false.</summary>
+        public bool IncludeVelocity { get; set; } = false;
+
         /// <summary>
         /// 각 폴링 샘플마다 호출됩니다: (device, axis, fbtrq%, timestampUtc).
         /// InfluxDB 실시간 토크 게시에 사용.
@@ -104,14 +110,25 @@ namespace PHM_Project_DockPanel.Services.WMX
         // ── 폴링 루프 ─────────────────────────────────────────────
         private void PollLoop(CancellationToken token)
         {
-            // 헤더: time_s(초) + 축별 토크 + Op(제어기 연결 시만)
-            bool hasOp = GetAxisOperation != null;
+            bool hasOp  = GetAxisOperation != null;
+            bool writeVel = IncludeVelocity;
+            bool writeTrq = IncludeTorque;
+
+            // 헤더: time_s + [Ax{n}_Vel(mm/s)] + [Ax{n}_Trq(%)] + [Op_Ax{n}]
             var header = new StringBuilder("time_s");
             foreach (int ax in _axes)
-                header.Append($",Ax{ax}_Trq(%)");
+            {
+                if (writeVel) header.Append($",Ax{ax}_Vel(mm/s)");
+                if (writeTrq) header.Append($",Ax{ax}_Trq(%)");
+            }
             if (hasOp)
                 foreach (int ax in _axes)
                     header.Append($",Op_Ax{ax}");
+
+            // 속도 차분 계산용 (getVel 콜백이 없을 때)
+            double[] prevPos  = writeVel ? new double[_axes.Length] : null;
+            double   prevTime = 0.0;
+            bool     first    = true;
 
             var sw = Stopwatch.StartNew();
 
@@ -136,17 +153,34 @@ namespace PHM_Project_DockPanel.Services.WMX
                     {
                         long nowTick = sw.ElapsedTicks;
                         double t_s   = (double)nowTick / Stopwatch.Frequency;   // 초 단위 (가속도와 동일)
+                        double dtSec = first ? 0.0 : t_s - prevTime;
 
                         var line = new StringBuilder(64);
                         line.Append(t_s.ToString("F6", CultureInfo.InvariantCulture));
 
                         for (int i = 0; i < _axes.Length; i++)
                         {
-                            int    ax  = _axes[i];
-                            double trq = SafeGet(_getTorque, ax);
-                            line.Append($",{trq:F4}");
-                            TorqueSampled?.Invoke(Device ?? _fileSuffix, ax, trq, DateTime.UtcNow);
+                            int ax = _axes[i];
+
+                            if (writeVel)
+                            {
+                                double vel = (_getVel != null)
+                                    ? SafeGet(_getVel, ax)
+                                    : ((first || dtSec <= 0) ? 0.0 : (SafeGet(_getPos, ax) - prevPos[i]) / dtSec);
+                                line.Append($",{vel:F4}");
+                                if (prevPos != null) prevPos[i] = SafeGet(_getPos, ax);
+                            }
+
+                            if (writeTrq)
+                            {
+                                double trq = SafeGet(_getTorque, ax);
+                                line.Append($",{trq:F4}");
+                                TorqueSampled?.Invoke(Device ?? _fileSuffix, ax, trq, DateTime.UtcNow);
+                            }
                         }
+
+                        prevTime = t_s;
+                        first    = false;
 
                         if (hasOp)
                             for (int _oi = 0; _oi < _axes.Length; _oi++)
