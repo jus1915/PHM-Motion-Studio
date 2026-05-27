@@ -144,7 +144,7 @@ namespace PHM_Project_DockPanel
                     getPos:    ax => ajin.GetActPos(ax),
                     getTorque: ax => ajin.GetTorque(ax),
                     log:       msg => AppEvents.RaiseLog(msg),
-                    getVel:    null,   // AxmStatusReadActVel 미지원 → 위치 차분으로 계산
+                    getVel:    ax => ajin.GetActVel(ax),
                     getCmdPos: ax => ajin.GetCmdPos(ax));
                 ajinLogger.Device = "Ajin";
                 ajinLogger.TorqueSampled = (dev, ax, val, t) => _influxPublisher?.FeedTorqueSample(dev, ax, val, t);

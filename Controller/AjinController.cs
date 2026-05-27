@@ -47,7 +47,8 @@ namespace PHM_Project_DockPanel.Controller
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusSetActPos(int lAxisNo, double dActPos);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusSetCmdPos(int lAxisNo, double dCmdPos);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusGetCmdPos(int lAxisNo, ref double dpCmdPos);
-        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusReadActVel(int lAxisNo, ref float dpActVel);
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusReadActVel(int lAxisNo, ref double dpActVel);
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusReadVel(int lAxisNo, ref double dpVel);
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)] private static extern uint AxmStatusReadTorque(int lAxisNo, ref double dpTorque);
 
         // ────────────────────────────────────────────────────────────
@@ -240,10 +241,8 @@ namespace PHM_Project_DockPanel.Controller
         public double GetActVel(int axisNo)
         {
             CheckConnected();
-            float vel = 0;
-            uint ret = AxmStatusReadActVel(axisNo, ref vel);
-            if (ret != AXT_RT_SUCCESS)
-                AppEvents.RaiseLog($"[Ajin] AxmStatusReadActVel axis={axisNo} 실패 (0x{ret:X})");
+            double vel = 0;
+            AxmStatusReadVel(axisNo, ref vel);
             return vel;
         }
 
