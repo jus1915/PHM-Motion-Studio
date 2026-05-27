@@ -242,10 +242,12 @@ namespace PHM_Project_DockPanel.Services
                     // 레이블이 있으면 서브폴더로 분류 — DL 학습 시 폴더명 = 레이블로 자동 인식
                     string labelTag = string.IsNullOrEmpty(AppState.CurrentLabel) ? "unlabeled" : AppState.CurrentLabel;
                     string rootDir = Path.Combine(baseRoot, folderName, labelTag);
-                    string torqueDir = Path.Combine(rootDir, "Torque");
-                    string accelDir = Path.Combine(rootDir, "Accel");
-                    Directory.CreateDirectory(torqueDir);
-                    Directory.CreateDirectory(accelDir);
+                    string torqueDir   = Path.Combine(rootDir, "Torque");
+                    string velocityDir = Path.Combine(rootDir, "Velocity");
+                    string accelDir    = Path.Combine(rootDir, "Accel");
+                    if (logTorque)   Directory.CreateDirectory(torqueDir);
+                    if (logVelocity) Directory.CreateDirectory(velocityDir);
+                    if (logAccel)    Directory.CreateDirectory(accelDir);
 
                     string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
                     string baseName = $"{timestamp}_{axisTag}_T{moveTimeMs}ms";
@@ -253,12 +255,14 @@ namespace PHM_Project_DockPanel.Services
                     bool isAjin = _controller.IsAjin;
                     bool usePollingLogger = isAjin || _controller.IsSimulationMode;
 
-                    // ── Ajin / Simulation: 폴링 로거 (토크 또는 속도 수집 시 실행) ─────
+                    // ── Ajin / Simulation: 폴링 로거 ─────────────────────────
+                    // 속도 단독: Velocity 폴더 / 토크(±속도): Torque 폴더
                     if ((logTorque || logVelocity) && usePollingLogger && _ajinLogger != null)
                     {
+                        string ajinDir = logTorque ? torqueDir : velocityDir;
                         try
                         {
-                            startedAjinRun = _ajinLogger.Start(active.ToArray(), torqueDir, baseName);
+                            startedAjinRun = _ajinLogger.Start(active.ToArray(), ajinDir, baseName);
                         }
                         catch (Exception ex) { AppEvents.RaiseLog($"[로깅 오류] (Ajin) {ex.Message}"); }
                     }
