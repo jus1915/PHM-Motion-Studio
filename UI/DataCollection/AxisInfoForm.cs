@@ -31,8 +31,9 @@ namespace PHM_Project_DockPanel.Windows
         // --- 좌측: DataGridView ---
         private DataGridView _grid;
 
-        // ▶ 수집 옵션: 가속도 / 토크 (기존 단일 체크박스 분리)
+        // ▶ 수집 옵션: 가속도 / 속도 / 토크
         private CheckBox _chkAccelCollect;     // 가속도 수집
+        private CheckBox _chkVelCollect;       // 속도 수집
         private CheckBox _chkTorqueCollect;    // 토크 수집
         private CheckBox _chkRealtime;
         private CheckBox _chkContCollect;      // 연속 수집
@@ -53,8 +54,9 @@ namespace PHM_Project_DockPanel.Windows
         private Label _lblClsOverspeed;
 
         // (선택) 외부에서 접근할 수 있도록 공개 프로퍼티
-        public CheckBox AccelCheckBox => _chkAccelCollect;
-        public CheckBox TorqueCheckBox => _chkTorqueCollect;
+        public CheckBox AccelCheckBox    => _chkAccelCollect;
+        public CheckBox VelocityCheckBox => _chkVelCollect;
+        public CheckBox TorqueCheckBox   => _chkTorqueCollect;
         [Obsolete("Use AccelCheckBox or TorqueCheckBox instead.")]
         public CheckBox LogCheckBox => _chkLogCombined;
         public CheckBox RealtimeSendCheckBox => _chkRealtime;
@@ -191,6 +193,7 @@ namespace PHM_Project_DockPanel.Windows
             };
 
             _chkAccelCollect  = new CheckBox { Text = "가속도 수집",      AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
+            _chkVelCollect    = new CheckBox { Text = "속도 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
             _chkTorqueCollect = new CheckBox { Text = "토크 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
             _chkRealtime      = new CheckBox { Text = "실시간 데이터 전송", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
             _chkContCollect   = new CheckBox { Text = "연속 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0),
@@ -277,6 +280,7 @@ namespace PHM_Project_DockPanel.Windows
             btnDisconnect.Click += BtnDisconnect_Click;
 
             rightControlPanel.Controls.Add(_chkAccelCollect);
+            rightControlPanel.Controls.Add(_chkVelCollect);
             rightControlPanel.Controls.Add(_chkTorqueCollect);
             rightControlPanel.Controls.Add(_chkRealtime);
             rightControlPanel.Controls.Add(_lblLabelCaption);
@@ -685,7 +689,7 @@ namespace PHM_Project_DockPanel.Windows
             try
             {
                 _syncingLegacy = true;
-                _chkLogCombined.Checked = _chkAccelCollect.Checked || _chkTorqueCollect.Checked;
+                _chkLogCombined.Checked = _chkAccelCollect.Checked || _chkVelCollect.Checked || _chkTorqueCollect.Checked;
             }
             finally { _syncingLegacy = false; }
         }

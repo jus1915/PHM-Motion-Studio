@@ -31,8 +31,9 @@ namespace PHM_Project_DockPanel.Services
         private Action<string, double[,], DateTime> _savedBlockReceived;
 
         // ▶ 분리된 로깅 토글 (주입식)
-        private readonly Func<bool> _isAccelEnabled;   // 가속도 수집 여부
-        private readonly Func<bool> _isTorqueEnabled;  // 토크 수집 여부
+        private readonly Func<bool> _isAccelEnabled;      // 가속도 수집 여부
+        private readonly Func<bool> _isVelocityEnabled;   // 속도 수집 여부
+        private readonly Func<bool> _isTorqueEnabled;     // 토크 수집 여부
 
         // ▶ 연속 수집 상태
         private bool _continuousLoggingActive;
@@ -44,18 +45,20 @@ namespace PHM_Project_DockPanel.Services
         public event Action<int[]> MotionStarted;
         public event Action MotionEnded;
 
-        // === 신규 CTOR: 가속도/토크 각각의 토글을 주입 ===
+        // === 신규 CTOR: 가속도/속도/토크 각각의 토글을 주입 ===
         public PHM_Motion(ControllerManager controller,
                           AxisConfig[] axisConfigs,
                           WmxTorqueLogger torqueLogger,
                           Func<bool> isAccelEnabled,
-                          Func<bool> isTorqueEnabled)
+                          Func<bool> isTorqueEnabled,
+                          Func<bool> isVelocityEnabled = null)
         {
             _controller = controller ?? new ControllerManager();
             _axisConfigs = axisConfigs;
             _torqueLogger = torqueLogger;
-            _isAccelEnabled = isAccelEnabled ?? (() => false);
-            _isTorqueEnabled = isTorqueEnabled ?? (() => false);
+            _isAccelEnabled    = isAccelEnabled    ?? (() => false);
+            _isVelocityEnabled = isVelocityEnabled ?? (() => false);
+            _isTorqueEnabled   = isTorqueEnabled   ?? (() => false);
         }
 
         // === 구 CTOR 호환(기존 단일 토글): 둘 다 동일 토글을 사용 ===
@@ -119,8 +122,9 @@ namespace PHM_Project_DockPanel.Services
             return true;
         }
 
-        private bool ShouldLogAccel() => _isAccelEnabled?.Invoke() == true;
-        private bool ShouldLogTorque() => _isTorqueEnabled?.Invoke() == true;
+        private bool ShouldLogAccel()    => _isAccelEnabled?.Invoke()    == true;
+        private bool ShouldLogVelocity() => _isVelocityEnabled?.Invoke() == true;
+        private bool ShouldLogTorque()   => _isTorqueEnabled?.Invoke()   == true;
 
         // 특정 예외 메시지는 잡음이라 무시
         private static bool IsNotCollectingError(Exception ex)
@@ -154,14 +158,15 @@ namespace PHM_Project_DockPanel.Services
             if (values.Length != axes.Length)
                 throw new ArgumentException("values length must be 1 or equal to axes length.");
 
-            bool logAccel  = ShouldLogAccel();
-            bool logTorque = ShouldLogTorque();
-            bool anyLog    = (logAccel || logTorque) && _axisConfigs != null;
+            bool logAccel    = ShouldLogAccel();
+            bool logVelocity = ShouldLogVelocity();
+            bool logTorque   = ShouldLogTorque();
+            bool anyLog      = (logAccel || logVelocity || logTorque) && _axisConfigs != null;
 
             // 연속 수집 중이면 모션별 파일 생성 억제 (NI-DAQ 채널 충돌 방지)
             if (_continuousLoggingActive)
             {
-                logAccel = false; logTorque = false; anyLog = false;
+                logAccel = false; logVelocity = false; logTorque = false; anyLog = false;
             }
 
             var status = _controller.GetStatus();
@@ -248,8 +253,8 @@ namespace PHM_Project_DockPanel.Services
                     bool isAjin = _controller.IsAjin;
                     bool usePollingLogger = isAjin || _controller.IsSimulationMode;
 
-                    // ── Ajin / Simulation: 폴링 로거 ────────────────────────
-                    if (logTorque && usePollingLogger && _ajinLogger != null)
+                    // ── Ajin / Simulation: 폴링 로거 (토크 또는 속도 수집 시 실행) ─────
+                    if ((logTorque || logVelocity) && usePollingLogger && _ajinLogger != null)
                     {
                         try
                         {

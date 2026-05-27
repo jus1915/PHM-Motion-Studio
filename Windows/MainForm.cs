@@ -132,8 +132,9 @@ namespace PHM_Project_DockPanel
                 _controller,
                 _axisConfigs,
                 _torqueLogger,           // WMX3가 아니면 null → PHM_Motion 내부에서 null-safe 처리됨
-                isAccelEnabled: () => _axisInfo?.AccelCheckBox?.Checked ?? false,
-                isTorqueEnabled: () => _axisInfo?.TorqueCheckBox?.Checked ?? false);
+                isAccelEnabled:    () => _axisInfo?.AccelCheckBox?.Checked    ?? false,
+                isTorqueEnabled:   () => _axisInfo?.TorqueCheckBox?.Checked   ?? false,
+                isVelocityEnabled: () => _axisInfo?.VelocityCheckBox?.Checked ?? false);
 
             // Ajin 전용: 폴링 방식 모션 데이터 로거 주입
             if (_controller.IsAjin)
