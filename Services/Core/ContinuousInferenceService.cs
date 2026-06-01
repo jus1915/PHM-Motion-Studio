@@ -55,11 +55,15 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly System.Collections.Generic.Dictionary<int, float> _latestTorqueScores
             = new System.Collections.Generic.Dictionary<int, float>();
 
-        // ── 세그먼트 상태 (Idle→Pos→Idle 1사이클 단위 집계) ─────────────────
-        // Op 정보가 있을 때만 활성화. Op 없으면 기존 per-window 동작 유지.
-        private bool _prevSegmentActive = false;
+        // ── 세그먼트 상태 (RMS 기반 Active/Idle 전환 감지) ──────────────────
+        // activity_rms_thr > 0: RMS 가 threshold 이상이면 Active, 미만이면 Idle
+        // activity_rms_thr = 0: 학습 시 필터 미사용 → per-window 동작 유지
 
-        // key = "{sensorType}|{axis}" — 세그먼트 내 누적 window score 목록
+        // key = "{sensorType}|{axis}" 별 이전 Active 상태
+        private readonly System.Collections.Generic.Dictionary<string, bool>
+            _segmentWasActive = new System.Collections.Generic.Dictionary<string, bool>();
+
+        // key별 누적 window score 목록
         private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<float>>
             _segmentScores = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<float>>();
 
@@ -70,62 +74,72 @@ namespace PHM_Project_DockPanel.Services.Core
         private static string SegKey(string sensorType, int? axis) =>
             axis.HasValue ? $"{sensorType}|{axis.Value}" : sensorType;
 
-        private void OnSegmentStart()
+        /// <summary>세그먼트 시작: 해당 key 의 누적 버퍼를 초기화합니다.</summary>
+        private void OnSegmentStart(string key, string sensorType, int? axis)
         {
-            _segmentScores.Clear();
-            _segmentMeta.Clear();
-            AppEvents.RaiseLog("[세그먼트] 모션 시작 — 윈도우 누적 시작");
+            _segmentScores[key]  = new System.Collections.Generic.List<float>();
+            _segmentMeta.Remove(key);
+            AppEvents.RaiseLog(
+                $"[세그먼트] 시작 — {sensorType}" +
+                (axis.HasValue ? $" Ax{axis.Value}" : "") +
+                "  윈도우 누적 시작");
         }
 
         /// <summary>
-        /// 세그먼트 종료 시 호출. 각 센서/축별로 window score 를 90th pct 로 집계해
+        /// 세그먼트 종료: 누적 window score 를 90th pct 로 집계하고
         /// IsSegmentResult=true 인 InferenceResult 를 발행합니다.
         /// </summary>
-        private void OnSegmentEnd()
+        private void OnSegmentEnd(string key)
         {
-            foreach (var kv in _segmentScores)
+            System.Collections.Generic.List<float> scores;
+            if (!_segmentScores.TryGetValue(key, out scores) || scores.Count == 0)
             {
-                var scores = kv.Value;
-                if (scores.Count == 0) continue;
-
-                InferenceResult meta;
-                if (!_segmentMeta.TryGetValue(kv.Key, out meta)) continue;
-
-                // 90th percentile — 소수의 노이즈 window 무시, 전반적 패턴 반영
-                var sorted = new System.Collections.Generic.List<float>(scores);
-                sorted.Sort();
-                int pctIdx = (int)Math.Ceiling(sorted.Count * 0.9) - 1;
-                if (pctIdx < 0) pctIdx = 0;
-                float segScore = sorted[pctIdx];
-
-                var segResult = new InferenceResult
-                {
-                    ModelType       = meta.ModelType,
-                    SensorType      = meta.SensorType,
-                    Axis            = meta.Axis,
-                    ModelFile       = meta.ModelFile,
-                    AnomalyScore    = segScore,
-                    Threshold       = meta.Threshold,
-                    IsAnomaly       = meta.Threshold > 0 && segScore >= meta.Threshold,
-                    ClassName       = (meta.Threshold > 0 && segScore >= meta.Threshold) ? "anomaly" : "normal",
-                    RawMae          = segScore,        // 집계 score 를 raw 로도 전달
-                    RawThreshold    = meta.Threshold,
-                    IsSegmentResult = true,
-                    WindowCount     = scores.Count,
-                };
-
-                AppEvents.RaiseLog(
-                    $"[세그먼트] {meta.SensorType}" +
-                    (meta.Axis.HasValue ? $" Ax{meta.Axis}" : "") +
-                    $"  windows={scores.Count}" +
-                    $"  90pct={segScore:F3}  thr={meta.Threshold:F3}" +
-                    $"  → {(segResult.IsAnomaly ? "⚠ 이상" : "✓ 정상")}");
-
-                AppEvents.RaiseInferenceResult(meta.SensorType, segResult);
+                _segmentScores.Remove(key);
+                _segmentMeta.Remove(key);
+                return;
             }
 
-            _segmentScores.Clear();
-            _segmentMeta.Clear();
+            InferenceResult meta;
+            if (!_segmentMeta.TryGetValue(key, out meta))
+            {
+                _segmentScores.Remove(key);
+                return;
+            }
+
+            // 90th percentile — 소수의 노이즈 window 무시, 전반적 패턴 반영
+            var sorted = new System.Collections.Generic.List<float>(scores);
+            sorted.Sort();
+            int pctIdx = (int)Math.Ceiling(sorted.Count * 0.9) - 1;
+            if (pctIdx < 0) pctIdx = 0;
+            float segScore = sorted[pctIdx];
+
+            var segResult = new InferenceResult
+            {
+                ModelType       = meta.ModelType,
+                SensorType      = meta.SensorType,
+                Axis            = meta.Axis,
+                ModelFile       = meta.ModelFile,
+                AnomalyScore    = segScore,
+                Threshold       = meta.Threshold,
+                IsAnomaly       = meta.Threshold > 0 && segScore >= meta.Threshold,
+                ClassName       = (meta.Threshold > 0 && segScore >= meta.Threshold) ? "anomaly" : "normal",
+                RawMae          = segScore,
+                RawThreshold    = meta.Threshold,
+                IsSegmentResult = true,
+                WindowCount     = scores.Count,
+            };
+
+            AppEvents.RaiseLog(
+                $"[세그먼트] 종료 — {meta.SensorType}" +
+                (meta.Axis.HasValue ? $" Ax{meta.Axis.Value}" : "") +
+                $"  windows={scores.Count}" +
+                $"  90pct={segScore:F3}  thr={meta.Threshold:F3}" +
+                $"  → {(segResult.IsAnomaly ? "⚠ 이상" : "✓ 정상")}");
+
+            AppEvents.RaiseInferenceResult(meta.SensorType, segResult);
+
+            _segmentScores.Remove(key);
+            _segmentMeta.Remove(key);
         }
 
         /// <summary>
@@ -246,19 +260,7 @@ namespace PHM_Project_DockPanel.Services.Core
                 try { await Task.Delay(_intervalMs, ct); }
                 catch { break; }
 
-                // ── 세그먼트 경계 감지 (Op 정보 있을 때만) ────────────────────
-                // Idle→Pos: 세그먼트 시작, Pos→Idle: 세그먼트 종료 + 진단 발행
-                if (_getAxisOperation != null && _axes != null)
-                {
-                    bool nowActive = GetCurrentOp() == "Pos";
-                    if (!_prevSegmentActive && nowActive)
-                        OnSegmentStart();
-                    else if (_prevSegmentActive && !nowActive)
-                        OnSegmentEnd();
-                    _prevSegmentActive = nowActive;
-                }
-
-                // ── (1) AE 추론: Idle/Pos 무관하게 항상 실행 ──────────────────
+                // ── (1) AE 추론: 항상 실행 (세그먼트 경계는 RunAeInference 내부에서 RMS 기반 감지) ──
                 //   • 가속도: 단일 센서 → axis = null, Op 필터 없음
                 //   • 토크:   축별     → axis = n,    Op 필터 없음
                 await RunAeInferenceAll(ct);
@@ -465,14 +467,28 @@ namespace PHM_Project_DockPanel.Services.Core
                 filterOp: false);
             if (window == null) return;
 
-            // ── Activity 필터: RMS < activity_rms_thr 이면 Idle 윈도우로 간주 ──
+            // ── RMS 기반 세그먼트 경계 감지 + Idle 필터 ─────────────────────
             double actThr = GetActivityRmsThr(sensorType);
-            if (actThr > 0.0)
+            string segKey = SegKey(sensorType, axis);
+
+            bool useSegmentMode = actThr > 0.0;
+            bool nowActive      = !useSegmentMode || ComputeWindowRms(window) >= actThr;
+
+            if (useSegmentMode)
             {
-                double rms = ComputeWindowRms(window);
-                if (rms < actThr)
+                bool wasActive;
+                _segmentWasActive.TryGetValue(segKey, out wasActive);
+
+                if (!wasActive && nowActive)
+                    OnSegmentStart(segKey, sensorType, axis);   // Idle → Active
+                else if (wasActive && !nowActive)
+                    OnSegmentEnd(segKey);                        // Active → Idle: 집계 발행
+
+                _segmentWasActive[segKey] = nowActive;
+
+                if (!nowActive)
                 {
-                    // Idle 윈도우 — 추론 건너뜀, score=0 으로 UI 갱신
+                    // Idle 윈도우: score=0 UI 갱신 후 반환
                     AppEvents.RaiseInferenceResult(sensorType,
                         InferenceResult.Idle(sensorType, axis));
                     return;
@@ -502,22 +518,16 @@ namespace PHM_Project_DockPanel.Services.Core
             else if (sensorType == "torque" && axis.HasValue)
                 _latestTorqueScores[axis.Value] = result.AnomalyScore;
 
-            // ── 세그먼트 모드 (Op 정보 있음): score 누적 + 차트용 발행 ──────
-            // ── per-window 모드 (Op 없음):      기존대로 즉시 발행 ───────────
-            if (_getAxisOperation != null && _axes != null)
+            if (useSegmentMode)
             {
-                // 세그먼트 활성 중일 때만 누적 (Idle 구간은 버림)
-                if (_prevSegmentActive)
-                {
-                    string sk = SegKey(sensorType, axis);
-                    if (!_segmentScores.ContainsKey(sk))
-                        _segmentScores[sk] = new System.Collections.Generic.List<float>();
-                    _segmentScores[sk].Add(result.AnomalyScore);
-                    _segmentMeta[sk] = result;
-                }
+                // ── 세그먼트 모드: score 누적 + 차트용(IsChartOnly) 발행 ──────
+                // 경고 판정은 Active→Idle 전환(OnSegmentEnd) 시에만 수행.
+                if (!_segmentScores.ContainsKey(segKey))
+                    _segmentScores[segKey] = new System.Collections.Generic.List<float>();
+                _segmentScores[segKey].Add(result.AnomalyScore);
+                _segmentMeta[segKey] = result;
 
-                // 차트 실시간 업데이트: IsChartOnly=true (경고는 세그먼트 종료 시에만)
-                var chartResult = new InferenceResult
+                AppEvents.RaiseInferenceResult(sensorType, new InferenceResult
                 {
                     ModelType    = result.ModelType,
                     SensorType   = result.SensorType,
@@ -529,13 +539,12 @@ namespace PHM_Project_DockPanel.Services.Core
                     ClassName    = result.ClassName,
                     RawMae       = result.RawMae,
                     RawThreshold = result.RawThreshold,
-                    IsChartOnly  = true,    // DashboardForm 에서 이상 판정 스킵
-                };
-                AppEvents.RaiseInferenceResult(sensorType, chartResult);
+                    IsChartOnly  = true,
+                });
             }
             else
             {
-                // Op 정보 없음: per-window 즉시 발행 (기존 동작 유지)
+                // ── per-window 모드 (activity_rms_thr 미설정): 즉시 발행 ──────
                 AppEvents.RaiseInferenceResult(sensorType, result);
             }
         }
