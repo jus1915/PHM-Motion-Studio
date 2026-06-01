@@ -469,7 +469,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private double _spikeEmaAlpha      = 0.1;   // EMA 감쇠율
         private double _spikeFactor        = 2.5;   // EMA 대비 급증 배수
         private int    _spikeWarmup        = 30;    // 워밍업 샘플 수
-        private double _warnMultiplier     = 1.0;   // 경고 기준 (normScore ≥ 이 값)
+        // 1.2 = 모델 threshold 의 120% — 정상 noise(1.0~1.14) 흡수, 실이상(1.4+) 감지
+        // 재학습(99th pct) 후 1.0으로 낮춰도 됨
+        private double _warnMultiplier     = 1.2;   // 경고 기준 (normScore ≥ 이 값)
         private double _dangerMultiplier   = 2.0;   // 위험 기준 (normScore ≥ 이 값)
 
         // ── 차트 표시용 EMA 평활화 ────────────────────────────────────────────
@@ -514,9 +516,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             => _modelDangerThr.TryGetValue(key, out double v) ? v : _dangerMultiplier;
 
         // ── 연속 이상 카운터 (N회 연속 threshold 초과 시 경보 확정) ──────────
-        // 3 = 약 6초 연속 초과 시 경보 (intervalMs≈2s 기준)
-        // 1 = 즉시 확정 (너무 예민 — 단발 노이즈도 경고 발생)
-        private int _anomalyConfirmCount = 3;
+        // 1 = 즉시 확정 (짧은 모션에도 감지)
+        private int _anomalyConfirmCount = 1;
         private static readonly string AnomalySettingsFile =
             Path.Combine(DefaultLogsPath, "anomaly_settings.json");
         private readonly Dictionary<string, int> _consecutiveAnomalyCount
