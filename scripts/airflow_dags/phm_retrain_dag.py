@@ -85,9 +85,8 @@ _DEFAULT_CONF: dict = {
         "ae_torque_global", "ae_torque",
         "ae_combined_global", "ae_combined",
     ],
-    # AE threshold: 99th pct — 정상 윈도우의 1%만 초과 허용 (false alarm 감소)
-    # 95th 는 5% false alarm 으로 실운용 시 너무 자주 경고 발생
-    "ae_threshold_percentile":  99.0,
+    # AE threshold: 99.9th pct (정상 기동 패턴 포함, false alarm 감소)
+    "ae_threshold_percentile":  99.9,
     # AE 활동성 필터: Op 컬럼 없이 RMS 하위 N% 윈도우를 Idle로 간주해 제거
     # 0.0 = 비활성 (전체 윈도우 사용), 0.30 = 하위 30% 제거
     "activity_filter_quantile": 0.0,
