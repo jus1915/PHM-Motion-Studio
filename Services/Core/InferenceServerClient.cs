@@ -372,6 +372,23 @@ namespace PHM_Project_DockPanel.Services.Core
         /// <summary>activity_rms_thr 에 의해 Idle로 판정된 윈도우임을 나타냅니다.</summary>
         [JsonIgnore] public bool IsIdle { get; set; }
 
+        /// <summary>
+        /// 세그먼트(Idle→Pos→Idle 1사이클) 단위 집계 결과임을 나타냅니다.
+        /// true  → DashboardForm 이 경고/로그를 발행합니다.
+        /// false → IsChartOnly 에 따라 처리합니다.
+        /// </summary>
+        [JsonIgnore] public bool IsSegmentResult { get; set; }
+
+        /// <summary>세그먼트에 포함된 윈도우 수 (IsSegmentResult=true 일 때 유효).</summary>
+        [JsonIgnore] public int WindowCount { get; set; }
+
+        /// <summary>
+        /// 세그먼트 모드에서 차트 실시간 업데이트 전용으로 발행된 결과.
+        /// true  → 차트/점수 라벨만 갱신, 이상 판정/경고/로그 스킵.
+        /// false → 정상 이상 판정 수행.
+        /// </summary>
+        [JsonIgnore] public bool IsChartOnly { get; set; }
+
         /// <summary>서버에 모델이 없는 경우 (HTTP 404 또는 캐시 hit) 반환되는 결과.</summary>
         public static InferenceResult MissingModel(string sensorType, int? axis)
         {

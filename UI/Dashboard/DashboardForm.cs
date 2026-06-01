@@ -5470,43 +5470,59 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 // 클라이언트 임계값 기준 이상 판정 (per-axis threshold 반영)
                 double clientThr = _axisThresholds.TryGetValue(key, out double ct) ? ct : 1.0;
                 double rawScore  = (double)result.AnomalyScore;
-                // normScore = rawScore / clientThr (1.0 = 모델 threshold 기준점)
-                // per-model 경고 기준(WarnThr)으로 판정 (없으면 전역 _warnMultiplier)
-                bool   threshAnomaly = normScore >= GetWarnThr(key);
 
-                // ── 연속 카운터: N회 연속 초과 시 확정 (단발 노이즈 제거) ──────────
-                int prevConsec;
-                _consecutiveAnomalyCount.TryGetValue(key, out prevConsec);
-                int newConsec = threshAnomaly ? prevConsec + 1 : 0;
-                _consecutiveAnomalyCount[key] = newConsec;
-                bool confirmedThreshAnomaly = newConsec >= _anomalyConfirmCount;
-
-                // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상) ─────────────
-                var baseline = _scoreBaseline.GetOrAdd(key, (rawScore, 0));
-                double ema   = baseline.ema;
-                int    cnt   = baseline.count;
-
-                // spike 판정 조건:
-                //   1) 워밍업 완료 (cnt >= _spikeWarmup)
-                //   2) 현재 score 가 EMA 의 _spikeFactor 배 초과
-                //   3) 절대 score 가 0.5 이상 — Idle 복귀 직후 EMA 가 낮게 고착되어
-                //      정상 동작 시작 점수가 급증으로 오판되는 것을 방지
-                bool spikeAnomaly = cnt >= _spikeWarmup
-                                 && rawScore > ema * _spikeFactor
-                                 && rawScore >= 0.5;
-
-                // EMA 업데이트: Idle 윈도우(score=0, IsIdle=true)는 제외.
-                // Idle 구간 score=0 이 EMA 에 반영되면 베이스라인이 0 근처로 내려가
-                // 모터 재기동 시 정상 점수도 "급증"으로 오판되는 문제 방지.
-                if (!result.IsIdle && rawScore > 0.0)
+                // ── IsChartOnly: 세그먼트 모드 차트 업데이트 전용 ───────────────
+                // 이상 판정 / 로그 / 경고 없이 UI 값만 갱신하고 즉시 반환.
+                if (result.IsChartOnly)
                 {
-                    double newEma = ema * (1 - _spikeEmaAlpha) + rawScore * _spikeEmaAlpha;
-                    _scoreBaseline[key] = (newEma, cnt + 1);
+                    float chartOnly = (result.RawMae.HasValue && result.RawThreshold.HasValue
+                                       && result.RawThreshold.Value > 0)
+                        ? result.RawMae.Value / result.RawThreshold.Value
+                        : result.AnomalyScore;
+                    if (lblScore != null) lblScore.Text = $"{chartOnly:F3}";
+                    if (isAccel && !result.Axis.HasValue)
+                        UpdateAccelAeDisplay(normScore);
+                    return;
                 }
 
-                // 최종 이상 판정: 연속 N회 초과(확정) 또는 급증 스파이크(즉시)
-                bool   anomaly  = confirmedThreshAnomaly || spikeAnomaly;
-                string spikeTag = (spikeAnomaly && !threshAnomaly) ? " ↑급증" : "";
+                // ── IsSegmentResult: 세그먼트 집계 결과 ─────────────────────────
+                // 연속 카운터 / 스파이크 감지 없이 집계 score 로 바로 판정.
+                bool   anomaly;
+                string spikeTag = "";
+                if (result.IsSegmentResult)
+                {
+                    anomaly = normScore >= GetWarnThr(key);
+                    // 연속 카운터 리셋 (다음 세그먼트 독립 판정)
+                    _consecutiveAnomalyCount[key] = 0;
+                }
+                else
+                {
+                    // ── per-window 모드 (Op 정보 없을 때) ───────────────────────
+                    bool threshAnomaly = normScore >= GetWarnThr(key);
+
+                    int prevConsec;
+                    _consecutiveAnomalyCount.TryGetValue(key, out prevConsec);
+                    int newConsec = threshAnomaly ? prevConsec + 1 : 0;
+                    _consecutiveAnomalyCount[key] = newConsec;
+                    bool confirmedThreshAnomaly = newConsec >= _anomalyConfirmCount;
+
+                    var baseline = _scoreBaseline.GetOrAdd(key, (rawScore, 0));
+                    double ema   = baseline.ema;
+                    int    cnt   = baseline.count;
+
+                    bool spikeAnomaly = cnt >= _spikeWarmup
+                                     && rawScore > ema * _spikeFactor
+                                     && rawScore >= 0.5;
+
+                    if (!result.IsIdle && rawScore > 0.0)
+                    {
+                        double newEma = ema * (1 - _spikeEmaAlpha) + rawScore * _spikeEmaAlpha;
+                        _scoreBaseline[key] = (newEma, cnt + 1);
+                    }
+
+                    anomaly  = confirmedThreshAnomaly || spikeAnomaly;
+                    spikeTag = (spikeAnomaly && !threshAnomaly) ? " ↑급증" : "";
+                }
                 string stateText  = anomaly ? "⚠ 이상" : "✓ 정상";
                 Color  stateClr   = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
 
@@ -5571,8 +5587,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     double warnThr   = GetWarnThr(key);
                     double dangerThr = GetDangerThr(key);
                     bool isDanger    = normScore >= dangerThr;
-                    string spikeInfo = spikeAnomaly && !threshAnomaly
-                        ? $"  [급증: ema={ema:F3}→{rawScore:F3}(×{(ema>0?rawScore/ema:0):F1})]" : "";
+                    // spikeAnomaly / threshAnomaly / ema 는 per-window 모드에서만 존재
+                    string spikeInfo = (!result.IsSegmentResult && spikeTag.Length > 0)
+                        ? $"  [급증: raw={rawScore:F3}]" : "";
                     string levelTag  = isDanger ? "🔴 위험" : "🟡 경고";
 
                     // 상태 전환(정상→이상) 또는 쿨다운 경과 시만 기록 — AE(이상탐지) 전 센서 대상
@@ -5590,10 +5607,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                         // normScore: 실제 판정에 사용되는 점수 (= result.AnomalyScore / modelThreshold)
                         // warn/danger: 판정 임계값 (normScore와 직접 비교)
                         // [raw]: 참고용 raw 값 (= rawMae / rawThreshold)
+                        string segInfo = result.IsSegmentResult
+                            ? $"  [세그먼트 {result.WindowCount}windows·90pct]" : "";
                         AppendEventLog(
                             $"[{DateTime.Now:HH:mm:ss}] {levelTag} {displayName} 이상{spikeTag}  " +
                             $"normScore={normScore:F3}  warn={warnThr:F2}/danger={dangerThr:F2}  " +
-                            $"[raw={displayScore:F3}/thr={clientThr:F3}]{cls}{spikeInfo}");
+                            $"[raw={displayScore:F3}/thr={clientThr:F3}]{cls}{spikeInfo}{segInfo}");
                         _lastAnomalyLogTime[key] = DateTime.Now;
 
                         // 이벤트 카운트 표 갱신
