@@ -30,11 +30,22 @@ namespace PHM_Project_DockPanel.Services.Core
             = new System.Collections.Generic.Dictionary<string, int>();
         private int _intervalMs = DefaultIntervalMs;
 
+        /// <summary>sensor_type별 activity_rms_thr 캐시. 0.0 이면 필터 비활성.</summary>
+        private readonly System.Collections.Generic.Dictionary<string, double> _activityRmsThresholds
+            = new System.Collections.Generic.Dictionary<string, double>();
+
         /// <summary>sensor_type별 window_size 반환. 서버 쿼리 전이거나 없으면 기본값.</summary>
         private int GetWindowSize(string sensorType)
         {
             int ws;
             return _windowSizes.TryGetValue(sensorType, out ws) ? ws : DefaultWindowSize;
+        }
+
+        /// <summary>sensor_type별 activity_rms_thr 반환. 캐시 없으면 0.0 (필터 비활성).</summary>
+        private double GetActivityRmsThr(string sensorType)
+        {
+            double thr;
+            return _activityRmsThresholds.TryGetValue(sensorType, out thr) ? thr : 0.0;
         }
 
         private int? _lastMovingAxis = null;
@@ -116,7 +127,7 @@ namespace PHM_Project_DockPanel.Services.Core
             _cts?.Cancel();
         }
 
-        /// <summary>서버 /model_info 를 조회해 _windowSizes, _intervalMs 를 갱신합니다.</summary>
+        /// <summary>서버 /model_info 를 조회해 _windowSizes, _activityRmsThresholds, _intervalMs 를 갱신합니다.</summary>
         private async Task RefreshWindowSizesAsync(CancellationToken ct)
         {
             try
@@ -125,7 +136,10 @@ namespace PHM_Project_DockPanel.Services.Core
                 if (info == null || info.Count == 0) return;
 
                 foreach (var kv in info)
-                    _windowSizes[kv.Key] = kv.Value;
+                {
+                    _windowSizes[kv.Key]           = kv.Value.WindowSize;
+                    _activityRmsThresholds[kv.Key] = kv.Value.ActivityRmsThr;
+                }
 
                 // IntervalMs = 가장 작은 window_size / 2 (stride 50%)
                 int minWs = int.MaxValue;
@@ -138,6 +152,13 @@ namespace PHM_Project_DockPanel.Services.Core
                     string.Join(", ", System.Linq.Enumerable.Select(
                         _windowSizes, kv => $"{kv.Key}={kv.Value}")) +
                     $"  intervalMs={_intervalMs}");
+
+                // activity_rms_thr 가 0 초과인 항목만 로그 출력
+                foreach (var kv in _activityRmsThresholds)
+                    if (kv.Value > 0.0)
+                        AppEvents.RaiseLog(
+                            $"[추론] activity_rms_thr 동기화: {kv.Key}={kv.Value:F6} " +
+                            "(RMS 미만 윈도우는 Idle로 간주해 추론 건너뜀)");
             }
             catch { /* 실패 시 기본값 유지 */ }
         }
@@ -346,19 +367,32 @@ namespace PHM_Project_DockPanel.Services.Core
 
         /// <summary>
         /// AE 이상탐지 추론 — /predict 엔드포인트 사용.
-        /// 학습이 filter_op=None(Idle+Pos 전체)으로 수행되므로
-        /// 추론도 전체 행을 사용해야 threshold 기준이 일치함.
+        /// activity_rms_thr 가 설정된 경우 윈도우 RMS 를 먼저 계산하고,
+        /// 임계값 미만이면 Idle로 간주해 추론을 건너뜁니다 (훈련 조건과 일치).
         /// </summary>
         private async Task RunAeInference(
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            // 학습: Idle+Pos 전체 → 추론도 전체 행 사용 (분포 일치)
-            bool filterOp = false;
             int ws = GetWindowSize(sensorType);
+            // 학습: Idle+Pos 전체 → 추론도 전체 행 사용 (분포 일치)
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: filterOp);
+                filterOp: false);
             if (window == null) return;
+
+            // ── Activity 필터: RMS < activity_rms_thr 이면 Idle 윈도우로 간주 ──
+            double actThr = GetActivityRmsThr(sensorType);
+            if (actThr > 0.0)
+            {
+                double rms = ComputeWindowRms(window);
+                if (rms < actThr)
+                {
+                    // Idle 윈도우 — 추론 건너뜀, score=0 으로 UI 갱신
+                    AppEvents.RaiseInferenceResult(sensorType,
+                        InferenceResult.Idle(sensorType, axis));
+                    return;
+                }
+            }
 
             InferenceResult result = await _client.PredictAsync(
                 window, ws, nCh, sensorType, axis, ct);
@@ -499,6 +533,19 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// 평탄화된 윈도우 배열의 전채널 RMS를 계산합니다.
+        /// window: [t0c0, t0c1, … t1c0, …]  길이 = windowSize × nChannels
+        /// </summary>
+        private static double ComputeWindowRms(float[] window)
+        {
+            if (window == null || window.Length == 0) return 0.0;
+            double sum = 0.0;
+            for (int i = 0; i < window.Length; i++)
+                sum += (double)window[i] * window[i];
+            return Math.Sqrt(sum / window.Length);
         }
 
         /// <summary>

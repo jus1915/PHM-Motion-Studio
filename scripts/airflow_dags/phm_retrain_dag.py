@@ -87,6 +87,9 @@ _DEFAULT_CONF: dict = {
     ],
     # AE threshold: 99.9th pct (정상 기동 패턴 포함, false alarm 감소)
     "ae_threshold_percentile":  99.9,
+    # AE 활동성 필터: Op 컬럼 없이 RMS 하위 N% 윈도우를 Idle로 간주해 제거
+    # 0.0 = 비활성 (전체 윈도우 사용), 0.30 = 하위 30% 제거
+    "activity_filter_quantile": 0.0,
     # MLflow 추적 서버 — 컨테이너 내부 서비스명 사용 (--serve-artifacts 프록시 모드)
     # MLFLOW_TRACKING_URI env var 로도 설정됨 (docker-compose); 여기선 명시적 override
     "mlflow_tracking_uri":      "http://mlflow:5000",
@@ -219,40 +222,9 @@ _default_args = {
 }
 
 
-# ── session / output prefix 헬퍼 ─────────────────────────────────────────────
-def _resolve_session(params: dict) -> str:
-    """session 값을 정규화합니다 (AD→AE, FD→CLS)."""
-    raw = str(params.get("session", "CLS")).upper()
-    return {"AD": "AE", "FD": "CLS"}.get(raw, raw)
-
-
-def _output_prefix(session: str, sensor: str) -> str:
-    """session·sensor 에 따른 모델 파일명 prefix를 반환합니다.
-
-    CLS + accel    → cls_accel
-    CLS + torque   → cls_torque
-    CLS + combined → cls_combined
-    AE  + accel    → ae_fd
-    AE  + torque   → ae_torque
-    AE  + combined → ae_combined
-    """
-    if session == "CLS":
-        if sensor == "accel":
-            return "cls_accel"
-        if sensor == "torque":
-            return "cls_torque"
-        return "cls_combined"
-    else:
-        if sensor == "accel":
-            return "ae_accel"   # 단일 전역 모델 (per-axis 없음)
-        if sensor == "torque":
-            return "ae_torque"
-        return "ae_combined"
-
-
 def _get_axis_count(conf: dict) -> int:
-    """conf 에서 axis_count 를 꺼내거나 CSV 스캔으로 자동 감지합니다."""
-    raw = int(conf.pop("axis_count", 0))
+    """conf 에서 axis_count 를 읽거나 CSV 스캔으로 자동 감지합니다."""
+    raw = int(conf.get("axis_count", 0))
     if raw > 0:
         print(f"[PHM] axis_count conf 지정: {raw}개 축", flush=True)
         return raw
@@ -438,10 +410,13 @@ def run_training_ae_accel(**context) -> None:
     params["filter_op_column"]       = None
     params["augment_mode"]           = "standard"
     params["normalize"]              = True
-    params["window_size"]            = 256    # 512 → 256: 기동 1회 완전 포착
-    params["add_fft_channels"]       = True   # 주파수 영역 부하 변화 포착 (핵심)
-    params["add_derivative_channels"]= True   # 진동 변화율(jerk) 포착
-    params["ae_threshold_percentile"]= 99.0   # 가속도 전용: 99.9 → 99.0 민감도 상향
+    # conf 에 window_size / ae_threshold_percentile 이 명시된 경우 그 값을 우선 사용.
+    # 미지정 시 가속도 AE 전용 기본값(256, 99.0) 적용.
+    params["window_size"]               = int(conf.get("window_size", 256))
+    params["add_fft_channels"]          = True   # 주파수 영역 부하 변화 포착 (핵심)
+    params["add_derivative_channels"]   = True   # 진동 변화율(jerk) 포착
+    params["ae_threshold_percentile"]   = float(conf.get("ae_threshold_percentile", 99.0))
+    params["activity_filter_quantile"]  = float(conf.get("activity_filter_quantile", 0.30))
     # 단일 모델: 축 suffix 없음
     profile_dir = _get_profile_dir(conf)
     params["output"] = str(profile_dir / "ae_accel.onnx")
@@ -485,10 +460,11 @@ def run_training_ae_torque(**context) -> None:
         params["session"]                = "AE"
         params["sensor_type"]            = "torque"
         params["channels"]               = [f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
-        params["augment_mode"]           = "mixed"
-        params["normalize"]              = False
-        params["ae_threshold_percentile"]= 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
+        params["filter_op_column"]          = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["augment_mode"]              = "mixed"
+        params["normalize"]                 = False
+        params["ae_threshold_percentile"]   = 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
+        params["activity_filter_quantile"]  = float(conf.get("activity_filter_quantile", 0.30))
         params["output"] = str(profile_dir / f"ae_torque_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_torque_ax{ax}")
@@ -526,10 +502,11 @@ def run_training_ae_torque_global(**context) -> None:
     params["session"]                = "AE"
     params["sensor_type"]            = "torque"
     params["channels"]               = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
-    params["filter_op_column"]       = None   # 전체 행 — 어느 축이 동작 중이어도 학습
-    params["augment_mode"]           = "mixed"
-    params["normalize"]              = False
-    params["ae_threshold_percentile"]= 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
+    params["filter_op_column"]          = None   # 전체 행 — 어느 축이 동작 중이어도 학습
+    params["augment_mode"]              = "mixed"
+    params["normalize"]                 = False
+    params["ae_threshold_percentile"]   = 99.95  # 토크 전용: 99.9 → 99.95 오탐 감소
+    params["activity_filter_quantile"]  = float(conf.get("activity_filter_quantile", 0.30))
     params["output"] = str(profile_dir / "ae_torque_global.onnx")
     print(f"[PHM] AE 토크 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_torque_global")
@@ -566,10 +543,11 @@ def run_training_ae_combined_global(**context) -> None:
     params["session"]                = "AE"
     params["sensor_type"]            = "combined"
     params["channels"]               = ["x", "y", "z"] + [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
-    params["filter_op_column"]       = None   # 전체 행 학습
-    params["augment_mode"]           = "standard"
-    params["normalize"]              = True
-    params["ae_threshold_percentile"]= 99.95  # 결합 전역: 99.9 → 99.95 오탐 감소
+    params["filter_op_column"]          = None   # 전체 행 학습
+    params["augment_mode"]              = "standard"
+    params["normalize"]                 = True
+    params["ae_threshold_percentile"]   = 99.95  # 결합 전역: 99.9 → 99.95 오탐 감소
+    params["activity_filter_quantile"]  = float(conf.get("activity_filter_quantile", 0.30))
     params["output"] = str(profile_dir / "ae_combined_global.onnx")
     print(f"[PHM] AE 결합 전역 모델 출력: {params['output']}", flush=True)
     _execute_training(params, f"{run_id}_ae_combined_global")
@@ -581,7 +559,7 @@ def run_training_ae_combined(**context) -> None:
     AE 이상탐지 — 가속도+토크 축별 모델 학습.
 
     · channels                = ["x","y","z","Ax{n}_Trq(%)"]
-    · filter_op_column        = None  (Idle + 기동 전체 학습)
+    · filter_op_column        = None  (Idle + 기동 전체 학습 — false alarm 방지)
     · standardize_per_sample  = True  (채널 간 가속도/토크 스케일 차이를 윈도우별 정규화로 흡수)
     · augment_mode            = "standard"
     · normalize               = True
@@ -592,6 +570,7 @@ def run_training_ae_combined(**context) -> None:
     결합 모델(가속도+토크)도 Idle+기동 전체 데이터로 학습해야 정상 상태를 폭넓게 커버함.
     filter_op_column으로 기동 구간만 학습 시 정상 기동 패턴도 이상으로 판정되는 문제 발생.
     가속도(mg/g)와 토크(%) 스케일 차이는 global_norm(학습 중 자동 계산)으로 흡수됨.
+    ※ filter_op_column 은 None 고정 — Op 컬럼 기반 필터는 ae_torque 전용.
     """
     conf = dict(context["dag_run"].conf or {})
 
@@ -609,10 +588,11 @@ def run_training_ae_combined(**context) -> None:
         params["session"]                = "AE"
         params["sensor_type"]            = "combined"
         params["channels"]               = ["x", "y", "z", f"Ax{ax}_Trq(%)"]
-        params["filter_op_column"]       = None   # Idle + 기동 전체 학습 (false alarm 방지)
-        params["augment_mode"]           = "standard"
-        params["normalize"]              = True
-        params["ae_threshold_percentile"]= 99.95  # 결합 축별: 99.9 → 99.95 오탐 감소
+        params["filter_op_column"]          = None   # Idle + 기동 전체 학습 (false alarm 방지)
+        params["augment_mode"]              = "standard"
+        params["normalize"]                 = True
+        params["ae_threshold_percentile"]   = 99.95  # 결합 축별: 99.9 → 99.95 오탐 감소
+        params["activity_filter_quantile"]  = float(conf.get("activity_filter_quantile", 0.30))
         params["output"] = str(profile_dir / f"ae_combined_ax{ax}.onnx")
         print(f"[PHM] 출력 파일: {params['output']}", flush=True)
         _execute_training(params, f"{run_id}_ae_combined_ax{ax}")
@@ -720,7 +700,7 @@ with DAG(
         python_callable=run_training_ae_combined,
         doc_md=(
             "가속도+토크 AE 이상탐지 모델 학습 (축별). "
-            "augment_mode=standard, normalize=True, filter_op=Op_Ax{n}. 출력: ae_combined_ax{n}.onnx"
+            "augment_mode=standard, normalize=True, filter_op=None (Idle+Pos 전체). 출력: ae_combined_ax{n}.onnx"
         ),
     )
 

@@ -117,6 +117,46 @@ def load_params(params_path: str) -> dict:
         return json.load(f)
 
 
+def _apply_activity_filter(
+    windows: "List[Tuple[np.ndarray, int]]",
+    quantile: float,
+    normalize: bool,
+) -> "Tuple[List[Tuple[np.ndarray, int]], float]":
+    """RMS 기반 활동성 필터 — Op 컬럼 없이 Idle 윈도우를 자동 제거합니다.
+
+    windows 는 normalize=False(raw) 상태로 전달해야 합니다.
+    필터 후 normalize=True 이면 남은 윈도우에 per-sample z-score 를 적용합니다.
+
+    Args:
+        windows : [(raw_window, label_int), ...] — raw 상태
+        quantile: 하위 quantile 이하 RMS 윈도우를 Idle로 간주해 제거 (예: 0.30)
+        normalize: True 이면 필터 후 z-score 정규화 적용
+
+    Returns:
+        (filtered_windows, activity_rms_thr)
+        activity_rms_thr: C# 추론 시 동일하게 적용해야 하는 RMS 하한값.
+                          이 값 미만 윈도우는 추론 건너뜀 (Idle로 간주).
+    """
+    if not windows:
+        return windows, 0.0
+    rms = np.array(
+        [np.sqrt(np.mean(w.astype(np.float64) ** 2)) for w, _ in windows],
+        dtype=np.float64,
+    )
+    thr  = float(np.quantile(rms, quantile))
+    mask = rms > thr
+    kept    = [windows[i] for i in range(len(windows)) if mask[i]]
+    removed = len(windows) - len(kept)
+    print(
+        f"[activity_filter] RMS thr={thr:.6f} (Q{quantile*100:.0f})  "
+        f"제거={removed}/{len(windows)}  남음={len(kept)}",
+        file=sys.stderr,
+    )
+    if normalize:
+        kept = [(_zscore_normalize(w), lbl) for w, lbl in kept]
+    return kept, thr
+
+
 def _zscore_normalize(window: np.ndarray) -> np.ndarray:
     """윈도우를 채널별 z-score 정규화합니다 (C# ZScoreInPlace와 동일 로직).
 
@@ -344,7 +384,11 @@ def load_windows_from_dir(
     sensor_type: str = "",
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
-) -> List[Tuple[np.ndarray, int]]:
+    activity_filter_quantile: float = 0.0,
+) -> Tuple[List[Tuple[np.ndarray, int]], float]:
+    """Returns (windows, activity_rms_thr).
+    activity_rms_thr > 0 only when activity_filter_quantile > 0;
+    C# inference must skip windows whose RMS < activity_rms_thr."""
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
     레이블 우선순위:
@@ -441,13 +485,15 @@ def load_windows_from_dir(
             continue
 
         # 구간별 윈도우 추출 (경계 오염 방지)
+        # activity_filter 사용 시 raw 상태로 추출 후 나중에 일괄 필터+정규화
+        _extract_norm = normalize if activity_filter_quantile <= 0.0 else False
         file_windows: List[Tuple[np.ndarray, int]] = []
         short_segs = 0
         for seg in segments:
             if seg.shape[0] < window_size:
                 short_segs += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=_extract_norm))
 
         if not file_windows:
             print(
@@ -465,6 +511,11 @@ def load_windows_from_dir(
                 file=sys.stderr,
             )
         all_windows.extend(file_windows)
+
+    # 활동성 필터 (Op 컬럼 없이 RMS 기반 Idle 제거)
+    activity_rms_thr = 0.0
+    if activity_filter_quantile > 0.0 and all_windows:
+        all_windows, activity_rms_thr = _apply_activity_filter(all_windows, activity_filter_quantile, normalize)
 
     # 클래스별 윈도우 수 진단 출력
     cls_dist: Dict[str, int] = {}
@@ -484,7 +535,7 @@ def load_windows_from_dir(
             f"class_names={class_names}, label_column 확인 필요.",
             file=sys.stderr,
         )
-    return all_windows
+    return all_windows, activity_rms_thr
 
 
 def load_windows_from_file_list(
@@ -496,7 +547,9 @@ def load_windows_from_file_list(
     stride: int,
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
-) -> List[Tuple[np.ndarray, int]]:
+    activity_filter_quantile: float = 0.0,
+) -> Tuple[List[Tuple[np.ndarray, int]], float]:
+    """Returns (windows, activity_rms_thr). See load_windows_from_dir."""
     """명시적 파일 목록에서 윈도우를 추출합니다.
 
     Args:
@@ -534,13 +587,15 @@ def load_windows_from_file_list(
             continue
 
         # 구간별 윈도우 추출 (경계 오염 방지)
+        # activity_filter 사용 시 raw 상태로 추출 후 나중에 일괄 필터+정규화
+        _extract_norm = normalize if activity_filter_quantile <= 0.0 else False
         file_windows: List[Tuple[np.ndarray, int]] = []
         short_segs = 0
         for seg in segments:
             if seg.shape[0] < window_size:
                 short_segs += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=normalize))
+            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=_extract_norm))
 
         if not file_windows:
             print(
@@ -553,12 +608,17 @@ def load_windows_from_file_list(
 
         all_windows.extend(file_windows)
 
+    # 활동성 필터 (Op 컬럼 없이 RMS 기반 Idle 제거)
+    activity_rms_thr = 0.0
+    if activity_filter_quantile > 0.0 and all_windows:
+        all_windows, activity_rms_thr = _apply_activity_filter(all_windows, activity_filter_quantile, normalize)
+
     print(
         f"[data] 파일 목록 로드 완료: {len(csv_files) - skipped}개 파일, "
         f"{len(all_windows)}개 윈도우 (건너뜀={skipped})",
         file=sys.stderr,
     )
-    return all_windows
+    return all_windows, activity_rms_thr
 
 
 # ── PyTorch Dataset ──────────────────────────────────────────────────────────
@@ -1139,9 +1199,10 @@ def save_meta(
     rms_mean: Optional[float] = None,
     rms_thr:  Optional[float] = None,
     rms_std:  Optional[float] = None,
-    norm_mean: Optional[np.ndarray] = None,  # 전역 정규화 채널별 mean (AE 전용)
-    norm_std:  Optional[np.ndarray] = None,  # 전역 정규화 채널별 std  (AE 전용)
-    n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
+    norm_mean: Optional[np.ndarray] = None,
+    norm_std:  Optional[np.ndarray] = None,
+    n_channels_override: Optional[int] = None,
+    activity_rms_thr: float = 0.0,  # 추론 시 Idle 스킵 기준 RMS 하한값 (0.0=필터 없음)
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
@@ -1190,6 +1251,9 @@ def save_meta(
             meta["rms_thr"]  = round(float(rms_thr),  6)
         if rms_std is not None:
             meta["rms_std"]  = round(float(rms_std),  6)
+        # 활동성 필터 임계값: 추론 시 RMS < activity_rms_thr 이면 윈도우 건너뜀
+        # 0.0이면 필터 비활성 (전체 윈도우 추론)
+        meta["activity_rms_thr"] = round(float(activity_rms_thr), 8)
     else:
         meta["class_names"] = class_names
         meta["n_classes"]   = len(class_names)
@@ -1340,6 +1404,7 @@ def main() -> None:
     )
     label_column: str = params.get("label_column", "Label")
     filter_op_column: Optional[str] = params.get("filter_op_column", None)
+    activity_filter_quantile: float = float(params.get("activity_filter_quantile", 0.0))
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
@@ -1359,7 +1424,8 @@ def main() -> None:
     print(
         f"[main] session={session} | 채널={channels} | "
         f"{'정상클래스' if is_ae else '클래스'}={load_class_names} | "
-        f"window_size={window_size}, stride={stride}",
+        f"window_size={window_size}, stride={stride} | "
+        f"filter_op={filter_op_column} | activity_filter_q={activity_filter_quantile if activity_filter_quantile > 0 else 'off'}",
         file=sys.stderr,
     )
 
@@ -1370,8 +1436,9 @@ def main() -> None:
     # CLS 학습: per-sample z-score 정규화 적용
     normalize_windows = not is_ae
 
+    activity_rms_thr = 0.0
     if "csv_files" in params and params["csv_files"]:
-        windows = load_windows_from_file_list(
+        windows, activity_rms_thr = load_windows_from_file_list(
             csv_files=params["csv_files"],
             channels=channels,
             label_column=label_column,
@@ -1380,9 +1447,10 @@ def main() -> None:
             stride=stride,
             normalize=normalize_windows,
             filter_op_column=filter_op_column,
+            activity_filter_quantile=activity_filter_quantile,
         )
     elif "data_dir" in params and params["data_dir"]:
-        windows = load_windows_from_dir(
+        windows, activity_rms_thr = load_windows_from_dir(
             data_dir=params["data_dir"],
             channels=channels,
             label_column=label_column,
@@ -1392,6 +1460,7 @@ def main() -> None:
             sensor_type=params.get("sensor_type", ""),
             normalize=normalize_windows,
             filter_op_column=filter_op_column,
+            activity_filter_quantile=activity_filter_quantile,
         )
     else:
         print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
@@ -1461,7 +1530,7 @@ def main() -> None:
         # AE는 RAW 데이터 필요 (RMS 통계 계산) — normalize=False 로 재로드
         print("[main] AE 모드 데이터 재로드 (normalize=False)...", file=sys.stderr)
         if "csv_files" in params and params["csv_files"]:
-            windows = load_windows_from_file_list(
+            windows, activity_rms_thr = load_windows_from_file_list(
                 csv_files=params["csv_files"],
                 channels=channels,
                 label_column=label_column,
@@ -1470,9 +1539,10 @@ def main() -> None:
                 stride=stride,
                 normalize=False,
                 filter_op_column=filter_op_column,
+                activity_filter_quantile=activity_filter_quantile,
             )
         else:
-            windows = load_windows_from_dir(
+            windows, activity_rms_thr = load_windows_from_dir(
                 data_dir=params["data_dir"],
                 channels=channels,
                 label_column=label_column,
@@ -1482,6 +1552,7 @@ def main() -> None:
                 sensor_type=params.get("sensor_type", ""),
                 normalize=False,
                 filter_op_column=filter_op_column,
+                activity_filter_quantile=activity_filter_quantile,
             )
 
         # 출력 파일명을 AE 용으로 변경
@@ -1537,7 +1608,8 @@ def main() -> None:
             rms_std=rms_std,
             norm_mean=norm_mean,
             norm_std=norm_std,
-            n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
+            n_channels_override=n_channels,
+            activity_rms_thr=activity_rms_thr,
         )
 
         _try_end_mlflow(

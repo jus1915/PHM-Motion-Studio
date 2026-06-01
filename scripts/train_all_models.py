@@ -168,7 +168,7 @@ def run_job(
 
     try:
         # ── 1. 데이터 로드 ───────────────────────────────────────────────
-        windows, seg_ids = load_windows_from_dir(
+        windows, _act_thr = load_windows_from_dir(
             data_dir         = DATA_DIR,
             channels         = channels,
             label_column     = "Label",
@@ -179,6 +179,7 @@ def run_job(
             normalize        = normalize,
             filter_op_column = filter_op_col,
         )
+        seg_ids = None
 
         if not windows:
             print(f"[{name}] ❌ 유효한 윈도우 없음 — 건너뜀", file=sys.stderr)
