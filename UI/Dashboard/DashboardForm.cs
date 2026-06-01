@@ -514,7 +514,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             => _modelDangerThr.TryGetValue(key, out double v) ? v : _dangerMultiplier;
 
         // ── 연속 이상 카운터 (N회 연속 threshold 초과 시 경보 확정) ──────────
-        private int _anomalyConfirmCount = 1;  // 1=즉시 확정, 5≈1.3초 연속
+        // 3 = 약 6초 연속 초과 시 경보 (intervalMs≈2s 기준)
+        // 1 = 즉시 확정 (너무 예민 — 단발 노이즈도 경고 발생)
+        private int _anomalyConfirmCount = 3;
         private static readonly string AnomalySettingsFile =
             Path.Combine(DefaultLogsPath, "anomaly_settings.json");
         private readonly Dictionary<string, int> _consecutiveAnomalyCount

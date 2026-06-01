@@ -55,38 +55,9 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly System.Collections.Generic.Dictionary<int, float> _latestTorqueScores
             = new System.Collections.Generic.Dictionary<int, float>();
 
-        // ── 연속 이상 카운터 (debounce) ───────────────────────────────────────
-        // 연속으로 ANOMALY_CONFIRM_COUNT 회 이상 초과해야 실제 경고 발행.
-        // 산발적 1~2회 false alarm 억제.
-        private const int AnomalyConfirmCount = 2;
-        private readonly System.Collections.Generic.Dictionary<string, int> _anomalyStreak
-            = new System.Collections.Generic.Dictionary<string, int>();
-
-        private string AnomalyKey(string sensorType, int? axis) =>
-            axis.HasValue ? $"{sensorType}|{axis.Value}" : sensorType;
-
-        /// <summary>
-        /// 연속 이상 카운터를 갱신하고 실제로 경고를 발행할지 여부를 반환합니다.
-        /// isAnomaly=true 가 AnomalyConfirmCount 회 연속이면 true.
-        /// 정상 판정 시 카운터 리셋.
-        /// </summary>
-        private bool UpdateAnomalyStreak(string sensorType, int? axis, bool isAnomaly)
-        {
-            string key = AnomalyKey(sensorType, axis);
-            int cur;
-            _anomalyStreak.TryGetValue(key, out cur);
-            if (isAnomaly)
-            {
-                cur++;
-                _anomalyStreak[key] = cur;
-                return cur >= AnomalyConfirmCount;
-            }
-            else
-            {
-                _anomalyStreak[key] = 0;
-                return false;
-            }
-        }
+        // ※ 연속 이상 확인(debounce)은 DashboardForm._anomalyConfirmCount 에서 처리.
+        //   서비스 레이어에서 IsAnomaly 를 조작해도 Dashboard 가 score 를 직접
+        //   재계산하므로 효과가 없어 제거함.
 
         /// <summary>
         /// CLS(결함진단) 추론 활성화 여부. 기본 false — AE 이상탐지만 실행.
@@ -443,27 +414,6 @@ namespace PHM_Project_DockPanel.Services.Core
             }
             else
             {
-                // ── Debounce: 연속 AnomalyConfirmCount 회 초과해야 IsAnomaly=true 발행 ──
-                bool confirmed = UpdateAnomalyStreak(sensorType, axis, result.IsAnomaly);
-                if (result.IsAnomaly && !confirmed)
-                {
-                    // 아직 연속 기준 미달 — IsAnomaly를 false로 낮춰서 발행 (스코어는 유지)
-                    result = new InferenceResult
-                    {
-                        ModelType    = result.ModelType,
-                        SensorType   = result.SensorType,
-                        Axis         = result.Axis,
-                        ModelFile    = result.ModelFile,
-                        IsAnomaly    = false,
-                        AnomalyScore = result.AnomalyScore,
-                        Threshold    = result.Threshold,
-                        ClassName    = result.ClassName,
-                        Confidence   = result.Confidence,
-                        RawMae       = result.RawMae,
-                        RawThreshold = result.RawThreshold,
-                    };
-                }
-
                 // combined 폴백용: 최신 개별 AE 스코어 캐시
                 if (sensorType == "accel")
                     _latestAccelScore = result.AnomalyScore;
