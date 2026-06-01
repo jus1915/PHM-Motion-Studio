@@ -5478,18 +5478,32 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 _consecutiveAnomalyCount[key] = newConsec;
                 bool confirmedThreshAnomaly = newConsec >= _anomalyConfirmCount;
 
-                // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상 — 즉시 반응) ──
+                // ── EMA 베이스라인 대비 급증 감지 (외력 등 순간 이상) ─────────────
                 var baseline = _scoreBaseline.GetOrAdd(key, (rawScore, 0));
                 double ema   = baseline.ema;
                 int    cnt   = baseline.count;
-                bool   spikeAnomaly = cnt >= _spikeWarmup && rawScore > ema * _spikeFactor;
-                // EMA 업데이트: 항상 반영 (스파이크 구간만 제외하면 베이스라인이 낮게 고착됨)
-                double newEma = ema * (1 - _spikeEmaAlpha) + rawScore * _spikeEmaAlpha;
-                _scoreBaseline[key] = (newEma, cnt + 1);
+
+                // spike 판정 조건:
+                //   1) 워밍업 완료 (cnt >= _spikeWarmup)
+                //   2) 현재 score 가 EMA 의 _spikeFactor 배 초과
+                //   3) 절대 score 가 0.5 이상 — Idle 복귀 직후 EMA 가 낮게 고착되어
+                //      정상 동작 시작 점수가 급증으로 오판되는 것을 방지
+                bool spikeAnomaly = cnt >= _spikeWarmup
+                                 && rawScore > ema * _spikeFactor
+                                 && rawScore >= 0.5;
+
+                // EMA 업데이트: Idle 윈도우(score=0, IsIdle=true)는 제외.
+                // Idle 구간 score=0 이 EMA 에 반영되면 베이스라인이 0 근처로 내려가
+                // 모터 재기동 시 정상 점수도 "급증"으로 오판되는 문제 방지.
+                if (!result.IsIdle && rawScore > 0.0)
+                {
+                    double newEma = ema * (1 - _spikeEmaAlpha) + rawScore * _spikeEmaAlpha;
+                    _scoreBaseline[key] = (newEma, cnt + 1);
+                }
 
                 // 최종 이상 판정: 연속 N회 초과(확정) 또는 급증 스파이크(즉시)
-                bool   anomaly    = confirmedThreshAnomaly || spikeAnomaly;
-                string spikeTag   = (spikeAnomaly && !threshAnomaly) ? " ↑급증" : "";
+                bool   anomaly  = confirmedThreshAnomaly || spikeAnomaly;
+                string spikeTag = (spikeAnomaly && !threshAnomaly) ? " ↑급증" : "";
                 string stateText  = anomaly ? "⚠ 이상" : "✓ 정상";
                 Color  stateClr   = anomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55);
 
