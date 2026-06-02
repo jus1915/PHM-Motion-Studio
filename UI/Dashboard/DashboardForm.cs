@@ -496,6 +496,23 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Dictionary<string, DateTime> _lastAnomalyLogTime = new Dictionary<string, DateTime>();
         private TimeSpan _anomalyLogCooldown = TimeSpan.FromSeconds(30);
 
+        // ── 센서 패밀리 중복 이벤트 제거 ─────────────────────────────────
+        // 토크 전역(torque) + 토크 Ax0(torque_ax0) 처럼 같은 패밀리가
+        // 같은 사이클에 동일 점수로 이벤트를 두 번 기록하는 것을 방지.
+        // 패밀리 내 첫 번째 이벤트만 KPI/테이블에 기록하고 나머지는 억제.
+        private readonly Dictionary<string, DateTime> _lastFamilyEventTime = new Dictionary<string, DateTime>();
+        private static readonly TimeSpan FamilyDedupWindow = TimeSpan.FromSeconds(2);
+
+        /// <summary>key → 센서 패밀리 문자열. 같은 패밀리끼리 이벤트 중복 억제.</summary>
+        private static string GetSensorFamily(string key)
+        {
+            if (key == null) return "";
+            if (key == "accel"    || key.StartsWith("accel_ax",    StringComparison.Ordinal)) return "accel";
+            if (key == "torque"   || key.StartsWith("torque_ax",   StringComparison.Ordinal)) return "torque";
+            if (key == "combined" || key.StartsWith("combined_ax", StringComparison.Ordinal)) return "combined";
+            return key;
+        }
+
 
         // 프로파일 관리
         private ComboBox _cmbProfile;
@@ -5148,9 +5165,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 if (anomaly)
                 {
                     string levelTag  = isDanger ? "🔴 위험" : "🟡 경고";
-                    bool   shouldLog = !wasAnomaly || cooldownOk;
+                    // 패밀리 중복 억제: 같은 패밀리(예: torque/torque_ax0)가
+                    // FamilyDedupWindow(2s) 내에 이미 이벤트를 기록했으면 KPI·테이블 스킵.
+                    string family     = GetSensorFamily(key);
+                    bool   familyOk   = !_lastFamilyEventTime.TryGetValue(family, out DateTime _ft)
+                                        || (DateTime.Now - _ft) >= FamilyDedupWindow;
+                    bool   shouldLog  = (!wasAnomaly || cooldownOk) && familyOk;
                     if (shouldLog)
                     {
+                        _lastFamilyEventTime[family] = DateTime.Now;
+
                         if (isDanger) Interlocked.Increment(ref cntDanger);
                         else          Interlocked.Increment(ref cntWarning);
                         cardDanger.ValueText  = cntDanger  + " 건";
@@ -5265,14 +5289,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                                              cLblState.ForeColor = cAnomaly ? Color.FromArgb(180, 25, 25) : Color.FromArgb(18, 120, 55); }
                     if (cLblScore != null) cLblScore.Text = $"{cRawScore:F3}";
 
-                    // 이상 이벤트 기록 (쿨다운 + 이벤트 카운트)
+                    // 이상 이벤트 기록 (쿨다운 + 패밀리 중복 억제 + 이벤트 카운트)
                     if (cAnomaly)
                     {
                         bool cWasAnom    = _prevAnomalyState.TryGetValue(chipKey, out bool _ca) && _ca;
                         bool cCooldownOk = !_lastAnomalyLogTime.TryGetValue(chipKey, out DateTime _ct)
                                            || (DateTime.Now - _ct) >= _anomalyLogCooldown;
-                        if (!cWasAnom || cCooldownOk)
+                        string cFamily   = GetSensorFamily(chipKey);
+                        bool cFamilyOk   = !_lastFamilyEventTime.TryGetValue(cFamily, out DateTime _cft)
+                                           || (DateTime.Now - _cft) >= FamilyDedupWindow;
+                        if ((!cWasAnom || cCooldownOk) && cFamilyOk)
                         {
+                            _lastFamilyEventTime[cFamily] = DateTime.Now;
                             string cLevel = cIsDanger ? "🔴 위험" : "🟡 경고";
                             if (cIsDanger) { Interlocked.Increment(ref cntDanger);  cardDanger.ValueText  = cntDanger  + " 건"; }
                             else           { Interlocked.Increment(ref cntWarning); cardWarning.ValueText = cntWarning + " 건"; }
