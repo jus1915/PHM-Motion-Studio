@@ -246,18 +246,27 @@ namespace PHM_Project_DockPanel.Services.Core
         /// </summary>
         public async Task<System.Collections.Generic.Dictionary<string, int>> GetModelInfoAsync()
         {
+            var full = await GetModelInfoFullAsync().ConfigureAwait(false);
+            if (full == null) return null;
+            var result = new System.Collections.Generic.Dictionary<string, int>();
+            foreach (var kv in full)
+                result[kv.Key] = kv.Value.WindowSize;
+            return result;
+        }
+
+        /// <summary>
+        /// /model_info 를 호출해 sensor_type → ModelWindowInfo 전체(window_size + activity_threshold)를 반환합니다.
+        /// 실패 시 null 반환.
+        /// </summary>
+        public async Task<System.Collections.Generic.Dictionary<string, ModelWindowInfo>> GetModelInfoFullAsync()
+        {
             try
             {
                 var resp = await _http.GetAsync("model_info").ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode) return null;
                 string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var raw = JsonConvert.DeserializeObject<
+                return JsonConvert.DeserializeObject<
                     System.Collections.Generic.Dictionary<string, ModelWindowInfo>>(body);
-                if (raw == null) return null;
-                var result = new System.Collections.Generic.Dictionary<string, int>();
-                foreach (var kv in raw)
-                    result[kv.Key] = kv.Value.WindowSize;
-                return result;
             }
             catch { return null; }
         }
@@ -444,12 +453,17 @@ namespace PHM_Project_DockPanel.Services.Core
     }
 
     // =========================================================================
-    //  ModelWindowInfo — /model_info 응답 DTO (sensor_type별 윈도우 크기)
+    //  ModelWindowInfo — /model_info 응답 DTO (sensor_type별 윈도우 크기 + 활동성 임계값)
     // =========================================================================
     public sealed class ModelWindowInfo
     {
-        [JsonProperty("window_size")] public int    WindowSize { get; set; } = 512;
-        [JsonProperty("source")]      public string Source     { get; set; } = "";
+        [JsonProperty("window_size")]        public int    WindowSize        { get; set; } = 512;
+        /// <summary>
+        /// 활동성 게이팅 임계값 (채널별 std 최댓값 기준).
+        /// 0.0 = 게이팅 미적용 (모델이 정지 구간도 포함해 학습된 경우).
+        /// </summary>
+        [JsonProperty("activity_threshold")] public double ActivityThreshold { get; set; } = 0.0;
+        [JsonProperty("source")]             public string Source             { get; set; } = "";
     }
 
     // =========================================================================

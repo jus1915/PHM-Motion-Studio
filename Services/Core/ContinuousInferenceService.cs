@@ -30,11 +30,24 @@ namespace PHM_Project_DockPanel.Services.Core
             = new System.Collections.Generic.Dictionary<string, int>();
         private int _intervalMs = DefaultIntervalMs;
 
+        // ── 활동성 임계값: sensor_type → activity_threshold (_meta.json 기반) ──
+        // 0.0 = 게이팅 없음 (정지 구간 포함 학습 모델).
+        // 0 초과 = ReadLastWindow에서 채널별 std 최댓값 < 이 값인 행을 제외.
+        private readonly System.Collections.Generic.Dictionary<string, double> _activityThresholds
+            = new System.Collections.Generic.Dictionary<string, double>();
+
         /// <summary>sensor_type별 window_size 반환. 서버 쿼리 전이거나 없으면 기본값.</summary>
         private int GetWindowSize(string sensorType)
         {
             int ws;
             return _windowSizes.TryGetValue(sensorType, out ws) ? ws : DefaultWindowSize;
+        }
+
+        /// <summary>sensor_type별 activity_threshold 반환. 없으면 0.0(필터 없음).</summary>
+        private double GetActivityThreshold(string sensorType)
+        {
+            double thr;
+            return _activityThresholds.TryGetValue(sensorType, out thr) ? thr : 0.0;
         }
 
         private int? _lastMovingAxis = null;
@@ -116,16 +129,19 @@ namespace PHM_Project_DockPanel.Services.Core
             _cts?.Cancel();
         }
 
-        /// <summary>서버 /model_info 를 조회해 _windowSizes, _intervalMs 를 갱신합니다.</summary>
+        /// <summary>서버 /model_info 를 조회해 _windowSizes, _activityThresholds, _intervalMs 를 갱신합니다.</summary>
         private async Task RefreshWindowSizesAsync(CancellationToken ct)
         {
             try
             {
-                var info = await _client.GetModelInfoAsync().ConfigureAwait(false);
+                var info = await _client.GetModelInfoFullAsync().ConfigureAwait(false);
                 if (info == null || info.Count == 0) return;
 
                 foreach (var kv in info)
-                    _windowSizes[kv.Key] = kv.Value;
+                {
+                    _windowSizes[kv.Key]          = kv.Value.WindowSize;
+                    _activityThresholds[kv.Key]   = kv.Value.ActivityThreshold;
+                }
 
                 // IntervalMs = 가장 작은 window_size / 2 (stride 50%)
                 int minWs = int.MaxValue;
@@ -136,7 +152,12 @@ namespace PHM_Project_DockPanel.Services.Core
                 AppEvents.RaiseLog(
                     "[추론] 윈도우 크기 동기화: " +
                     string.Join(", ", System.Linq.Enumerable.Select(
-                        _windowSizes, kv => $"{kv.Key}={kv.Value}")) +
+                        _windowSizes, kv =>
+                        {
+                            double act;
+                            _activityThresholds.TryGetValue(kv.Key, out act);
+                            return $"{kv.Key}=ws{kv.Value}/act{act:F4}";
+                        })) +
                     $"  intervalMs={_intervalMs}");
             }
             catch { /* 실패 시 기본값 유지 */ }
@@ -300,9 +321,10 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 // ── 1차 시도: 서버의 ae_combined / cls_combined 모델 사용 ──────────
                 int nCh;
-                int ws = GetWindowSize("combined");
+                int    ws     = GetWindowSize("combined");
+                double actThr = GetActivityThreshold("combined");
                 float[] window = ReadLastWindow(cp, "combined", ws, ax, out nCh,
-                    filterOp: false);   // 학습과 동일: Idle+Pos 전체 행 사용
+                    filterOp: false, activityThreshold: actThr);
 
                 bool serverSuccess = false;
                 if (window != null)
@@ -346,18 +368,16 @@ namespace PHM_Project_DockPanel.Services.Core
 
         /// <summary>
         /// AE 이상탐지 추론 — /predict 엔드포인트 사용.
-        /// 학습이 filter_op=None(Idle+Pos 전체)으로 수행되므로
-        /// 추론도 전체 행을 사용해야 threshold 기준이 일치함.
+        /// 학습 시 activity_percentile 필터로 제거된 정지 행을 추론에서도 동일하게 제외.
         /// </summary>
         private async Task RunAeInference(
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            // 학습: Idle+Pos 전체 → 추론도 전체 행 사용 (분포 일치)
-            bool filterOp = false;
-            int ws = GetWindowSize(sensorType);
+            int    ws     = GetWindowSize(sensorType);
+            double actThr = GetActivityThreshold(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: filterOp);
+                filterOp: false, activityThreshold: actThr);
             if (window == null) return;
 
             InferenceResult result = await _client.PredictAsync(
@@ -393,10 +413,11 @@ namespace PHM_Project_DockPanel.Services.Core
         {
             int nCh;
             // filterOp 명시 없으면: accel=false(전체), torque=true(Pos행만), combined=true(Pos행만)
-            bool useFilterOp = filterOp ?? (sensorType != "accel");
-            int ws = GetWindowSize(sensorType);
+            bool   useFilterOp = filterOp ?? (sensorType != "accel");
+            int    ws          = GetWindowSize(sensorType);
+            double actThr      = GetActivityThreshold(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: useFilterOp);
+                filterOp: useFilterOp, activityThreshold: actThr);
             if (window == null) return;
 
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
@@ -420,8 +441,9 @@ namespace PHM_Project_DockPanel.Services.Core
 
         /// <summary>
         /// CSV 끝 windowSize 행에서 신호 윈도우를 읽습니다.
-        /// filterOp=true: Op==Pos 행만 사용 (CLS용)
-        /// filterOp=false: 전체 행 사용 (AE용)
+        /// filterOp=true          : Op==Pos 행만 사용 (CLS용)
+        /// activityThreshold &gt; 0 : 채널별 std 최댓값 &lt; 임계값인 정지 행 제외 (학습과 동일 분포 유지)
+        ///   → 후보 행이 부족하면 null 반환 (해당 사이클 추론 스킵)
         /// 성공 시 float 배열 반환, 실패 시 null.
         /// </summary>
         private static float[] ReadLastWindow(
@@ -430,7 +452,8 @@ namespace PHM_Project_DockPanel.Services.Core
             int windowSize,
             int? axis,
             out int nChannels,
-            bool filterOp = true)
+            bool filterOp = true,
+            double activityThreshold = 0.0)
         {
             nChannels = 0;
             try
@@ -456,16 +479,46 @@ namespace PHM_Project_DockPanel.Services.Core
                 List<string> dataLines;
                 if (!filterOp)
                 {
-                    // AE: 모든 행 사용
                     dataLines = new List<string>(lines.Length - 1);
                     for (int li = 1; li < lines.Length; li++)
                         dataLines.Add(lines[li]);
                 }
                 else
                 {
-                    // CLS: Op==Pos 행만 사용
-                    // axis 지정 시: Op_Ax{n} 컬럼 / null 시: 임의의 Op_Ax* 컬럼 중 하나라도 Pos
                     dataLines = FilterPosByOp(lines, headers, axis);
+                }
+
+                // ── 활동성 필터 (activityThreshold > 0일 때만 적용) ──────
+                // 학습: max(std per channel) < percentile_threshold 인 윈도우 제거
+                // 추론: 동일 기준을 행 단위로 적용 — 충분히 활성인 행만 사용
+                // 구현: CSV 끝에서 최대 windowSize*4 행을 읽고,
+                //        각 행의 신호값 절댓값이 threshold를 넘는 행만 유지.
+                // (행별 max(|x|) ≈ std 대리변수 — 계산 간단, 정지 판별에 충분)
+                if (activityThreshold > 0.0 && dataLines.Count > 0)
+                {
+                    // 끝에서 최대 windowSize*4 후보만 검사 (전체 CSV를 다 순회하지 않음)
+                    int scanStart = Math.Max(0, dataLines.Count - windowSize * 4);
+                    var activeLines = new List<string>(windowSize * 2);
+                    for (int li = scanStart; li < dataLines.Count; li++)
+                    {
+                        string[] cols = dataLines[li].Split(',');
+                        // 신호 채널 중 하나라도 |값| > threshold 이면 활성 행
+                        bool active = false;
+                        foreach (int ci in signalCols)
+                        {
+                            float v;
+                            if (ci < cols.Length &&
+                                float.TryParse(cols[ci], NumberStyles.Float,
+                                    CultureInfo.InvariantCulture, out v) &&
+                                Math.Abs(v) >= activityThreshold)
+                            {
+                                active = true;
+                                break;
+                            }
+                        }
+                        if (active) activeLines.Add(dataLines[li]);
+                    }
+                    dataLines = activeLines;
                 }
 
                 if (dataLines.Count < windowSize) return null;
