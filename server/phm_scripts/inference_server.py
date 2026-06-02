@@ -520,57 +520,67 @@ def reload_models():
 
 @app.get("/model_info")
 def model_info():
-    """각 sensor_type의 모델 메타 정보(window_size 등)를 반환합니다.
+    """각 sensor_type의 모델 메타 정보(window_size, activity_threshold 등)를 반환합니다.
 
-    전역 모델 + per-axis 모델 모두 스캔해 **최대 window_size** 를 반환합니다.
-    클라이언트는 이 값만큼 버퍼를 쌓아야 모든 축 모델에 충분한 데이터를 보낼 수 있습니다.
+    전역 모델 + per-axis 모델 모두 스캔해 **최대 window_size** 와
+    **최솟값 activity_threshold** (0 = 게이팅 미적용)를 반환합니다.
+    클라이언트는 window_size 만큼 활성 행을 버퍼링하고,
+    activity_threshold 미만 행은 제외해야 학습 분포와 일치합니다.
     (ONNX 모델을 새로 로드하지 않으므로 빠르게 응답합니다.)
     """
-    def _read_ws_from_meta(fname: str) -> Optional[int]:
-        """메타 파일에서 window_size 를 읽어 반환. 없으면 None."""
+    def _read_meta(fname: str) -> dict:
+        """메타 파일을 읽어 dict 반환. 없으면 {}."""
         meta_path = _models_root() / fname.replace(".onnx", "_meta.json")
         if not meta_path.exists():
-            return None
+            return {}
         try:
-            return int(json.loads(meta_path.read_text(encoding="utf-8")).get("window_size", 0)) or None
+            return json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
-            return None
+            return {}
 
     result = {}
     all_sensor_types = list(_FALLBACK_CANDIDATES.keys())  # ["accel", "torque", ...]
 
     for sensor_type in all_sensor_types:
-        max_ws: int = 0
-        source: str = "default"
+        max_ws: int   = 0
+        # activity_threshold: 모델별로 다를 수 있으므로 최솟값(가장 엄격하지 않은 쪽) 사용.
+        # 0.0 = 게이팅 미적용 모델이 하나라도 있으면 클라이언트도 필터 비활성화.
+        min_act: float = float("inf")   # 아직 못 읽으면 inf
+        source: str   = "default"
+
+        def _update(meta: dict, src: str):
+            nonlocal max_ws, min_act, source
+            ws  = int(meta.get("window_size", 0))
+            act = float(meta.get("activity_threshold", 0.0))
+            if ws > max_ws:
+                max_ws = ws
+                source = src
+            # activity_threshold=0 이면 게이팅 없음 → 클라이언트도 비활성화
+            if act == 0.0:
+                min_act = 0.0
+            elif act < min_act:
+                min_act = act
 
         # ① 캐시에 로드된 세션 스캔 (전역 + per-axis)
         for key, (_, meta) in list(_sessions.items()):
             if not key.startswith(sensor_type):
                 continue
-            ws = int(meta.get("window_size", 0))
-            if ws > max_ws:
-                max_ws = ws
-                source = "cache"
+            _update(meta, "cache")
 
         # ② 메타 파일 스캔 — 전역 폴백 후보
         for fname in _FALLBACK_CANDIDATES.get(sensor_type, []):
-            ws = _read_ws_from_meta(fname)
-            if ws and ws > max_ws:
-                max_ws = ws
-                source = "meta_file"
+            _update(_read_meta(fname), "meta_file")
 
         # ③ per-axis 메타 파일 스캔 (캐시 미로드 축 포함)
         for ax in range(_MAX_AXIS_SCAN):
             for fname in _per_axis_candidates(sensor_type, ax):
-                ws = _read_ws_from_meta(fname)
-                if ws and ws > max_ws:
-                    max_ws = ws
-                    source = "meta_file_peraxis"
+                _update(_read_meta(fname), "meta_file_peraxis")
                 break   # 해당 축의 최우선 후보만
 
         result[sensor_type] = {
-            "window_size": max_ws if max_ws > 0 else 512,
-            "source": source if max_ws > 0 else "default",
+            "window_size":        max_ws  if max_ws  > 0             else 512,
+            "activity_threshold": min_act if min_act < float("inf")  else 0.0,
+            "source":             source  if max_ws  > 0             else "default",
         }
 
     return result
