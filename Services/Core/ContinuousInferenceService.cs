@@ -351,24 +351,23 @@ namespace PHM_Project_DockPanel.Services.Core
                 float[] window = ReadLastWindow(cp, "combined", ws, ax, out nCh,
                     filterOp: false, activityThreshold: actThr);
 
-                // ── 윈도우 상태 분류 (combined: accel+torque 모두 반영) ───────────
+                // ── 윈도우 상태 분류 (서버 동기화 후에만 적용) ───────────────
                 bool serverSuccess = false;
                 if (window != null)
                 {
-                    int[] accelIdx, torqueIdx;
-                    WindowStateClassifier.GetChannelRoles("combined", nCh, out accelIdx, out torqueIdx);
-                    WindowStateThresholds stateThr = GetStateThresholds("combined");
-                    WindowFeatures        features = WindowStateClassifier.ComputeFeatures(
-                        window, ws, nCh, accelIdx, torqueIdx, stateThr);
-                    WindowState           winState = WindowStateClassifier.Classify(features, stateThr);
-
-                    AppEvents.RaiseWindowState("combined", ax, winState, features);
-
-                    // Motion 상태가 아니면 combined AE/CLS 추론 스킵
-                    if (winState != WindowState.Motion)
+                    WindowStateThresholds stateThrC;
+                    if (_stateThresholds.TryGetValue("combined", out stateThrC))
                     {
-                        // Idle/Ambiguous 구간: 개별 AE 스코어 폴백도 스킵
-                        continue;
+                        int[] accelIdx, torqueIdx;
+                        WindowStateClassifier.GetChannelRoles("combined", nCh, out accelIdx, out torqueIdx);
+                        WindowFeatures features = WindowStateClassifier.ComputeFeatures(
+                            window, ws, nCh, accelIdx, torqueIdx, stateThrC);
+                        WindowState winState = WindowStateClassifier.Classify(features, stateThrC);
+
+                        AppEvents.RaiseWindowState("combined", ax, winState, features);
+
+                        if (winState != WindowState.Motion)
+                            continue;  // Idle/Ambiguous — 추론 스킵
                     }
                 }
 
@@ -427,26 +426,30 @@ namespace PHM_Project_DockPanel.Services.Core
                 filterOp: false, activityThreshold: actThr);
             if (window == null) return;
 
-            // ── 윈도우 상태 분류 ──────────────────────────────────────────────
-            // GetChannelRoles: sensorType에서 accel/torque 채널 인덱스를 직접 추론
-            //   "accel"    → accelIdx=[0,1,2],  torqueIdx=[]
-            //   "torque"   → accelIdx=[],        torqueIdx=[0..nCh-1]
-            //   "combined" → accelIdx=[0,1,2],   torqueIdx=[3..nCh-1]
-            int[] accelIdx, torqueIdx;
-            WindowStateClassifier.GetChannelRoles(sensorType, nCh, out accelIdx, out torqueIdx);
+            // ── 윈도우 상태 분류 (서버 동기화 후에만 적용) ───────────────────
+            // _stateThresholds 는 RefreshWindowSizesAsync 에서 /model_info 를 통해
+            // 학습 데이터 기반 ref값을 받아야 채워진다.
+            // 재학습 전(서버 메타 없음)에는 기본값으로 분류하면 오탐이 발생하므로
+            // 해당 sensor_type 의 임계값이 명시적으로 로드된 경우에만 게이팅 적용.
+            WindowStateThresholds stateThr;
+            if (_stateThresholds.TryGetValue(sensorType, out stateThr))
+            {
+                int[] accelIdx, torqueIdx;
+                WindowStateClassifier.GetChannelRoles(sensorType, nCh, out accelIdx, out torqueIdx);
 
-            WindowStateThresholds stateThr  = GetStateThresholds(sensorType);
-            WindowFeatures        features  = WindowStateClassifier.ComputeFeatures(
-                window, ws, nCh, accelIdx, torqueIdx, stateThr);
-            WindowState           winState  = WindowStateClassifier.Classify(features, stateThr);
+                WindowFeatures features = WindowStateClassifier.ComputeFeatures(
+                    window, ws, nCh, accelIdx, torqueIdx, stateThr);
+                WindowState winState = WindowStateClassifier.Classify(features, stateThr);
 
-            // 상태 이벤트 발행 (Dashboard / 로그 표시용)
-            AppEvents.RaiseWindowState(sensorType, axis, winState, features);
+                // 상태 이벤트 발행 (Dashboard / 로그 표시용)
+                AppEvents.RaiseWindowState(sensorType, axis, winState, features);
 
-            // Motion 상태가 아니면 AE 추론 스킵
-            // - Idle      : 정지 구간, rule 기반 감시만 수행
-            // - Ambiguous : 경계 구간, 학습/알람에서 제외
-            if (winState != WindowState.Motion) return;
+                // Motion 상태가 아니면 AE 추론 스킵
+                // - Idle      : 정지 구간, rule 기반 감시만 수행
+                // - Ambiguous : 경계 구간, 학습/알람에서 제외
+                if (winState != WindowState.Motion) return;
+            }
+            // 임계값 미로드 시: 기존 activityThreshold 행 필터만 적용 (ReadLastWindow 내부)
 
             InferenceResult result = await _client.PredictAsync(
                 window, ws, nCh, sensorType, axis, ct);
