@@ -60,7 +60,29 @@ from pydantic import BaseModel
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 _MODELS_BASE    = Path(os.getenv("PHM__models_root()", "/opt/phm/models"))
-_active_profile: str = "default"
+_PROFILE_STATE_FILE = _MODELS_BASE / ".active_profile"  # 컨테이너 재시작 간 프로파일 유지
+
+def _load_persisted_profile() -> str:
+    """컨테이너 재시작 후에도 마지막 활성 프로파일을 복원합니다."""
+    try:
+        if _PROFILE_STATE_FILE.exists():
+            profile = _PROFILE_STATE_FILE.read_text(encoding="utf-8").strip()
+            if profile and (_MODELS_BASE / profile).is_dir():
+                print(f"[inference] 저장된 프로파일 복원: {profile!r}", flush=True)
+                return profile
+    except Exception:
+        pass
+    return "default"
+
+def _save_active_profile(profile: str) -> None:
+    """활성 프로파일을 디스크에 저장합니다."""
+    try:
+        _MODELS_BASE.mkdir(parents=True, exist_ok=True)
+        _PROFILE_STATE_FILE.write_text(profile, encoding="utf-8")
+    except Exception:
+        pass
+
+_active_profile: str = _load_persisted_profile()
 
 # ── 런타임 튜닝 가능 스코어링 파라미터 ────────────────────────────────────────
 # GET /config 로 조회, POST /config 로 변경 가능
@@ -682,6 +704,7 @@ def activate_profile(req: ProfileActivateRequest):
     old_profile     = _active_profile
     _active_profile = req.profile
     _sessions.clear()   # 캐시 클리어 → 다음 /predict 시 새 경로에서 로드
+    _save_active_profile(_active_profile)  # 컨테이너 재시작 후에도 복원
 
     print(f"[inference] 프로파일 전환: {old_profile!r} → {_active_profile!r}  "
           f"모델 경로: {_models_root()}", flush=True)
