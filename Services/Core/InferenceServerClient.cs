@@ -239,13 +239,26 @@ namespace PHM_Project_DockPanel.Services.Core
             }
         }
 
-        // ── 모델 윈도우 크기 + 활동성 필터 임계값 조회 ───────────────────────
+        // ── 모델 윈도우 크기 조회 ─────────────────────────────────────────────
         /// <summary>
-        /// /model_info 를 호출해 sensor_type → ModelWindowInfo 매핑을 반환합니다.
-        /// ModelWindowInfo 에 window_size 와 activity_rms_thr 가 모두 포함됩니다.
+        /// /model_info 를 호출해 sensor_type → window_size 매핑을 반환합니다.
         /// 실패 시 null 반환 (호출 측에서 기본값 사용).
         /// </summary>
-        public async Task<System.Collections.Generic.Dictionary<string, ModelWindowInfo>> GetModelInfoAsync()
+        public async Task<System.Collections.Generic.Dictionary<string, int>> GetModelInfoAsync()
+        {
+            var full = await GetModelInfoFullAsync().ConfigureAwait(false);
+            if (full == null) return null;
+            var result = new System.Collections.Generic.Dictionary<string, int>();
+            foreach (var kv in full)
+                result[kv.Key] = kv.Value.WindowSize;
+            return result;
+        }
+
+        /// <summary>
+        /// /model_info 를 호출해 sensor_type → ModelWindowInfo 전체(window_size + activity_threshold)를 반환합니다.
+        /// 실패 시 null 반환.
+        /// </summary>
+        public async Task<System.Collections.Generic.Dictionary<string, ModelWindowInfo>> GetModelInfoFullAsync()
         {
             try
             {
@@ -352,26 +365,6 @@ namespace PHM_Project_DockPanel.Services.Core
         public static InferenceResult Fail(string error) =>
             new InferenceResult { Error = error };
 
-        /// <summary>
-        /// 활동성 필터에 의해 Idle로 판정된 윈도우 결과.
-        /// IsAnomaly=false, AnomalyScore=0, IsIdle=true.
-        /// UI 차트는 0점으로 유지되고 이상 판정은 하지 않습니다.
-        /// </summary>
-        public static InferenceResult Idle(string sensorType, int? axis) =>
-            new InferenceResult
-            {
-                SensorType   = sensorType ?? "",
-                Axis         = axis,
-                IsAnomaly    = false,
-                AnomalyScore = 0f,
-                Threshold    = 1.0f,
-                ClassName    = "idle",
-                IsIdle       = true,
-            };
-
-        /// <summary>activity_rms_thr 에 의해 Idle로 판정된 윈도우임을 나타냅니다.</summary>
-        [JsonIgnore] public bool IsIdle { get; set; }
-
         /// <summary>서버에 모델이 없는 경우 (HTTP 404 또는 캐시 hit) 반환되는 결과.</summary>
         public static InferenceResult MissingModel(string sensorType, int? axis)
         {
@@ -460,18 +453,29 @@ namespace PHM_Project_DockPanel.Services.Core
     }
 
     // =========================================================================
-    //  ModelWindowInfo — /model_info 응답 DTO (sensor_type별 윈도우 크기 + 활동성 필터)
+    //  ModelWindowInfo — /model_info 응답 DTO (sensor_type별 윈도우 크기 + 활동성 임계값)
     // =========================================================================
     public sealed class ModelWindowInfo
     {
-        [JsonProperty("window_size")]        public int    WindowSize      { get; set; } = 512;
-        [JsonProperty("source")]             public string Source          { get; set; } = "";
+        [JsonProperty("window_size")]        public int    WindowSize        { get; set; } = 512;
         /// <summary>
-        /// 훈련 시 activity_filter_quantile 로 계산된 RMS 하한값.
-        /// 추론 윈도우 RMS 가 이 값 미만이면 Idle로 간주해 추론을 건너뜁니다.
-        /// 0.0 이면 필터 비활성 (전체 윈도우 추론).
+        /// 활동성 게이팅 임계값 (채널별 std 최댓값 기준).
+        /// 0.0 = 게이팅 미적용 (모델이 정지 구간도 포함해 학습된 경우).
         /// </summary>
-        [JsonProperty("activity_rms_thr")]   public double ActivityRmsThr  { get; set; } = 0.0;
+        [JsonProperty("activity_threshold")] public double ActivityThreshold { get; set; } = 0.0;
+        [JsonProperty("source")]             public string Source             { get; set; } = "";
+
+        // ── 윈도우 상태 분류 파라미터 (학습 파이프라인에서 저장, 없으면 기본값) ──
+        /// <summary>motion_score 이상이면 Motion으로 분류</summary>
+        [JsonProperty("motion_score_threshold")] public double MotionScoreThreshold  { get; set; } = 0.25;
+        /// <summary>motion_score 이하이면 Idle로 분류</summary>
+        [JsonProperty("idle_score_threshold")]   public double IdleScoreThreshold    { get; set; } = 0.05;
+        /// <summary>acc_mag_rms 정규화 기준 (학습 데이터 통계)</summary>
+        [JsonProperty("ref_acc_mag_rms")]        public double RefAccMagRms          { get; set; } = 0.5;
+        /// <summary>trq_detrended_rms 정규화 기준 (학습 데이터 통계)</summary>
+        [JsonProperty("ref_trq_detrended_rms")]  public double RefTrqDetrendedRms    { get; set; } = 5.0;
+        /// <summary>trq_peak_to_peak_max 정규화 기준 (학습 데이터 통계)</summary>
+        [JsonProperty("ref_trq_p2p_max")]        public double RefTrqPeakToPeakMax   { get; set; } = 10.0;
     }
 
     // =========================================================================

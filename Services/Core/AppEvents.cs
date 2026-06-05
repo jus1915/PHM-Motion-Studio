@@ -107,6 +107,18 @@ namespace PHM_Project_DockPanel.Services
         public static void RaiseClsInferenceResult(string sensorType, CombinedInferenceResult result)
             => ClsInferenceResultReceived?.Invoke(sensorType, result);
 
+        // ── 윈도우 상태 분류 결과 ─────────────────────────────────────────────
+        /// <summary>
+        /// ContinuousInferenceService 가 윈도우 상태를 분류했을 때 발생합니다.
+        /// sensorType = "accel" | "torque" | "combined"
+        /// state      = Idle | Motion | Ambiguous
+        /// features   = 계산된 특징값 (motion_score, acc_mag_rms 등)
+        /// </summary>
+        public static event Action<string, int?, WindowState, WindowFeatures> WindowStateChanged;
+        public static void RaiseWindowState(
+            string sensorType, int? axis, WindowState state, WindowFeatures features)
+            => WindowStateChanged?.Invoke(sensorType, axis, state, features);
+
         // ── 실시간 신호 모니터 (RealtimeSignalForm) ──────────────────────────
         /// <summary>
         /// 가속도 블록 수신 — 비UI 스레드에서 발생.

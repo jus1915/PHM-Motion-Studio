@@ -30,9 +30,17 @@ namespace PHM_Project_DockPanel.Services.Core
             = new System.Collections.Generic.Dictionary<string, int>();
         private int _intervalMs = DefaultIntervalMs;
 
-        /// <summary>sensor_type별 activity_rms_thr 캐시. 0.0 이면 필터 비활성.</summary>
-        private readonly System.Collections.Generic.Dictionary<string, double> _activityRmsThresholds
+        // ── 활동성 임계값: sensor_type → activity_threshold (_meta.json 기반) ──
+        // 0.0 = 게이팅 없음 (정지 구간 포함 학습 모델).
+        // 0 초과 = ReadLastWindow에서 채널별 std 최댓값 < 이 값인 행을 제외.
+        private readonly System.Collections.Generic.Dictionary<string, double> _activityThresholds
             = new System.Collections.Generic.Dictionary<string, double>();
+
+        // ── 윈도우 상태 분류 임계값: sensor_type → WindowStateThresholds ─────
+        // 서버 /model_info 에서 학습 파이프라인 통계 기반 값을 동기화.
+        // 없으면 WindowStateThresholds 기본값 사용.
+        private readonly System.Collections.Generic.Dictionary<string, WindowStateThresholds> _stateThresholds
+            = new System.Collections.Generic.Dictionary<string, WindowStateThresholds>();
 
         /// <summary>sensor_type별 window_size 반환. 서버 쿼리 전이거나 없으면 기본값.</summary>
         private int GetWindowSize(string sensorType)
@@ -41,11 +49,20 @@ namespace PHM_Project_DockPanel.Services.Core
             return _windowSizes.TryGetValue(sensorType, out ws) ? ws : DefaultWindowSize;
         }
 
-        /// <summary>sensor_type별 activity_rms_thr 반환. 캐시 없으면 0.0 (필터 비활성).</summary>
-        private double GetActivityRmsThr(string sensorType)
+        /// <summary>sensor_type별 activity_threshold 반환. 없으면 0.0(필터 없음).</summary>
+        private double GetActivityThreshold(string sensorType)
         {
             double thr;
-            return _activityRmsThresholds.TryGetValue(sensorType, out thr) ? thr : 0.0;
+            return _activityThresholds.TryGetValue(sensorType, out thr) ? thr : 0.0;
+        }
+
+        /// <summary>sensor_type별 WindowStateThresholds 반환. 없으면 기본값.</summary>
+        private WindowStateThresholds GetStateThresholds(string sensorType)
+        {
+            WindowStateThresholds thr;
+            return _stateThresholds.TryGetValue(sensorType, out thr)
+                ? thr
+                : new WindowStateThresholds();
         }
 
         private int? _lastMovingAxis = null;
@@ -127,18 +144,28 @@ namespace PHM_Project_DockPanel.Services.Core
             _cts?.Cancel();
         }
 
-        /// <summary>서버 /model_info 를 조회해 _windowSizes, _activityRmsThresholds, _intervalMs 를 갱신합니다.</summary>
+        /// <summary>서버 /model_info 를 조회해 _windowSizes, _activityThresholds, _intervalMs 를 갱신합니다.</summary>
         private async Task RefreshWindowSizesAsync(CancellationToken ct)
         {
             try
             {
-                var info = await _client.GetModelInfoAsync().ConfigureAwait(false);
+                var info = await _client.GetModelInfoFullAsync().ConfigureAwait(false);
                 if (info == null || info.Count == 0) return;
 
                 foreach (var kv in info)
                 {
-                    _windowSizes[kv.Key]           = kv.Value.WindowSize;
-                    _activityRmsThresholds[kv.Key] = kv.Value.ActivityRmsThr;
+                    _windowSizes[kv.Key]          = kv.Value.WindowSize;
+                    _activityThresholds[kv.Key]   = kv.Value.ActivityThreshold;
+
+                    // 학습 파이프라인에서 저장한 윈도우 상태 분류 파라미터 동기화
+                    _stateThresholds[kv.Key] = new WindowStateThresholds
+                    {
+                        MotionScoreThreshold = kv.Value.MotionScoreThreshold,
+                        IdleScoreThreshold   = kv.Value.IdleScoreThreshold,
+                        RefAccMagRms         = kv.Value.RefAccMagRms,
+                        RefTrqDetrendedRms   = kv.Value.RefTrqDetrendedRms,
+                        RefTrqPeakToPeakMax  = kv.Value.RefTrqPeakToPeakMax,
+                    };
                 }
 
                 // IntervalMs = 가장 작은 window_size / 2 (stride 50%)
@@ -150,15 +177,13 @@ namespace PHM_Project_DockPanel.Services.Core
                 AppEvents.RaiseLog(
                     "[추론] 윈도우 크기 동기화: " +
                     string.Join(", ", System.Linq.Enumerable.Select(
-                        _windowSizes, kv => $"{kv.Key}={kv.Value}")) +
+                        _windowSizes, kv =>
+                        {
+                            double act;
+                            _activityThresholds.TryGetValue(kv.Key, out act);
+                            return $"{kv.Key}=ws{kv.Value}/act{act:F4}";
+                        })) +
                     $"  intervalMs={_intervalMs}");
-
-                // activity_rms_thr 가 0 초과인 항목만 로그 출력
-                foreach (var kv in _activityRmsThresholds)
-                    if (kv.Value > 0.0)
-                        AppEvents.RaiseLog(
-                            $"[추론] activity_rms_thr 동기화: {kv.Key}={kv.Value:F6} " +
-                            "(RMS 미만 윈도우는 Idle로 간주해 추론 건너뜀)");
             }
             catch { /* 실패 시 기본값 유지 */ }
         }
@@ -321,11 +346,32 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 // ── 1차 시도: 서버의 ae_combined / cls_combined 모델 사용 ──────────
                 int nCh;
-                int ws = GetWindowSize("combined");
+                int    ws     = GetWindowSize("combined");
+                double actThr = GetActivityThreshold("combined");
                 float[] window = ReadLastWindow(cp, "combined", ws, ax, out nCh,
-                    filterOp: false);   // 학습과 동일: Idle+Pos 전체 행 사용
+                    filterOp: false, activityThreshold: actThr);
 
+                // ── 윈도우 상태 분류 (combined: accel+torque 모두 반영) ───────────
                 bool serverSuccess = false;
+                if (window != null)
+                {
+                    int[] accelIdx, torqueIdx;
+                    WindowStateClassifier.GetChannelRoles("combined", nCh, out accelIdx, out torqueIdx);
+                    WindowStateThresholds stateThr = GetStateThresholds("combined");
+                    WindowFeatures        features = WindowStateClassifier.ComputeFeatures(
+                        window, ws, nCh, accelIdx, torqueIdx, stateThr);
+                    WindowState           winState = WindowStateClassifier.Classify(features, stateThr);
+
+                    AppEvents.RaiseWindowState("combined", ax, winState, features);
+
+                    // Motion 상태가 아니면 combined AE/CLS 추론 스킵
+                    if (winState != WindowState.Motion)
+                    {
+                        // Idle/Ambiguous 구간: 개별 AE 스코어 폴백도 스킵
+                        continue;
+                    }
+                }
+
                 if (window != null)
                 {
                     CombinedInferenceResult combined = await _client.PredictCombinedAsync(
@@ -367,32 +413,40 @@ namespace PHM_Project_DockPanel.Services.Core
 
         /// <summary>
         /// AE 이상탐지 추론 — /predict 엔드포인트 사용.
-        /// activity_rms_thr 가 설정된 경우 윈도우 RMS 를 먼저 계산하고,
-        /// 임계값 미만이면 Idle로 간주해 추론을 건너뜁니다 (훈련 조건과 일치).
+        /// 1) 마지막 windowSize 행 읽기
+        /// 2) 윈도우 상태 분류 (idle/motion/ambiguous)
+        /// 3) Motion 상태일 때만 서버 AE 추론 실행
         /// </summary>
         private async Task RunAeInference(
             string csvPath, string sensorType, int? axis, CancellationToken ct)
         {
             int nCh;
-            int ws = GetWindowSize(sensorType);
-            // 학습: Idle+Pos 전체 → 추론도 전체 행 사용 (분포 일치)
+            int    ws     = GetWindowSize(sensorType);
+            double actThr = GetActivityThreshold(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: false);
+                filterOp: false, activityThreshold: actThr);
             if (window == null) return;
 
-            // ── Activity 필터: RMS < activity_rms_thr 이면 Idle 윈도우로 간주 ──
-            double actThr = GetActivityRmsThr(sensorType);
-            if (actThr > 0.0)
-            {
-                double rms = ComputeWindowRms(window);
-                if (rms < actThr)
-                {
-                    // Idle 윈도우 — 추론 건너뜀, score=0 으로 UI 갱신
-                    AppEvents.RaiseInferenceResult(sensorType,
-                        InferenceResult.Idle(sensorType, axis));
-                    return;
-                }
-            }
+            // ── 윈도우 상태 분류 ──────────────────────────────────────────────
+            // GetChannelRoles: sensorType에서 accel/torque 채널 인덱스를 직접 추론
+            //   "accel"    → accelIdx=[0,1,2],  torqueIdx=[]
+            //   "torque"   → accelIdx=[],        torqueIdx=[0..nCh-1]
+            //   "combined" → accelIdx=[0,1,2],   torqueIdx=[3..nCh-1]
+            int[] accelIdx, torqueIdx;
+            WindowStateClassifier.GetChannelRoles(sensorType, nCh, out accelIdx, out torqueIdx);
+
+            WindowStateThresholds stateThr  = GetStateThresholds(sensorType);
+            WindowFeatures        features  = WindowStateClassifier.ComputeFeatures(
+                window, ws, nCh, accelIdx, torqueIdx, stateThr);
+            WindowState           winState  = WindowStateClassifier.Classify(features, stateThr);
+
+            // 상태 이벤트 발행 (Dashboard / 로그 표시용)
+            AppEvents.RaiseWindowState(sensorType, axis, winState, features);
+
+            // Motion 상태가 아니면 AE 추론 스킵
+            // - Idle      : 정지 구간, rule 기반 감시만 수행
+            // - Ambiguous : 경계 구간, 학습/알람에서 제외
+            if (winState != WindowState.Motion) return;
 
             InferenceResult result = await _client.PredictAsync(
                 window, ws, nCh, sensorType, axis, ct);
@@ -427,10 +481,11 @@ namespace PHM_Project_DockPanel.Services.Core
         {
             int nCh;
             // filterOp 명시 없으면: accel=false(전체), torque=true(Pos행만), combined=true(Pos행만)
-            bool useFilterOp = filterOp ?? (sensorType != "accel");
-            int ws = GetWindowSize(sensorType);
+            bool   useFilterOp = filterOp ?? (sensorType != "accel");
+            int    ws          = GetWindowSize(sensorType);
+            double actThr      = GetActivityThreshold(sensorType);
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
-                filterOp: useFilterOp);
+                filterOp: useFilterOp, activityThreshold: actThr);
             if (window == null) return;
 
             CombinedInferenceResult combined = await _client.PredictCombinedAsync(
@@ -454,8 +509,9 @@ namespace PHM_Project_DockPanel.Services.Core
 
         /// <summary>
         /// CSV 끝 windowSize 행에서 신호 윈도우를 읽습니다.
-        /// filterOp=true: Op==Pos 행만 사용 (CLS용)
-        /// filterOp=false: 전체 행 사용 (AE용)
+        /// filterOp=true          : Op==Pos 행만 사용 (CLS용)
+        /// activityThreshold &gt; 0 : 채널별 std 최댓값 &lt; 임계값인 정지 행 제외 (학습과 동일 분포 유지)
+        ///   → 후보 행이 부족하면 null 반환 (해당 사이클 추론 스킵)
         /// 성공 시 float 배열 반환, 실패 시 null.
         /// </summary>
         private static float[] ReadLastWindow(
@@ -464,7 +520,8 @@ namespace PHM_Project_DockPanel.Services.Core
             int windowSize,
             int? axis,
             out int nChannels,
-            bool filterOp = true)
+            bool filterOp = true,
+            double activityThreshold = 0.0)
         {
             nChannels = 0;
             try
@@ -490,16 +547,46 @@ namespace PHM_Project_DockPanel.Services.Core
                 List<string> dataLines;
                 if (!filterOp)
                 {
-                    // AE: 모든 행 사용
                     dataLines = new List<string>(lines.Length - 1);
                     for (int li = 1; li < lines.Length; li++)
                         dataLines.Add(lines[li]);
                 }
                 else
                 {
-                    // CLS: Op==Pos 행만 사용
-                    // axis 지정 시: Op_Ax{n} 컬럼 / null 시: 임의의 Op_Ax* 컬럼 중 하나라도 Pos
                     dataLines = FilterPosByOp(lines, headers, axis);
+                }
+
+                // ── 활동성 필터 (activityThreshold > 0일 때만 적용) ──────
+                // 학습: max(std per channel) < percentile_threshold 인 윈도우 제거
+                // 추론: 동일 기준을 행 단위로 적용 — 충분히 활성인 행만 사용
+                // 구현: CSV 끝에서 최대 windowSize*4 행을 읽고,
+                //        각 행의 신호값 절댓값이 threshold를 넘는 행만 유지.
+                // (행별 max(|x|) ≈ std 대리변수 — 계산 간단, 정지 판별에 충분)
+                if (activityThreshold > 0.0 && dataLines.Count > 0)
+                {
+                    // 끝에서 최대 windowSize*4 후보만 검사 (전체 CSV를 다 순회하지 않음)
+                    int scanStart = Math.Max(0, dataLines.Count - windowSize * 4);
+                    var activeLines = new List<string>(windowSize * 2);
+                    for (int li = scanStart; li < dataLines.Count; li++)
+                    {
+                        string[] cols = dataLines[li].Split(',');
+                        // 신호 채널 중 하나라도 |값| > threshold 이면 활성 행
+                        bool active = false;
+                        foreach (int ci in signalCols)
+                        {
+                            float v;
+                            if (ci < cols.Length &&
+                                float.TryParse(cols[ci], NumberStyles.Float,
+                                    CultureInfo.InvariantCulture, out v) &&
+                                Math.Abs(v) >= activityThreshold)
+                            {
+                                active = true;
+                                break;
+                            }
+                        }
+                        if (active) activeLines.Add(dataLines[li]);
+                    }
+                    dataLines = activeLines;
                 }
 
                 if (dataLines.Count < windowSize) return null;
@@ -533,19 +620,6 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 return null;
             }
-        }
-
-        /// <summary>
-        /// 평탄화된 윈도우 배열의 전채널 RMS를 계산합니다.
-        /// window: [t0c0, t0c1, … t1c0, …]  길이 = windowSize × nChannels
-        /// </summary>
-        private static double ComputeWindowRms(float[] window)
-        {
-            if (window == null || window.Length == 0) return 0.0;
-            double sum = 0.0;
-            for (int i = 0; i < window.Length; i++)
-                sum += (double)window[i] * window[i];
-            return Math.Sqrt(sum / window.Length);
         }
 
         /// <summary>
