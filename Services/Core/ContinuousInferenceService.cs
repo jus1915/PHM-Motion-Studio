@@ -190,13 +190,21 @@ namespace PHM_Project_DockPanel.Services.Core
 
         private async Task LoopAsync(CancellationToken ct)
         {
-            // 루프 시작 전 서버에서 window_size 동기화 (재학습 후 자동 반영)
+            // 루프 시작 전 서버에서 window_size / 상태 분류 임계값 동기화
             await RefreshWindowSizesAsync(ct);
+
+            const int RefreshEveryN = 120;  // 약 60초마다 재동기화 (intervalMs≈500ms 기준)
+            int loopCount = 0;
 
             while (!ct.IsCancellationRequested)
             {
                 try { await Task.Delay(_intervalMs, ct); }
                 catch { break; }
+
+                // 주기적으로 서버에서 임계값 재동기화
+                // 프로파일 전환·재학습 후 자동 반영 (컨테이너 재시작 포함)
+                if (++loopCount % RefreshEveryN == 0)
+                    await RefreshWindowSizesAsync(ct);
 
                 // ── (1) AE 추론: Idle/Pos 무관하게 항상 실행 ──────────────────
                 //   • 가속도: 단일 센서 → axis = null, Op 필터 없음
@@ -437,23 +445,15 @@ namespace PHM_Project_DockPanel.Services.Core
                 int[] accelIdx, torqueIdx;
                 WindowStateClassifier.GetChannelRoles(sensorType, nCh, out accelIdx, out torqueIdx);
 
-                // accel-only 모델(torque 채널 없음)은 motion_score 게이팅 제외.
-                // torque dynamic 이 없으면 acc_mag_rms 만으로는 정지/구동 판별이
-                // 어렵고, 기본 ref값(0.5g)과 실제 센서값(~0.02g) 격차로
-                // 항상 Idle 판정되는 false-filtering 문제가 발생.
-                bool hasTorque = torqueIdx != null && torqueIdx.Length > 0;
-                if (hasTorque)
-                {
-                    WindowFeatures features = WindowStateClassifier.ComputeFeatures(
-                        window, ws, nCh, accelIdx, torqueIdx, stateThr);
-                    WindowState winState = WindowStateClassifier.Classify(features, stateThr);
+                WindowFeatures features = WindowStateClassifier.ComputeFeatures(
+                    window, ws, nCh, accelIdx, torqueIdx, stateThr);
+                WindowState winState = WindowStateClassifier.Classify(features, stateThr);
 
-                    AppEvents.RaiseWindowState(sensorType, axis, winState, features);
+                AppEvents.RaiseWindowState(sensorType, axis, winState, features);
 
-                    if (winState != WindowState.Motion) return;
-                }
+                if (winState != WindowState.Motion) return;
             }
-            // 임계값 미로드 또는 accel-only: 기존 activityThreshold 행 필터만 적용
+            // 임계값 미로드 시: 기존 activityThreshold 행 필터만 적용 (ReadLastWindow 내부)
 
             InferenceResult result = await _client.PredictAsync(
                 window, ws, nCh, sensorType, axis, ct);
