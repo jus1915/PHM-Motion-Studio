@@ -458,24 +458,37 @@ namespace PHM_Project_DockPanel.Services.Core
     public sealed class ModelWindowInfo
     {
         [JsonProperty("window_size")]        public int    WindowSize        { get; set; } = 512;
-        /// <summary>
-        /// 활동성 게이팅 임계값 (채널별 std 최댓값 기준).
-        /// 0.0 = 게이팅 미적용 (모델이 정지 구간도 포함해 학습된 경우).
-        /// </summary>
         [JsonProperty("activity_threshold")] public double ActivityThreshold { get; set; } = 0.0;
         [JsonProperty("source")]             public string Source             { get; set; } = "";
+        /// <summary>
+        /// 윈도우 상태 분류 블록 (학습 파이프라인이 저장한 scaler+weights+thresholds).
+        /// null 이면 해당 모델은 재학습 전 — C# 측에서 게이팅을 비활성화.
+        /// </summary>
+        [JsonProperty("window_state")]       public WindowStateInfo WindowState { get; set; }
+    }
 
-        // ── 윈도우 상태 분류 파라미터 (학습 파이프라인에서 저장, 없으면 기본값) ──
-        /// <summary>motion_score 이상이면 Motion으로 분류</summary>
-        [JsonProperty("motion_score_threshold")] public double MotionScoreThreshold  { get; set; } = 0.25;
-        /// <summary>motion_score 이하이면 Idle로 분류</summary>
-        [JsonProperty("idle_score_threshold")]   public double IdleScoreThreshold    { get; set; } = 0.05;
-        /// <summary>acc_mag_rms 정규화 기준 (학습 데이터 통계)</summary>
-        [JsonProperty("ref_acc_mag_rms")]        public double RefAccMagRms          { get; set; } = 0.5;
-        /// <summary>trq_detrended_rms 정규화 기준 (학습 데이터 통계)</summary>
-        [JsonProperty("ref_trq_detrended_rms")]  public double RefTrqDetrendedRms    { get; set; } = 5.0;
-        /// <summary>trq_peak_to_peak_max 정규화 기준 (학습 데이터 통계)</summary>
-        [JsonProperty("ref_trq_p2p_max")]        public double RefTrqPeakToPeakMax   { get; set; } = 10.0;
+    // =========================================================================
+    //  WindowStateScalerEntry / WindowStateInfo — /model_info window_state 블록
+    // =========================================================================
+    public sealed class WindowStateScalerEntry
+    {
+        [JsonProperty("q05")] public double Q05 { get; set; } = 0.0;
+        [JsonProperty("q95")] public double Q95 { get; set; } = 1.0;
+    }
+
+    public sealed class WindowStateInfo
+    {
+        [JsonProperty("scaler")]
+        public System.Collections.Generic.Dictionary<string, WindowStateScalerEntry> Scaler { get; set; }
+
+        [JsonProperty("weights")]
+        public System.Collections.Generic.Dictionary<string, double> Weights { get; set; }
+
+        [JsonProperty("motion_score_threshold")]    public double MotionScoreThreshold   { get; set; } = 0.45;
+        [JsonProperty("idle_score_threshold")]      public double IdleScoreThreshold     { get; set; } = 0.08;
+        [JsonProperty("zero_ratio_acc_threshold")]  public double ZeroRatioAccThreshold  { get; set; } = 0.03;
+        [JsonProperty("zero_ratio_trq_threshold")]  public double ZeroRatioTrqThreshold  { get; set; } = 0.15;
+        [JsonProperty("zero_ratio_idle_threshold")] public double ZeroRatioIdleThreshold { get; set; } = 0.70;
     }
 
     // =========================================================================

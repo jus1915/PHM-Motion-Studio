@@ -157,15 +157,13 @@ namespace PHM_Project_DockPanel.Services.Core
                     _windowSizes[kv.Key]          = kv.Value.WindowSize;
                     _activityThresholds[kv.Key]   = kv.Value.ActivityThreshold;
 
-                    // 학습 파이프라인에서 저장한 윈도우 상태 분류 파라미터 동기화
-                    _stateThresholds[kv.Key] = new WindowStateThresholds
-                    {
-                        MotionScoreThreshold = kv.Value.MotionScoreThreshold,
-                        IdleScoreThreshold   = kv.Value.IdleScoreThreshold,
-                        RefAccMagRms         = kv.Value.RefAccMagRms,
-                        RefTrqDetrendedRms   = kv.Value.RefTrqDetrendedRms,
-                        RefTrqPeakToPeakMax  = kv.Value.RefTrqPeakToPeakMax,
-                    };
+                    // window_state 블록 → WindowStateThresholds 변환
+                    // null 이면 게이팅 미적용 (재학습 전 모델 — 기존 activityThreshold 필터만 사용)
+                    var thr = WindowStateClassifier.FromServerInfo(kv.Value.WindowState);
+                    if (thr != null)
+                        _stateThresholds[kv.Key] = thr;
+                    else
+                        _stateThresholds.Remove(kv.Key);
                 }
 
                 // IntervalMs = 가장 작은 window_size / 2 (stride 50%)
