@@ -36,6 +36,12 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly System.Collections.Generic.Dictionary<string, double> _activityThresholds
             = new System.Collections.Generic.Dictionary<string, double>();
 
+        // ── 윈도우 상태 분류 임계값: sensor_type → WindowStateThresholds ─────
+        // 서버 /model_info 에서 학습 파이프라인 통계 기반 값을 동기화.
+        // 없으면 WindowStateThresholds 기본값 사용.
+        private readonly System.Collections.Generic.Dictionary<string, WindowStateThresholds> _stateThresholds
+            = new System.Collections.Generic.Dictionary<string, WindowStateThresholds>();
+
         /// <summary>sensor_type별 window_size 반환. 서버 쿼리 전이거나 없으면 기본값.</summary>
         private int GetWindowSize(string sensorType)
         {
@@ -48,6 +54,15 @@ namespace PHM_Project_DockPanel.Services.Core
         {
             double thr;
             return _activityThresholds.TryGetValue(sensorType, out thr) ? thr : 0.0;
+        }
+
+        /// <summary>sensor_type별 WindowStateThresholds 반환. 없으면 기본값.</summary>
+        private WindowStateThresholds GetStateThresholds(string sensorType)
+        {
+            WindowStateThresholds thr;
+            return _stateThresholds.TryGetValue(sensorType, out thr)
+                ? thr
+                : new WindowStateThresholds();
         }
 
         private int? _lastMovingAxis = null;
@@ -141,6 +156,16 @@ namespace PHM_Project_DockPanel.Services.Core
                 {
                     _windowSizes[kv.Key]          = kv.Value.WindowSize;
                     _activityThresholds[kv.Key]   = kv.Value.ActivityThreshold;
+
+                    // 학습 파이프라인에서 저장한 윈도우 상태 분류 파라미터 동기화
+                    _stateThresholds[kv.Key] = new WindowStateThresholds
+                    {
+                        MotionScoreThreshold = kv.Value.MotionScoreThreshold,
+                        IdleScoreThreshold   = kv.Value.IdleScoreThreshold,
+                        RefAccMagRms         = kv.Value.RefAccMagRms,
+                        RefTrqDetrendedRms   = kv.Value.RefTrqDetrendedRms,
+                        RefTrqPeakToPeakMax  = kv.Value.RefTrqPeakToPeakMax,
+                    };
                 }
 
                 // IntervalMs = 가장 작은 window_size / 2 (stride 50%)
@@ -326,7 +351,27 @@ namespace PHM_Project_DockPanel.Services.Core
                 float[] window = ReadLastWindow(cp, "combined", ws, ax, out nCh,
                     filterOp: false, activityThreshold: actThr);
 
+                // ── 윈도우 상태 분류 (combined: accel+torque 모두 반영) ───────────
                 bool serverSuccess = false;
+                if (window != null)
+                {
+                    int[] accelIdx, torqueIdx;
+                    WindowStateClassifier.GetChannelRoles("combined", nCh, out accelIdx, out torqueIdx);
+                    WindowStateThresholds stateThr = GetStateThresholds("combined");
+                    WindowFeatures        features = WindowStateClassifier.ComputeFeatures(
+                        window, ws, nCh, accelIdx, torqueIdx, stateThr);
+                    WindowState           winState = WindowStateClassifier.Classify(features, stateThr);
+
+                    AppEvents.RaiseWindowState("combined", ax, winState, features);
+
+                    // Motion 상태가 아니면 combined AE/CLS 추론 스킵
+                    if (winState != WindowState.Motion)
+                    {
+                        // Idle/Ambiguous 구간: 개별 AE 스코어 폴백도 스킵
+                        continue;
+                    }
+                }
+
                 if (window != null)
                 {
                     CombinedInferenceResult combined = await _client.PredictCombinedAsync(
@@ -368,7 +413,9 @@ namespace PHM_Project_DockPanel.Services.Core
 
         /// <summary>
         /// AE 이상탐지 추론 — /predict 엔드포인트 사용.
-        /// 학습 시 activity_percentile 필터로 제거된 정지 행을 추론에서도 동일하게 제외.
+        /// 1) 마지막 windowSize 행 읽기
+        /// 2) 윈도우 상태 분류 (idle/motion/ambiguous)
+        /// 3) Motion 상태일 때만 서버 AE 추론 실행
         /// </summary>
         private async Task RunAeInference(
             string csvPath, string sensorType, int? axis, CancellationToken ct)
@@ -379,6 +426,27 @@ namespace PHM_Project_DockPanel.Services.Core
             float[] window = ReadLastWindow(csvPath, sensorType, ws, axis, out nCh,
                 filterOp: false, activityThreshold: actThr);
             if (window == null) return;
+
+            // ── 윈도우 상태 분류 ──────────────────────────────────────────────
+            // GetChannelRoles: sensorType에서 accel/torque 채널 인덱스를 직접 추론
+            //   "accel"    → accelIdx=[0,1,2],  torqueIdx=[]
+            //   "torque"   → accelIdx=[],        torqueIdx=[0..nCh-1]
+            //   "combined" → accelIdx=[0,1,2],   torqueIdx=[3..nCh-1]
+            int[] accelIdx, torqueIdx;
+            WindowStateClassifier.GetChannelRoles(sensorType, nCh, out accelIdx, out torqueIdx);
+
+            WindowStateThresholds stateThr  = GetStateThresholds(sensorType);
+            WindowFeatures        features  = WindowStateClassifier.ComputeFeatures(
+                window, ws, nCh, accelIdx, torqueIdx, stateThr);
+            WindowState           winState  = WindowStateClassifier.Classify(features, stateThr);
+
+            // 상태 이벤트 발행 (Dashboard / 로그 표시용)
+            AppEvents.RaiseWindowState(sensorType, axis, winState, features);
+
+            // Motion 상태가 아니면 AE 추론 스킵
+            // - Idle      : 정지 구간, rule 기반 감시만 수행
+            // - Ambiguous : 경계 구간, 학습/알람에서 제외
+            if (winState != WindowState.Motion) return;
 
             InferenceResult result = await _client.PredictAsync(
                 window, ws, nCh, sensorType, axis, ct);
