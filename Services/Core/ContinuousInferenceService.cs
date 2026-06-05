@@ -437,19 +437,23 @@ namespace PHM_Project_DockPanel.Services.Core
                 int[] accelIdx, torqueIdx;
                 WindowStateClassifier.GetChannelRoles(sensorType, nCh, out accelIdx, out torqueIdx);
 
-                WindowFeatures features = WindowStateClassifier.ComputeFeatures(
-                    window, ws, nCh, accelIdx, torqueIdx, stateThr);
-                WindowState winState = WindowStateClassifier.Classify(features, stateThr);
+                // accel-only 모델(torque 채널 없음)은 motion_score 게이팅 제외.
+                // torque dynamic 이 없으면 acc_mag_rms 만으로는 정지/구동 판별이
+                // 어렵고, 기본 ref값(0.5g)과 실제 센서값(~0.02g) 격차로
+                // 항상 Idle 판정되는 false-filtering 문제가 발생.
+                bool hasTorque = torqueIdx != null && torqueIdx.Length > 0;
+                if (hasTorque)
+                {
+                    WindowFeatures features = WindowStateClassifier.ComputeFeatures(
+                        window, ws, nCh, accelIdx, torqueIdx, stateThr);
+                    WindowState winState = WindowStateClassifier.Classify(features, stateThr);
 
-                // 상태 이벤트 발행 (Dashboard / 로그 표시용)
-                AppEvents.RaiseWindowState(sensorType, axis, winState, features);
+                    AppEvents.RaiseWindowState(sensorType, axis, winState, features);
 
-                // Motion 상태가 아니면 AE 추론 스킵
-                // - Idle      : 정지 구간, rule 기반 감시만 수행
-                // - Ambiguous : 경계 구간, 학습/알람에서 제외
-                if (winState != WindowState.Motion) return;
+                    if (winState != WindowState.Motion) return;
+                }
             }
-            // 임계값 미로드 시: 기존 activityThreshold 행 필터만 적용 (ReadLastWindow 내부)
+            // 임계값 미로드 또는 accel-only: 기존 activityThreshold 행 필터만 적용
 
             InferenceResult result = await _client.PredictAsync(
                 window, ws, nCh, sensorType, axis, ct);
