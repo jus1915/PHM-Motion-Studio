@@ -548,8 +548,12 @@ def model_info():
         min_act: float = float("inf")   # 아직 못 읽으면 inf
         source: str   = "default"
 
+        # 윈도우 상태 분류 파라미터 — 가장 먼저 발견된 AE 모델의 값 사용
+        # (sensor_type 내 모든 모델이 같은 데이터로 학습됐다고 가정)
+        win_state: dict = {}
+
         def _update(meta: dict, src: str):
-            nonlocal max_ws, min_act, source
+            nonlocal max_ws, min_act, source, win_state
             ws  = int(meta.get("window_size", 0))
             act = float(meta.get("activity_threshold", 0.0))
             if ws > max_ws:
@@ -560,6 +564,14 @@ def model_info():
                 min_act = 0.0
             elif act < min_act:
                 min_act = act
+            # 윈도우 상태 분류 파라미터: 첫 번째로 발견된 값 사용
+            if not win_state:
+                for key in (
+                    "motion_score_threshold", "idle_score_threshold",
+                    "ref_acc_mag_rms", "ref_trq_detrended_rms", "ref_trq_peak_to_peak_max",
+                ):
+                    if key in meta:
+                        win_state[key] = meta[key]
 
         # ① 캐시에 로드된 세션 스캔 (전역 + per-axis)
         for key, (_, meta) in list(_sessions.items()):
@@ -577,11 +589,18 @@ def model_info():
                 _update(_read_meta(fname), "meta_file_peraxis")
                 break   # 해당 축의 최우선 후보만
 
-        result[sensor_type] = {
+        entry = {
             "window_size":        max_ws  if max_ws  > 0             else 512,
             "activity_threshold": min_act if min_act < float("inf")  else 0.0,
             "source":             source  if max_ws  > 0             else "default",
+            # 윈도우 상태 분류 파라미터 — 없으면 C# 기본값이 사용됨
+            "motion_score_threshold":   win_state.get("motion_score_threshold",   0.25),
+            "idle_score_threshold":     win_state.get("idle_score_threshold",     0.05),
+            "ref_acc_mag_rms":          win_state.get("ref_acc_mag_rms",          0.5),
+            "ref_trq_detrended_rms":    win_state.get("ref_trq_detrended_rms",    5.0),
+            "ref_trq_peak_to_peak_max": win_state.get("ref_trq_peak_to_peak_max", 10.0),
         }
+        result[sensor_type] = entry
 
     return result
 

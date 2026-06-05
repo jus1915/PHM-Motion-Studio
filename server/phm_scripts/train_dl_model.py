@@ -1028,6 +1028,219 @@ class AE1DCNN(nn.Module):
         return self.decoder(z_up).permute(0, 2, 1)   # (B, C, T) → (B, T, C)
 
 
+# ── 윈도우 상태 분류 (학습/추론 공통 로직) ───────────────────────────────────
+
+def _classify_channel_roles(
+    channels: List[str],
+) -> Tuple[List[int], List[int]]:
+    """채널명 목록에서 가속도(x/y/z) 인덱스와 토크 인덱스를 분류합니다.
+
+    Returns:
+        (accel_idx, torque_idx)
+    """
+    accel_idx: List[int] = []
+    torque_idx: List[int] = []
+    for i, ch in enumerate(channels):
+        h = ch.strip().lower()
+        if h in ("x", "y", "z"):
+            accel_idx.append(i)
+        elif "trq" in h or "torque" in h:
+            torque_idx.append(i)
+    return accel_idx, torque_idx
+
+
+def _compute_window_features(
+    window: np.ndarray,   # (T, C) float32
+    accel_idx: List[int],
+    torque_idx: List[int],
+    acc_zero_threshold: float = 0.01,
+) -> Dict[str, float]:
+    """단일 윈도우에서 상태 분류 특징을 계산합니다.
+
+    C#  WindowStateClassifier.ComputeFeatures 와 동일한 로직.
+
+    Returns:
+        dict with keys:
+          acc_mag_rms, acc_mag_peak, zero_ratio,
+          trq_detrended_rms, trq_std_mean, trq_peak_to_peak_max
+    """
+    T = window.shape[0]
+    out: Dict[str, float] = {}
+
+    # ── 가속도 크기 ────────────────────────────────────────────────────────────
+    if len(accel_idx) >= 3:
+        acc = window[:, accel_idx[:3]].astype(np.float64)  # (T, 3)
+        mag = np.sqrt((acc ** 2).sum(axis=1))               # (T,)
+        out["acc_mag_rms"]  = float(np.sqrt(np.mean(mag ** 2)))
+        out["acc_mag_peak"] = float(mag.max())
+        out["zero_ratio"]   = float((mag < acc_zero_threshold).sum() / T)
+    else:
+        out["acc_mag_rms"]  = 0.0
+        out["acc_mag_peak"] = 0.0
+        out["zero_ratio"]   = 1.0
+
+    # ── 토크 특징 ──────────────────────────────────────────────────────────────
+    if torque_idx:
+        trq = window[:, torque_idx].astype(np.float64)   # (T, n_trq)
+        means = trq.mean(axis=0, keepdims=True)           # (1, n_trq)
+        det   = trq - means                               # detrended
+        det_rms = np.sqrt(np.mean(det ** 2, axis=0))     # (n_trq,)  std ≡ detrended RMS
+        p2p     = trq.max(axis=0) - trq.min(axis=0)      # (n_trq,)
+        out["trq_detrended_rms"]    = float(det_rms.mean())
+        out["trq_std_mean"]         = float(det_rms.mean())
+        out["trq_peak_to_peak_max"] = float(p2p.max())
+    else:
+        out["trq_detrended_rms"]    = 0.0
+        out["trq_std_mean"]         = 0.0
+        out["trq_peak_to_peak_max"] = 0.0
+
+    return out
+
+
+def compute_motion_thresholds(
+    windows: List[Tuple[np.ndarray, int]],
+    channels: List[str],
+    params: dict,
+) -> dict:
+    """학습 데이터에서 motion_score 기반 윈도우 상태 분류를 수행합니다.
+
+    파라미터 (params 에서 읽음):
+        idle_percentile   (기본 5)  : motion_score 하위 N% → Idle (강제 확보)
+        motion_percentile (기본 40) : motion_score 하위 N% → Idle+Ambiguous
+                                      → Motion = 상위 (100-N)%
+        acc_zero_threshold(기본 0.01)
+        weight_acc_rms    (기본 0.2)
+        weight_trq_rms    (기본 0.5)
+        weight_trq_p2p    (기본 0.3)
+
+    Returns:
+        {
+          "motion_windows"          : [(w, lbl), ...],  AE 학습 대상
+          "motion_score_threshold"  : float,
+          "idle_score_threshold"    : float,
+          "ref_acc_mag_rms"         : float,
+          "ref_trq_detrended_rms"   : float,
+          "ref_trq_peak_to_peak_max": float,
+          "weight_acc_rms"          : float,
+          "weight_trq_rms"          : float,
+          "weight_trq_p2p"          : float,
+          "n_total"  : int,
+          "n_motion" : int,
+          "n_idle"   : int,
+          "n_ambiguous": int,
+        }
+    """
+    idle_pct   = float(params.get("idle_percentile",   5.0))
+    motion_pct = float(params.get("motion_percentile", 40.0))
+    zero_thr   = float(params.get("acc_zero_threshold", 0.01))
+    w_acc      = float(params.get("weight_acc_rms",  0.2))
+    w_trq      = float(params.get("weight_trq_rms",  0.5))
+    w_p2p      = float(params.get("weight_trq_p2p",  0.3))
+
+    accel_idx, torque_idx = _classify_channel_roles(channels)
+    has_accel = len(accel_idx) >= 3
+    has_torque = len(torque_idx) > 0
+
+    print(
+        f"[window_state] 채널 분류 — accel={accel_idx} torque={torque_idx}",
+        file=sys.stderr,
+    )
+
+    # ── 1단계: 모든 윈도우의 raw features 계산 ──────────────────────────────
+    acc_rms_arr = np.zeros(len(windows), dtype=np.float64)
+    trq_rms_arr = np.zeros(len(windows), dtype=np.float64)
+    trq_p2p_arr = np.zeros(len(windows), dtype=np.float64)
+
+    for i, (w, _) in enumerate(windows):
+        f = _compute_window_features(w, accel_idx, torque_idx, zero_thr)
+        acc_rms_arr[i] = f["acc_mag_rms"]
+        trq_rms_arr[i] = f["trq_detrended_rms"]
+        trq_p2p_arr[i] = f["trq_peak_to_peak_max"]
+
+    # ── 2단계: 정규화 기준값 = 각 특징의 95th percentile ────────────────────
+    # 상위 5%를 1.0으로 고정 → motion_score가 0~1 범위에서 의미 있게 분포
+    ref_acc = float(np.percentile(acc_rms_arr, 95)) if has_accel else 0.5
+    ref_trq = float(np.percentile(trq_rms_arr, 95)) if has_torque else 5.0
+    ref_p2p = float(np.percentile(trq_p2p_arr, 95)) if has_torque else 10.0
+
+    # ref가 0에 가까우면 (모든 샘플이 정지) 기본값 사용
+    ref_acc = ref_acc if ref_acc > 1e-9 else 0.5
+    ref_trq = ref_trq if ref_trq > 1e-9 else 5.0
+    ref_p2p = ref_p2p if ref_p2p > 1e-9 else 10.0
+
+    # ── 3단계: motion_score 계산 ─────────────────────────────────────────────
+    sa = np.clip(acc_rms_arr / ref_acc, 0.0, 1.0)
+    st = np.clip(trq_rms_arr / ref_trq, 0.0, 1.0)
+    sp = np.clip(trq_p2p_arr / ref_p2p, 0.0, 1.0)
+
+    if has_accel and has_torque:
+        scores = w_acc * sa + w_trq * st + w_p2p * sp
+    elif has_accel:
+        scores = sa
+    elif has_torque:
+        w_sum = w_trq + w_p2p
+        scores = (w_trq * st + w_p2p * sp) / (w_sum if w_sum > 0 else 1.0)
+    else:
+        scores = np.zeros(len(windows), dtype=np.float64)
+
+    # ── 4단계: 퍼센타일 기반 임계값 결정 ─────────────────────────────────────
+    idle_thr   = float(np.percentile(scores, idle_pct))
+    motion_thr = float(np.percentile(scores, motion_pct))
+
+    # 분류
+    states = np.where(scores >= motion_thr, "motion",
+             np.where(scores <= idle_thr,   "idle", "ambiguous"))
+
+    n_total     = len(windows)
+    n_motion    = int((states == "motion").sum())
+    n_idle      = int((states == "idle").sum())
+    n_ambiguous = int((states == "ambiguous").sum())
+
+    print(
+        f"[window_state] motion_score 통계 — "
+        f"min={scores.min():.4f}  med={np.median(scores):.4f}  max={scores.max():.4f}",
+        file=sys.stderr,
+    )
+    print(
+        f"[window_state] 임계값 — idle<={idle_thr:.4f}  motion>={motion_thr:.4f}  "
+        f"(idle_pct={idle_pct}  motion_pct={motion_pct})",
+        file=sys.stderr,
+    )
+    print(
+        f"[window_state] 분류 결과 — 전체={n_total}  "
+        f"motion={n_motion}({n_motion/n_total*100:.1f}%)  "
+        f"idle={n_idle}({n_idle/n_total*100:.1f}%)  "
+        f"ambiguous={n_ambiguous}({n_ambiguous/n_total*100:.1f}%)",
+        file=sys.stderr,
+    )
+    print(
+        f"[window_state] 정규화 기준 — "
+        f"ref_acc_rms={ref_acc:.4f}  ref_trq_rms={ref_trq:.4f}  ref_trq_p2p={ref_p2p:.4f}",
+        file=sys.stderr,
+    )
+
+    # AE 학습용: motion 상태 윈도우만 추출
+    motion_windows = [
+        (w, lbl) for (w, lbl), s in zip(windows, states) if s == "motion"
+    ]
+
+    return {
+        "motion_windows"            : motion_windows,
+        "motion_score_threshold"    : motion_thr,
+        "idle_score_threshold"      : idle_thr,
+        "ref_acc_mag_rms"           : ref_acc,
+        "ref_trq_detrended_rms"     : ref_trq,
+        "ref_trq_peak_to_peak_max"  : ref_p2p,
+        "weight_acc_rms"            : w_acc,
+        "weight_trq_rms"            : w_trq,
+        "weight_trq_p2p"            : w_p2p,
+        "n_total"                   : n_total,
+        "n_motion"                  : n_motion,
+        "n_idle"                    : n_idle,
+        "n_ambiguous"               : n_ambiguous,
+    }
+
+
 # ── AE 학습 루프 ──────────────────────────────────────────────────────────────
 
 def train_ae(
@@ -1464,6 +1677,12 @@ def save_meta(
     n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
     augment_mode: Optional[str] = None,         # 전처리 증강 모드 ("standard"|"mixed"|None)
     activity_threshold: Optional[float] = None, # 활동성 게이팅 임계값 (AE 전용, 0 또는 None = 미적용)
+    # ── 윈도우 상태 분류 파라미터 (AE 전용, C# WindowStateClassifier 동기화용) ──
+    motion_score_threshold:   Optional[float] = None,
+    idle_score_threshold:     Optional[float] = None,
+    ref_acc_mag_rms:          Optional[float] = None,
+    ref_trq_detrended_rms:    Optional[float] = None,
+    ref_trq_peak_to_peak_max: Optional[float] = None,
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
@@ -1520,6 +1739,20 @@ def save_meta(
         if activity_threshold is not None and activity_threshold > 0:
             meta["activity_threshold"] = round(float(activity_threshold), 8)
             meta["activity_percentile"] = float(params.get("activity_percentile", 0.0))
+
+        # ── 윈도우 상태 분류 파라미터 (C# WindowStateClassifier 동기화) ──────
+        # C# 추론 측이 /model_info 를 통해 이 값들을 읽어 동일한 motion_score
+        # 기준으로 idle/motion/ambiguous 를 분류, motion 윈도우만 AE 추론한다.
+        if motion_score_threshold is not None:
+            meta["motion_score_threshold"]    = round(float(motion_score_threshold),   6)
+        if idle_score_threshold is not None:
+            meta["idle_score_threshold"]      = round(float(idle_score_threshold),     6)
+        if ref_acc_mag_rms is not None:
+            meta["ref_acc_mag_rms"]           = round(float(ref_acc_mag_rms),          6)
+        if ref_trq_detrended_rms is not None:
+            meta["ref_trq_detrended_rms"]     = round(float(ref_trq_detrended_rms),    6)
+        if ref_trq_peak_to_peak_max is not None:
+            meta["ref_trq_peak_to_peak_max"]  = round(float(ref_trq_peak_to_peak_max), 6)
     else:
         meta["class_names"] = class_names
         meta["n_classes"]   = len(class_names)
@@ -1985,55 +2218,54 @@ def main() -> None:
     # ══════════════════════════════════════════════════════════════════════════
     # AE (이상탐지) 경로
     # ══════════════════════════════════════════════════════════════════════════
-    activity_threshold: float = 0.0   # 0 = 활동성 필터 미적용
+    activity_threshold: float = 0.0   # 하위 호환 유지 (inference_server 가 읽는 필드)
+    # 윈도우 상태 분류 파라미터 — 학습 후 _meta.json + /model_info 에 저장해
+    # C# 추론 측이 동일 기준으로 motion 판별
+    motion_score_threshold:    float = 0.25
+    idle_score_threshold:      float = 0.05
+    ref_acc_mag_rms:           float = 0.5
+    ref_trq_detrended_rms:     float = 5.0
+    ref_trq_peak_to_peak_max:  float = 10.0
+
     if is_ae:
-        # ── 활동성 기반 윈도우 필터 ─────────────────────────────────────────
-        # 정지 구간(가속도/토크 ≈ 0)이 학습 분포에 포함되면 AE가 "0~구동값"
-        # 까지의 넓은 범위를 정상으로 학습해, 외부 충격/부하 변화처럼 정상
-        # 구동 범위 안에서 일어나는 변동에 둔감해진다. 정상 분포를 "구동 중"
-        # 으로 좁혀 이상 탐지 민감도를 끌어올리기 위해 활동성 점수가 낮은
-        # 윈도우는 학습에서 제외한다.
+        # ── motion_score 기반 윈도우 상태 분류 ──────────────────────────────
+        # 학습 파이프라인의 상태 분류 기준을 C# 실시간 추론과 일치시킨다.
         #
-        #   활동성 점수 = max_over_channels( std(window[:, ch]) )
-        #     · 채널별 시간축 표준편차 → 채널 중 최댓값
-        #     · 정지 시 ≈ 0, 구동 시 ≫ 0  (가속도·토크 공통)
-        #   임계값 = 학습 윈도우 활동성의 N-th percentile
-        #     · conf["activity_percentile"] 로 제어 (기본 0 = 비활성)
-        #     · 권장 25 — 하위 25% 정지 윈도우 제거
+        # 특징:
+        #   acc_mag_rms         : sqrt(mean(x²+y²+z²)) — 가속도 에너지
+        #   trq_detrended_rms   : 토크 평균 제거(offset 제거) 후 RMS
+        #   trq_peak_to_peak_max: 토크 최대 피크-투-피크 (축 최댓값)
+        #   motion_score        : 위 특징의 정규화 가중합 (0~1)
         #
-        # 임계값은 _meta.json 에 저장되어 추론 측에서 동일 게이팅 적용 가능.
-        activity_pctile = float(params.get("activity_percentile", 0.0))
-        if activity_pctile > 0.0 and windows:
-            activity_scores = np.array(
-                [float(w.std(axis=0).max()) for w, _ in windows],
-                dtype=np.float64,
-            )
-            activity_threshold = float(np.percentile(activity_scores, activity_pctile))
-            kept = [(w, lbl) for (w, lbl), s in zip(windows, activity_scores)
-                    if s >= activity_threshold]
-            n_before = len(windows)
-            n_after  = len(kept)
-            print(
-                f"[main] 활동성 필터 적용 (percentile={activity_pctile}): "
-                f"임계값={activity_threshold:.6f}, "
-                f"활동성 분포 min={activity_scores.min():.6f} / "
-                f"med={np.median(activity_scores):.6f} / "
-                f"max={activity_scores.max():.6f}",
-                file=sys.stderr,
-            )
-            print(
-                f"[main] 활동성 필터 결과: {n_before} → {n_after}개 윈도우 "
-                f"({n_before - n_after}개 정지 윈도우 제외)",
-                file=sys.stderr,
-            )
-            windows = kept
+        # 분류 결과:
+        #   motion    → AE 학습 대상 (상위 ~60%)
+        #   ambiguous → 학습 제외 (경계 구간)
+        #   idle      → 학습 제외 (정지 구간, 하위 ~5% 강제 확보)
+        #
+        # 파라미터 (params):
+        #   idle_percentile   기본 5  : 하위 N% → Idle
+        #   motion_percentile 기본 40 : 하위 N% → Idle+Ambiguous (상위 → Motion)
+        if windows:
+            win_state_info = compute_motion_thresholds(windows, channels, params)
+            windows                 = win_state_info["motion_windows"]
+            motion_score_threshold  = win_state_info["motion_score_threshold"]
+            idle_score_threshold    = win_state_info["idle_score_threshold"]
+            ref_acc_mag_rms         = win_state_info["ref_acc_mag_rms"]
+            ref_trq_detrended_rms   = win_state_info["ref_trq_detrended_rms"]
+            ref_trq_peak_to_peak_max= win_state_info["ref_trq_peak_to_peak_max"]
+
             if not windows:
                 print(json.dumps({
-                    "warning": "활동성 필터 후 윈도우가 없습니다. activity_percentile 을 낮추거나 구동 중 데이터를 추가 수집하세요."
+                    "warning": (
+                        f"motion 윈도우가 없습니다 "
+                        f"(전체 {win_state_info['n_total']}개 중 "
+                        f"idle={win_state_info['n_idle']} ambiguous={win_state_info['n_ambiguous']}). "
+                        "motion_percentile을 높이거나 구동 중 데이터를 추가 수집하세요."
+                    )
                 }), flush=True)
                 sys.exit(0)
 
-        print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
+        print(f"[main] AE 학습 시작 — motion 윈도우 {len(windows)}개", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
         ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std, norm_mean, norm_std = train_ae(
@@ -2072,6 +2304,11 @@ def main() -> None:
             n_channels_override=n_channels,
             augment_mode=params.get("augment_mode"),
             activity_threshold=activity_threshold,
+            motion_score_threshold=motion_score_threshold,
+            idle_score_threshold=idle_score_threshold,
+            ref_acc_mag_rms=ref_acc_mag_rms,
+            ref_trq_detrended_rms=ref_trq_detrended_rms,
+            ref_trq_peak_to_peak_max=ref_trq_peak_to_peak_max,
         )
 
         _try_end_mlflow(
