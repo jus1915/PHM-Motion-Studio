@@ -586,14 +586,33 @@ def model_info():
                 min_act = 0.0
             elif act < min_act:
                 min_act = act
-            # 윈도우 상태 분류 파라미터: 첫 번째로 발견된 값 사용
+            # window_state 블록 (신형): scaler+weights+thresholds 통합 구조
+            # 없으면 구형 개별 필드(ref_acc_mag_rms 등) 폴백 — 재학습 전 모델 호환
             if not win_state:
-                for key in (
-                    "motion_score_threshold", "idle_score_threshold",
-                    "ref_acc_mag_rms", "ref_trq_detrended_rms", "ref_trq_peak_to_peak_max",
-                ):
-                    if key in meta:
-                        win_state[key] = meta[key]
+                if meta.get("window_state"):
+                    win_state.update(meta["window_state"])
+                else:
+                    # 구형 폴백: 개별 필드 → 신형 window_state 블록으로 변환
+                    _legacy_keys = (
+                        "motion_score_threshold", "idle_score_threshold",
+                        "ref_acc_mag_rms", "ref_trq_detrended_rms",
+                        "ref_trq_peak_to_peak_max",
+                    )
+                    if any(k in meta for k in _legacy_keys):
+                        win_state["motion_score_threshold"] = meta.get(
+                            "motion_score_threshold", 0.45)
+                        win_state["idle_score_threshold"]   = meta.get(
+                            "idle_score_threshold",   0.08)
+                        ref_acc = meta.get("ref_acc_mag_rms",         0.05)
+                        ref_trq = meta.get("ref_trq_detrended_rms",    5.0)
+                        ref_p2p = meta.get("ref_trq_peak_to_peak_max",10.0)
+                        win_state["scaler"] = {
+                            "acc_mag_rms":          {"q05": 0.0, "q95": ref_acc},
+                            "acc_mag_peak":         {"q05": 0.0, "q95": ref_acc * 1.5},
+                            "trq_detrended_rms":    {"q05": 0.0, "q95": ref_trq},
+                            "trq_std_mean":         {"q05": 0.0, "q95": ref_trq},
+                            "trq_peak_to_peak_max": {"q05": 0.0, "q95": ref_p2p},
+                        }
 
         # ① 캐시에 로드된 세션 스캔 (전역 + per-axis)
         for key, (_, meta) in list(_sessions.items()):
@@ -615,12 +634,9 @@ def model_info():
             "window_size":        max_ws  if max_ws  > 0             else 512,
             "activity_threshold": min_act if min_act < float("inf")  else 0.0,
             "source":             source  if max_ws  > 0             else "default",
-            # 윈도우 상태 분류 파라미터 — 없으면 C# 기본값이 사용됨
-            "motion_score_threshold":   win_state.get("motion_score_threshold",   0.25),
-            "idle_score_threshold":     win_state.get("idle_score_threshold",     0.05),
-            "ref_acc_mag_rms":          win_state.get("ref_acc_mag_rms",          0.5),
-            "ref_trq_detrended_rms":    win_state.get("ref_trq_detrended_rms",    5.0),
-            "ref_trq_peak_to_peak_max": win_state.get("ref_trq_peak_to_peak_max", 10.0),
+            # window_state 블록: scaler+weights+thresholds 전체
+            # 없으면 None → C# 측에서 임계값 미로드로 처리 (게이팅 비활성)
+            "window_state":       win_state if win_state else None,
         }
         result[sensor_type] = entry
 
