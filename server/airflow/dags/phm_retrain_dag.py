@@ -104,11 +104,46 @@ _WIN_DRIVE_RE = __import__("re").compile(r"^[A-Za-z]:[/\\]")
 
 
 def _normalize_data_dir(raw: str) -> str:
-    """Windows 절대 경로이면 PHM_DATA_ROOT 로 대체합니다."""
-    if isinstance(raw, str) and _WIN_DRIVE_RE.match(raw):
-        print(f"[PHM] data_dir 변환: {raw!r} → {_DATA_ROOT!r}", flush=True)
-        return _DATA_ROOT
-    return raw
+    """Windows 절대 경로이면 PHM_DATA_ROOT 기준으로 변환합니다.
+
+    phm_data 마커 이후 상대경로를 보존해 서브폴더 지정이 가능합니다.
+    예: D:\\...\\phm_data\\20260605_Continuous → /opt/phm/data/20260605_Continuous
+    """
+    if not isinstance(raw, str) or not _WIN_DRIVE_RE.match(raw):
+        return raw
+    raw_posix = raw.replace("\\", "/")
+    for marker in ("phm_data/", "phm-data/", "data/"):
+        idx = raw_posix.lower().find(marker)
+        if idx >= 0:
+            rel    = raw_posix[idx + len(marker):]
+            result = str(Path(_DATA_ROOT) / rel) if rel else _DATA_ROOT
+            print(f"[PHM] data_dir 변환: {raw!r} → {result!r}", flush=True)
+            return result
+    print(f"[PHM] data_dir 변환 (폴백): {raw!r} → {_DATA_ROOT!r}", flush=True)
+    return _DATA_ROOT
+
+
+def _normalize_csv_file(raw: str) -> str:
+    """Windows CSV 파일 경로를 컨테이너 경로로 변환합니다.
+
+    phm_data 마커 이후 상대경로를 PHM_DATA_ROOT 에 붙입니다.
+    예: D:\\...\\phm_data\\20260605\\normal\\file.csv
+      → /opt/phm/data/20260605/normal/file.csv
+    """
+    if not isinstance(raw, str) or not _WIN_DRIVE_RE.match(raw):
+        return raw
+    raw_posix = raw.replace("\\", "/")
+    for marker in ("phm_data/", "phm-data/", "data/"):
+        idx = raw_posix.lower().find(marker)
+        if idx >= 0:
+            rel    = raw_posix[idx + len(marker):]
+            result = str(Path(_DATA_ROOT) / rel)
+            print(f"[PHM] csv_file 변환: {raw!r} → {result!r}", flush=True)
+            return result
+    # 폴백: 파일명만 보존
+    result = str(Path(_DATA_ROOT) / Path(raw_posix).name)
+    print(f"[PHM] csv_file 변환 (폴백): {raw!r} → {result!r}", flush=True)
+    return result
 
 
 def _normalize_output(raw: str) -> str:
@@ -657,6 +692,9 @@ def _execute_ch_ae_training(params: dict, run_id: str) -> None:
     params dict 를 JSON 파일로 저장한 뒤 train_channel_active_ae.py 를 실행합니다.
     """
     params["data_dir"] = _normalize_data_dir(params.get("data_dir", _DATA_ROOT))
+    # 단일 CSV 파일 지정 시 경로 정규화 (Windows → 컨테이너)
+    if params.get("csv_file"):
+        params["csv_file"] = _normalize_csv_file(params["csv_file"])
     if "output" in params:
         params["output"] = _normalize_output(params["output"])
 
@@ -739,6 +777,15 @@ def run_training_ae_channel_active(**context) -> None:
     params.setdefault("seed",                       42)
     params.setdefault("save_plots",               True)
     params["output"] = str(profile_dir / "ch_ae_meta.json")
+
+    # ── 단일 CSV 파일 지정 (재현성 검증용) ─────────────────────────────────
+    # conf 에 "ch_ae_csv_file" 이 있으면 data_dir 스캔 대신 단일 파일만 사용
+    csv_file_raw = conf.get("ch_ae_csv_file") or conf.get("csv_file")
+    if csv_file_raw:
+        params["csv_file"] = csv_file_raw
+        print(f"[PHM] 단일 CSV 지정 모드: {csv_file_raw!r}", flush=True)
+    else:
+        params.pop("csv_file", None)  # 혹시 이전 conf 잔재 제거
 
     print(f"[PHM] 채널 AE 학습 시작  channels={channels}", flush=True)
     print(f"[PHM] 출력 메타: {params['output']}", flush=True)

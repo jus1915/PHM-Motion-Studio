@@ -13,6 +13,7 @@ Per-channel statistical feature AutoEncoder.
 params JSON 예:
 {
     "data_dir":              "/opt/phm/data",
+    "csv_file":              null,   // 단일 CSV 직접 지정 시 (null이면 data_dir 스캔)
     "output":                "/opt/phm/models/profile/ch_ae_meta.json",
     "channels":              ["x", "y", "z", "Ax0_Trq(%)", "Ax1_Trq(%)"],
     "window_size":           128,
@@ -543,15 +544,22 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     # ── 1. CSV 파일 탐색 ─────────────────────────────────────────────────────
-    csv_paths = _find_normal_csvs(data_dir)
-    if not csv_paths:
-        raise RuntimeError(f"CSV 파일을 찾을 수 없습니다: {data_dir}")
-
-    print(f"[Data] 학습 CSV 목록 (최대 5개 표시):", flush=True)
-    for p in csv_paths[:5]:
-        print(f"  {p}", flush=True)
-    if len(csv_paths) > 5:
-        print(f"  ... 총 {len(csv_paths)}개", flush=True)
+    csv_file_single = params.get("csv_file")  # 단일 파일 직접 지정 (재현성 검증용)
+    if csv_file_single:
+        csv_path_single = Path(csv_file_single)
+        if not csv_path_single.exists():
+            raise FileNotFoundError(f"csv_file 이 존재하지 않습니다: {csv_file_single}")
+        csv_paths = [csv_path_single]
+        print(f"[Data] 단일 CSV 지정 모드 (재현성 검증): {csv_path_single}", flush=True)
+    else:
+        csv_paths = _find_normal_csvs(data_dir)
+        if not csv_paths:
+            raise RuntimeError(f"CSV 파일을 찾을 수 없습니다: {data_dir}")
+        print(f"[Data] 학습 CSV 목록 (최대 5개 표시):", flush=True)
+        for p in csv_paths[:5]:
+            print(f"  {p}", flush=True)
+        if len(csv_paths) > 5:
+            print(f"  ... 총 {len(csv_paths)}개", flush=True)
 
     # ── 2. 피처 DataFrame 빌드 ───────────────────────────────────────────────
     print("\n[Step 1] 채널별 윈도우 피처 계산 중...", flush=True)
