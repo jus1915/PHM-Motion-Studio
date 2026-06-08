@@ -51,7 +51,8 @@ _SCRIPTS_DIR = Path(os.getenv(
     "PHM_SCRIPTS_DIR",
     Path(__file__).resolve().parents[1],  # dags/ 의 부모 = scripts/
 ))
-_SCRIPT_PATH = _SCRIPTS_DIR / "train_dl_model.py"
+_SCRIPT_PATH          = _SCRIPTS_DIR / "train_dl_model.py"
+_SCRIPT_PATH_CH_AE    = _SCRIPTS_DIR / "train_channel_active_ae.py"
 
 _DATA_ROOT     = os.getenv("PHM_DATA_ROOT",     "/opt/phm/data")
 _MODELS_ROOT   = os.getenv("PHM_MODELS_ROOT",   "/opt/phm/models")
@@ -84,6 +85,7 @@ _DEFAULT_CONF: dict = {
         "ae_accel",
         "ae_torque_global", "ae_torque",
         "ae_combined_global", "ae_combined",
+        "ae_channel_active",   # 채널별 활성 윈도우 통계 피처 AE
     ],
     # AE threshold: 99.9th pct (정상 기동 패턴 포함, false alarm 감소)
     "ae_threshold_percentile":  99.9,
@@ -650,6 +652,100 @@ def run_training_ae_combined(**context) -> None:
     print(f"\n[PHM] AE 결합 축별 학습 완료 (총 {len(axes)}개 축: {axes})", flush=True)
 
 
+def _execute_ch_ae_training(params: dict, run_id: str) -> None:
+    """
+    params dict 를 JSON 파일로 저장한 뒤 train_channel_active_ae.py 를 실행합니다.
+    """
+    params["data_dir"] = _normalize_data_dir(params.get("data_dir", _DATA_ROOT))
+    if "output" in params:
+        params["output"] = _normalize_output(params["output"])
+
+    Path(params["output"]).parent.mkdir(parents=True, exist_ok=True)
+
+    safe_id    = str(run_id).replace("/", "_").replace(":", "-")
+    params_file = Path(tempfile.gettempdir()) / f"phm_ch_ae_{safe_id}.json"
+    params_file.write_text(
+        json.dumps(params, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    print(f"[PHM] 채널 AE 파라미터: {params_file}", flush=True)
+
+    if not _SCRIPT_PATH_CH_AE.exists():
+        raise FileNotFoundError(f"train_channel_active_ae.py 없음: {_SCRIPT_PATH_CH_AE}")
+
+    venv_python     = _SCRIPTS_DIR / ".venv" / "bin" / "python"
+    venv_python_win = _SCRIPTS_DIR / ".venv" / "Scripts" / "python.exe"
+    if venv_python.exists():
+        python = str(venv_python)
+    elif venv_python_win.exists():
+        python = str(venv_python_win)
+    else:
+        python = sys.executable
+
+    cmd  = [python, str(_SCRIPT_PATH_CH_AE), "--params", str(params_file)]
+    print(f"[PHM] 채널 AE 학습 명령: {' '.join(cmd)}", flush=True)
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"train_channel_active_ae.py 실패 (exit={rc})")
+    print(f"[PHM] 채널 AE 학습 완료 → {params['output']}", flush=True)
+
+
+def run_training_ae_channel_active(**context) -> None:
+    """
+    AE 이상탐지 — 채널별 활성 윈도우 통계 피처 AE 학습.
+
+    · 모든 센서 채널(accel x/y/z + torque Ax{n}_Trq(%))을 독립 채널로 처리
+    · 채널별 13개 통계 피처 (min/max/rms/std/var/p2p/mean_abs/peak_abs/skewness/kurtosis/crest/shape/impulse)
+    · active_score 기준 active 윈도우만 Linear AE 학습
+    · 출력: ch_ae_{channel}_model.onnx + ch_ae_meta.json
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    if not _is_mode_enabled(conf, "ae_channel_active"):
+        print("[PHM] train_modes 에 'ae_channel_active' 없음 → 건너뜀", flush=True)
+        return
+
+    run_id      = str(context.get("run_id", "manual"))
+    profile_dir = _get_profile_dir(conf)
+
+    # 축 수 감지해서 torque 채널 목록 구성
+    axis_count = _get_axis_count(dict(conf))  # dict 복사 (pop 부작용 방지)
+    torque_chs = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
+    accel_chs  = ["x", "y", "z"]
+    channels   = accel_chs + torque_chs
+
+    params = {**_DEFAULT_CONF, **conf}
+    params["data_dir"]              = _normalize_data_dir(params.get("data_dir", _DATA_ROOT))
+    params["channels"]              = channels
+    params.setdefault("window_size",              128)
+    params.setdefault("stride",                    64)
+    params.setdefault("active_top_ratio",         0.20)
+    params.setdefault("inactive_bottom_ratio",    0.50)
+    params.setdefault("latent_dim",                  4)
+    params.setdefault("epochs",                    100)
+    params.setdefault("batch_size",                 64)
+    params.setdefault("lr",                       1e-3)
+    params.setdefault("patience",                   15)
+    params.setdefault("min_active_windows",         50)
+    params.setdefault("val_ratio",                 0.2)
+    params.setdefault("seed",                       42)
+    params.setdefault("save_plots",               True)
+    params["output"] = str(profile_dir / "ch_ae_meta.json")
+
+    print(f"[PHM] 채널 AE 학습 시작  channels={channels}", flush=True)
+    print(f"[PHM] 출력 메타: {params['output']}", flush=True)
+    _execute_ch_ae_training(params, f"{run_id}_ae_channel_active")
+    print("[PHM] 채널 AE 학습 완료", flush=True)
+
+
 def reload_inference_cache(**context) -> None:
     """
     학습 완료 후 추론 서버의 모델 캐시를 재로드합니다.
@@ -754,6 +850,16 @@ with DAG(
         ),
     )
 
+    t_ae_channel_active = PythonOperator(
+        task_id="train_ae_channel_active",
+        python_callable=run_training_ae_channel_active,
+        doc_md=(
+            "채널별 활성 윈도우 통계 피처 AE 학습 (accel x/y/z + torque Ax{n}_Trq(%)). "
+            "13개 통계 피처 → Linear AE (latent=4). "
+            "출력: ch_ae_{ch}_model.onnx + ch_ae_meta.json"
+        ),
+    )
+
     t_reload = PythonOperator(
         task_id="reload_inference_cache",
         python_callable=reload_inference_cache,
@@ -766,4 +872,5 @@ with DAG(
         t_ae_accel,
         t_ae_torque_global, t_ae_torque,
         t_ae_combined_global, t_ae_combined,
+        t_ae_channel_active,
     ] >> t_reload
