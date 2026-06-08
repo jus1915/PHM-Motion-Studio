@@ -42,6 +42,10 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly System.Collections.Generic.Dictionary<string, WindowStateThresholds> _stateThresholds
             = new System.Collections.Generic.Dictionary<string, WindowStateThresholds>();
 
+        // ── 채널 AE 메타: ch_ae_meta.json 기반 채널별 임계값 ─────────────────
+        // null 이면 ch_ae_meta.json 미학습 상태 → 채널 AE 추론 비활성
+        private ChannelAeMeta _channelAeMeta = null;
+
         /// <summary>sensor_type별 window_size 반환. 서버 쿼리 전이거나 없으면 기본값.</summary>
         private int GetWindowSize(string sensorType)
         {
@@ -144,6 +148,22 @@ namespace PHM_Project_DockPanel.Services.Core
             _cts?.Cancel();
         }
 
+        /// <summary>GET /channel_ae_info 로 채널 AE 메타를 갱신합니다.</summary>
+        private async Task RefreshChannelAeMetaAsync(CancellationToken ct)
+        {
+            try
+            {
+                var meta = await _client.GetChannelAeInfoAsync().ConfigureAwait(false);
+                if (meta != null && meta.Channels != null && meta.Channels.Count > 0)
+                {
+                    _channelAeMeta = meta;
+                    AppEvents.RaiseLog(
+                        $"[채널AE] 메타 동기화: {meta.Channels.Count}개 채널  ws={meta.WindowSize}");
+                }
+            }
+            catch { /* 실패 시 이전 값 유지 */ }
+        }
+
         /// <summary>서버 /model_info 를 조회해 _windowSizes, _activityThresholds, _intervalMs 를 갱신합니다.</summary>
         private async Task RefreshWindowSizesAsync(CancellationToken ct)
         {
@@ -190,6 +210,7 @@ namespace PHM_Project_DockPanel.Services.Core
         {
             // 루프 시작 전 서버에서 window_size / 상태 분류 임계값 동기화
             await RefreshWindowSizesAsync(ct);
+            await RefreshChannelAeMetaAsync(ct);
 
             const int RefreshEveryN = 120;  // 약 60초마다 재동기화 (intervalMs≈500ms 기준)
             int loopCount = 0;
@@ -202,17 +223,23 @@ namespace PHM_Project_DockPanel.Services.Core
                 // 주기적으로 서버에서 임계값 재동기화
                 // 프로파일 전환·재학습 후 자동 반영 (컨테이너 재시작 포함)
                 if (++loopCount % RefreshEveryN == 0)
+                {
                     await RefreshWindowSizesAsync(ct);
+                    await RefreshChannelAeMetaAsync(ct);
+                }
 
-                // ── (1) AE 추론: Idle/Pos 무관하게 항상 실행 ──────────────────
+                // ── (1) 채널별 AE: 모든 윈도우 체크, active 윈도우만 추론 ────
+                await RunChannelAeInferenceAll(ct);
+
+                // ── (2) AE 추론: Idle/Pos 무관하게 항상 실행 ──────────────────
                 //   • 가속도: 단일 센서 → axis = null, Op 필터 없음
                 //   • 토크:   축별     → axis = n,    Op 필터 없음
                 await RunAeInferenceAll(ct);
 
-                // ── (2) 결합 이상 스코어: 항상 실행 (/predict/combined → AE 스코어) ──
+                // ── (3) 결합 이상 스코어: 항상 실행 (/predict/combined → AE 스코어) ──
                 await RunCombinedClsAll(ct);
 
-                // ── (3) 가속도/토크 CLS: EnableCls=true + Pos 상태일 때만 실행 ────
+                // ── (4) 가속도/토크 CLS: EnableCls=true + Pos 상태일 때만 실행 ────
                 if (EnableCls)
                 {
                     string op = GetCurrentOp();
@@ -227,6 +254,109 @@ namespace PHM_Project_DockPanel.Services.Core
                     }
                 }
             }
+        }
+
+        // ──────────────────────────────────────────────────────────────────────
+        //  채널 AE 추론 — 모든 윈도우를 서버에 보내고 active 윈도우만 결과 표시
+        // ──────────────────────────────────────────────────────────────────────
+
+        private async Task RunChannelAeInferenceAll(CancellationToken ct)
+        {
+            if (_channelAeMeta == null) return;  // 미학습 상태
+
+            // 결합 CSV 우선, 없으면 개별 CSV 사용
+            string csvPath = null;
+            if (_combinedLogger != null && _combinedLogger.IsLogging)
+                csvPath = _combinedLogger.OutputPath;
+            else if (_accelLogger != null && _accelLogger.IsRunning)
+            {
+                string[] paths = _accelLogger.CsvPathByModule;
+                if (paths != null)
+                    foreach (string p in paths)
+                        if (!string.IsNullOrEmpty(p) && System.IO.File.Exists(p))
+                        { csvPath = p; break; }
+            }
+            if (string.IsNullOrEmpty(csvPath) || !System.IO.File.Exists(csvPath)) return;
+
+            int windowSize = _channelAeMeta.WindowSize;
+
+            foreach (var kv in _channelAeMeta.Channels)
+            {
+                string channelName = kv.Key;
+                if (ct.IsCancellationRequested) return;
+
+                float[] window = ReadSingleChannelWindow(csvPath, channelName, windowSize);
+                if (window == null) continue;
+
+                ChannelAePredictResponse resp = await _client.PredictChannelAeAsync(
+                    channelName, window, windowSize, ct).ConfigureAwait(false);
+
+                if (resp.IsModelMissing) continue;
+                if (resp.IsError)
+                {
+                    AppEvents.RaiseLog(
+                        $"[채널AE 오류] {channelName}: {resp.Error}");
+                    continue;
+                }
+
+                // active 상태일 때만 대시보드에 결과 표시
+                if (resp.ChannelState == ChannelActiveState.Active)
+                {
+                    string sensorType = ChannelSafeName.Make(channelName);
+                    AppEvents.RaiseInferenceResult(sensorType, resp.ToInferenceResult(sensorType));
+                }
+            }
+        }
+
+        /// <summary>
+        /// CSV 파일에서 특정 채널 컬럼의 마지막 windowSize 샘플을 읽습니다.
+        /// 해당 컬럼이 없거나 데이터 부족 시 null 반환.
+        /// </summary>
+        private static float[] ReadSingleChannelWindow(
+            string csvPath, string channelName, int windowSize)
+        {
+            try
+            {
+                string[] lines;
+                using (var fs = new System.IO.FileStream(
+                    csvPath, System.IO.FileMode.Open,
+                    System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
+                using (var sr = new System.IO.StreamReader(fs))
+                    lines = sr.ReadToEnd()
+                        .Split(new char[] { '\r', '\n' },
+                               System.StringSplitOptions.RemoveEmptyEntries);
+
+                if (lines.Length < 2) return null;
+
+                string[] headers = lines[0].Split(',');
+                int colIdx = -1;
+                for (int i = 0; i < headers.Length; i++)
+                    if (string.Equals(headers[i].Trim(), channelName,
+                                      System.StringComparison.OrdinalIgnoreCase))
+                    { colIdx = i; break; }
+
+                if (colIdx < 0) return null;
+
+                // 마지막 windowSize 행
+                int dataCount = lines.Length - 1;
+                if (dataCount < windowSize) return null;
+
+                float[] window = new float[windowSize];
+                int startRow = dataCount - windowSize;
+
+                for (int ri = 0; ri < windowSize; ri++)
+                {
+                    string[] cols = lines[startRow + ri + 1].Split(',');
+                    float v;
+                    if (colIdx < cols.Length &&
+                        float.TryParse(cols[colIdx],
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out v))
+                        window[ri] = v;
+                }
+                return window;
+            }
+            catch { return null; }
         }
 
         // ──────────────────────────────────────────────────────────────────────

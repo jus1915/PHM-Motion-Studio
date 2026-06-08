@@ -179,6 +179,7 @@
     <Compile Include="Services\Core\SegmentValidator.cs" />
     <Compile Include="Services\Core\SignalFeatures.cs" />
     <Compile Include="Services\Core\WindowStateClassifier.cs" />
+    <Compile Include="Services\Core\ChannelActiveClassifier.cs" />
     <Compile Include="Services\DAQ\AccelInfluxPublisher.cs" />
     <Compile Include="Services\DAQ\InfluxDbDataSource.cs" />
     <Compile Include="Services\DAQ\DaqAccelCsvLogger.cs" />

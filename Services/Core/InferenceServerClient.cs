@@ -329,6 +329,82 @@ namespace PHM_Project_DockPanel.Services.Core
             catch { return null; }
         }
 
+        // ── 채널 AE 메타 조회 ─────────────────────────────────────────────────
+        /// <summary>
+        /// GET /channel_ae_info — ch_ae_meta.json 내용을 반환합니다.
+        /// 파일이 없거나 실패 시 null 반환.
+        /// </summary>
+        public async Task<ChannelAeMeta> GetChannelAeInfoAsync()
+        {
+            try
+            {
+                var resp = await _http.GetAsync("channel_ae_info").ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return null;
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonConvert.DeserializeObject<ChannelAeMeta>(body);
+            }
+            catch { return null; }
+        }
+
+        // ── 채널 AE 추론 요청 ─────────────────────────────────────────────────
+        /// <summary>
+        /// POST /predict/channel_ae — 단일 채널 raw 윈도우를 전송하고
+        /// active_state + AE 추론 결과를 받습니다.
+        /// </summary>
+        public async Task<ChannelAePredictResponse> PredictChannelAeAsync(
+            string            channel,
+            float[]           window,
+            int               windowSize,
+            CancellationToken ct = default)
+        {
+            // "channel|windowSize" 조합으로 모델 없음 캐시 관리
+            string cacheKey = $"ch_ae|{channel}";
+            if (IsModelKnownMissing(cacheKey, null))
+                return ChannelAePredictResponse.MissingModel(channel);
+
+            var req = new
+            {
+                channel     = channel,
+                window      = window,
+                window_size = windowSize,
+            };
+
+            string json    = JsonConvert.SerializeObject(req);
+            var    content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+            HttpResponseMessage resp;
+            try
+            {
+                resp = await _http.PostAsync("predict/channel_ae", content, ct).ConfigureAwait(false);
+            }
+            catch (System.Exception ex)
+            {
+                return ChannelAePredictResponse.Fail($"연결 오류: {ex.Message}");
+            }
+
+            string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                if ((int)resp.StatusCode == 404)
+                {
+                    MarkModelMissing(cacheKey, null);
+                    return ChannelAePredictResponse.MissingModel(channel);
+                }
+                return ChannelAePredictResponse.Fail($"HTTP {(int)resp.StatusCode}: {body}");
+            }
+
+            try
+            {
+                ClearModelMissing(cacheKey, null);
+                return JsonConvert.DeserializeObject<ChannelAePredictResponse>(body)
+                       ?? ChannelAePredictResponse.Fail("응답 역직렬화 실패");
+            }
+            catch (System.Exception ex)
+            {
+                return ChannelAePredictResponse.Fail($"응답 파싱 오류: {ex.Message}");
+            }
+        }
+
         public void Dispose() => _http.Dispose();
     }
 
