@@ -117,46 +117,6 @@ def load_params(params_path: str) -> dict:
         return json.load(f)
 
 
-def _apply_activity_filter(
-    windows: "List[Tuple[np.ndarray, int]]",
-    quantile: float,
-    normalize: bool,
-) -> "Tuple[List[Tuple[np.ndarray, int]], float]":
-    """RMS 기반 활동성 필터 — Op 컬럼 없이 Idle 윈도우를 자동 제거합니다.
-
-    windows 는 normalize=False(raw) 상태로 전달해야 합니다.
-    필터 후 normalize=True 이면 남은 윈도우에 per-sample z-score 를 적용합니다.
-
-    Args:
-        windows : [(raw_window, label_int), ...] — raw 상태
-        quantile: 하위 quantile 이하 RMS 윈도우를 Idle로 간주해 제거 (예: 0.30)
-        normalize: True 이면 필터 후 z-score 정규화 적용
-
-    Returns:
-        (filtered_windows, activity_rms_thr)
-        activity_rms_thr: C# 추론 시 동일하게 적용해야 하는 RMS 하한값.
-                          이 값 미만 윈도우는 추론 건너뜀 (Idle로 간주).
-    """
-    if not windows:
-        return windows, 0.0
-    rms = np.array(
-        [np.sqrt(np.mean(w.astype(np.float64) ** 2)) for w, _ in windows],
-        dtype=np.float64,
-    )
-    thr  = float(np.quantile(rms, quantile))
-    mask = rms > thr
-    kept    = [windows[i] for i in range(len(windows)) if mask[i]]
-    removed = len(windows) - len(kept)
-    print(
-        f"[activity_filter] RMS thr={thr:.6f} (Q{quantile*100:.0f})  "
-        f"제거={removed}/{len(windows)}  남음={len(kept)}",
-        file=sys.stderr,
-    )
-    if normalize:
-        kept = [(_zscore_normalize(w), lbl) for w, lbl in kept]
-    return kept, thr
-
-
 def _zscore_normalize(window: np.ndarray) -> np.ndarray:
     """윈도우를 채널별 z-score 정규화합니다 (C# ZScoreInPlace와 동일 로직).
 
@@ -229,14 +189,163 @@ def _apply_global_norm(
     ]
 
 
+def _add_feature_channels(
+    windows: List[Tuple[np.ndarray, int]],
+    add_fft: bool = True,
+    add_derivative: bool = True,
+    add_abs: bool = True,
+) -> List[Tuple[np.ndarray, int]]:
+    """각 윈도우(T, C)에 FFT magnitude·derivative·abs 채널을 추가합니다.
+
+    원본 채널은 이미 z-score 정규화된 상태로 전달됩니다.
+    추가 채널:
+      • FFT magnitude : rfft 결과(T//2+1, C)를 tile → (T, C), 채널별 z-score 정규화
+      • derivative    : 1차 차분, prepend=첫 행으로 길이 유지 (T, C)
+      • abs           : 절댓값 (T, C) — 충격·과부하 에너지 패턴 포착
+
+    최종 shape: (T, C × factor)  factor ∈ {1, 2, 3, 4}
+
+    Args:
+        windows   : [(window_np (T, C), label_int), ...] — CLS 윈도우 목록
+        add_fft   : FFT 채널 추가 여부 (기본 True)
+        add_derivative: 1차 차분 채널 추가 여부 (기본 True)
+        add_abs   : 절댓값 채널 추가 여부 (기본 True)
+
+    Returns:
+        채널 증강된 윈도우 목록
+    """
+    if not (add_fft or add_derivative or add_abs):
+        return windows
+
+    augmented: List[Tuple[np.ndarray, int]] = []
+    for w, lbl in windows:
+        T, C = w.shape
+        parts = [w]
+
+        if add_fft:
+            # rfft → (T//2+1, C), tile to (T, C), 채널별 z-score 정규화
+            fft_raw = np.abs(np.fft.rfft(w, axis=0)).astype(np.float32)  # (T//2+1, C)
+            half = fft_raw.shape[0]
+            repeats = math.ceil(T / half)
+            fft_tiled = np.tile(fft_raw, (repeats, 1))[:T]               # (T, C)
+            fft_tiled = _zscore_normalize(fft_tiled)
+            parts.append(fft_tiled)
+
+        if add_derivative:
+            deriv = np.diff(w, axis=0, prepend=w[:1]).astype(np.float32)  # (T, C)
+            parts.append(deriv)
+
+        if add_abs:
+            parts.append(np.abs(w).astype(np.float32))                    # (T, C)
+
+        augmented.append((np.concatenate(parts, axis=1).astype(np.float32), lbl))
+
+    return augmented
+
+
+def _add_mixed_feature_channels(
+    windows: List[Tuple[np.ndarray, int]],
+    channels: List[str],
+    add_accel_fft: bool = True,
+    add_accel_derivative: bool = True,
+    add_torque_derivative: bool = True,
+    add_torque_stats: bool = True,
+    add_abs: bool = True,
+) -> List[Tuple[np.ndarray, int]]:
+    """가속도 + 토크 혼합 채널에 센서별 최적화 특성을 추가합니다.
+
+    가속도 채널 (x/y/z):
+      • FFT magnitude — rfft → tile(T) → 채널별 z-score
+      • 1차 차분 derivative
+
+    토크 채널 (*_Trq%):
+      • 1차 차분 derivative
+      • 윈도우 통계 tile (mean·std·rms·min·max·ptp) — 절대 진폭 보존
+
+    공통:
+      • abs (모든 원본 채널)
+
+    normalize=False 로 로드된 RAW 윈도우를 전제합니다.
+    토크 통계는 원시값 그대로 보존해 진폭 정보를 유지합니다.
+
+    Args:
+        windows  : [(window_np (T, C), label_int), ...] — RAW 윈도우 목록
+        channels : window의 채널 순서와 동일한 컬럼명 목록
+        add_accel_fft       : 가속도 FFT 채널 추가 여부
+        add_accel_derivative: 가속도 1차 차분 채널 추가 여부
+        add_torque_derivative: 토크 1차 차분 채널 추가 여부
+        add_torque_stats    : 토크 통계 채널 추가 여부 (6종)
+        add_abs             : 전채널 절댓값 추가 여부
+
+    Returns:
+        채널 증강된 윈도우 목록
+    """
+    accel_idx  = [i for i, ch in enumerate(channels) if ch.strip().lower() in ("x", "y", "z")]
+    torque_idx = [i for i, ch in enumerate(channels) if "trq" in ch.lower()]
+
+    if not (add_accel_fft or add_accel_derivative or
+            add_torque_derivative or add_torque_stats or add_abs):
+        return windows
+
+    augmented: List[Tuple[np.ndarray, int]] = []
+    for w, lbl in windows:
+        T, C = w.shape
+        parts: List[np.ndarray] = [w]
+
+        # ── 가속도 채널 ──────────────────────────────────────────────────────
+        if accel_idx:
+            accel = w[:, accel_idx]  # (T, n_accel)
+
+            if add_accel_fft:
+                fft_raw   = np.abs(np.fft.rfft(accel, axis=0)).astype(np.float32)
+                half      = fft_raw.shape[0]
+                repeats   = math.ceil(T / half)
+                fft_tiled = np.tile(fft_raw, (repeats, 1))[:T]        # (T, n_accel)
+                fft_tiled = _zscore_normalize(fft_tiled)               # 주파수 패턴 강조
+                parts.append(fft_tiled)
+
+            if add_accel_derivative:
+                deriv = np.diff(accel, axis=0, prepend=accel[:1]).astype(np.float32)
+                parts.append(deriv)
+
+        # ── 토크 채널 ───────────────────────────────────────────────────────
+        if torque_idx:
+            torque = w[:, torque_idx]  # (T, n_torque)
+
+            if add_torque_derivative:
+                deriv = np.diff(torque, axis=0, prepend=torque[:1]).astype(np.float32)
+                parts.append(deriv)
+
+            if add_torque_stats:
+                # 윈도우 통계 6종 → (T, n_torque×6) tile (진폭 절대값 보존)
+                stats_rows = np.array([
+                    torque.mean(axis=0),
+                    torque.std(axis=0),
+                    np.sqrt(np.mean(torque.astype(np.float64) ** 2, axis=0)),  # RMS
+                    torque.min(axis=0),
+                    torque.max(axis=0),
+                    torque.ptp(axis=0),  # peak-to-peak
+                ], dtype=np.float32)  # (6, n_torque)
+                stats_flat  = stats_rows.T.reshape(1, -1)                   # (1, n_torque*6)
+                stats_tiled = np.tile(stats_flat, (T, 1)).astype(np.float32)# (T, n_torque*6)
+                parts.append(stats_tiled)
+
+        # ── 공통: 절댓값 ────────────────────────────────────────────────────
+        if add_abs:
+            parts.append(np.abs(w).astype(np.float32))  # (T, C)
+
+        augmented.append((np.concatenate(parts, axis=1).astype(np.float32), lbl))
+
+    return augmented
+
+
 def _detect_sensor_type_from_headers(csv_path: str) -> str:
     """CSV 헤더를 읽어 센서 타입을 추론합니다.
 
     Returns:
-        "combined" — x/y/z 가속도 AND Trq 컬럼이 모두 있는 경우
-        "torque"   — Trq 관련 컬럼이 있고 x/y/z 가속도 컬럼이 없는 경우
-        "accel"    — x, y, z 컬럼만 있는 경우
-        ""         — 판별 불가
+        "torque" — Trq 관련 컬럼이 있고 x/y/z 가속도 컬럼이 없는 경우
+        "accel"  — x, y, z 컬럼이 있는 경우
+        ""       — 판별 불가
     """
     import csv as _csv
     for enc in ("utf-8-sig", "cp949", "utf-8", "latin-1"):
@@ -249,7 +358,7 @@ def _detect_sensor_type_from_headers(csv_path: str) -> str:
             has_trq = any("trq" in h or "vel(mm" in h or "pos(mm" in h for h in headers)
             has_xyz = any(h in ("x", "y", "z") for h in headers)
             if has_trq and has_xyz:
-                return "combined"   # 통합 CSV (accel + torque 동시 수집)
+                return "combined"   # accel x/y/z + torque 컬럼 모두 존재 → combined CSV
             if has_trq:
                 return "torque"
             if has_xyz:
@@ -384,11 +493,7 @@ def load_windows_from_dir(
     sensor_type: str = "",
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
-    activity_filter_quantile: float = 0.0,
-) -> Tuple[List[Tuple[np.ndarray, int]], float]:
-    """Returns (windows, activity_rms_thr).
-    activity_rms_thr > 0 only when activity_filter_quantile > 0;
-    C# inference must skip windows whose RMS < activity_rms_thr."""
+) -> List[Tuple[np.ndarray, int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
     레이블 우선순위:
@@ -410,61 +515,46 @@ def load_windows_from_dir(
     """
     name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
     all_windows: List[Tuple[np.ndarray, int]] = []
+    all_seg_ids: List[int] = []
+    _seg_counter = 0
     skipped = 0
 
     csv_files = list(Path(data_dir).rglob("*.csv"))
     if not csv_files:
         print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
-        return []
+        return [], []
 
     print(f"[data] rglob 결과: {len(csv_files)}개 CSV  (예: {csv_files[0] if csv_files else 'N/A'})", file=sys.stderr)
 
-    # sensor_type 필터 — (1) CSV 헤더 감지 우선, (2) 경로 컴포넌트, (3) 채널 존재 여부 fallback
-    #   이 프로젝트 데이터는 모든 센서를 한 파일에 담은 Combined CSV이므로 헤더 감지가 1차.
-    #   경로 필터는 Accel/Torque 폴더로 분리된 데이터셋용 fallback — 폴더명이 우연히
-    #   'torque' 등과 일치해 헤더 감지를 가로막는 문제를 방지한다.
+    # sensor_type 필터 — (1) 경로 컴포넌트 우선, (2) 없으면 헤더 기반 fallback
     filter_kw = sensor_type.strip().lower()
-    if filter_kw in ("accel", "torque", "combined"):
-        # 1차: CSV 헤더를 읽어 센서 타입 추론
-        # combined 파일(accel+torque)은 accel/torque 어느 쪽 요청에도 사용 가능
-        def _header_match(f: "Path") -> bool:
-            detected = _detect_sensor_type_from_headers(str(f))
-            if detected == filter_kw:
-                return True
-            # combined CSV는 accel / torque / combined 세 가지 학습에 모두 사용 가능
-            if detected == "combined" and filter_kw in ("accel", "torque", "combined"):
-                return True
-            return False
-
-        header_filtered = [f for f in csv_files if _header_match(f)]
-        if header_filtered:
-            csv_files = header_filtered
-            print(f"[data] sensor_type={filter_kw} 헤더 감지 → {len(csv_files)}개 파일", file=sys.stderr)
+    if filter_kw in ("accel", "torque"):
+        # 1차: 경로에 "Accel" / "Torque" 폴더가 있는 구조적 데이터
+        path_filtered = [f for f in csv_files
+                         if any(p.lower() == filter_kw for p in f.parts)]
+        print(f"[data] 경로필터({filter_kw}): {len(path_filtered)}/{len(csv_files)}  "
+              f"부분목록={[str(f.parts[-2:]) for f in path_filtered[:3]]}", file=sys.stderr)
+        if path_filtered:
+            csv_files = path_filtered
+            print(f"[data] sensor_type={filter_kw} 경로 필터 → {len(csv_files)}개 파일", file=sys.stderr)
         else:
-            # 2차 fallback: 경로에 "Accel"/"Torque"/"Combined" 폴더가 있는 구조적 데이터
-            path_filtered = [f for f in csv_files
-                             if any(p.lower() == filter_kw for p in f.parts)]
-            print(f"[data] 경로필터({filter_kw}): {len(path_filtered)}/{len(csv_files)}  "
-                  f"부분목록={[str(f.parts[-2:]) for f in path_filtered[:3]]}", file=sys.stderr)
-            if path_filtered:
-                csv_files = path_filtered
-                print(f"[data] sensor_type={filter_kw} 경로 필터(헤더 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
-            else:
-                # 3차 fallback: 요청 채널이 CSV 헤더에 실제로 존재하는지 확인
-                import csv as _csv_mod
-                def _has_channels(f: "Path") -> bool:
-                    ch_lower = [c.strip().lower() for c in channels]
-                    for enc in ("utf-8-sig", "cp949", "utf-8"):
-                        try:
-                            with open(str(f), newline="", encoding=enc, errors="replace") as fh:
-                                hdrs = [h.strip().lower() for h in (next(_csv_mod.reader(fh), []))]
-                            return all(c in hdrs for c in ch_lower)
-                        except Exception:
-                            continue
-                    return False
-
-                csv_files = [f for f in csv_files if _has_channels(f)]
-                print(f"[data] sensor_type={filter_kw} 채널 존재 여부 기반 → {len(csv_files)}개 파일", file=sys.stderr)
+            # 2차 fallback: CSV 헤더를 읽어 센서 타입 추론 (평탄한 폴더 구조 대응)
+            csv_files = [f for f in csv_files
+                         if _detect_sensor_type_from_headers(str(f)) == filter_kw]
+            print(f"[data] sensor_type={filter_kw} 헤더 감지(경로 미매칭) → {len(csv_files)}개 파일", file=sys.stderr)
+    elif filter_kw == "combined":
+        # 1차: 파일명에 "_combined" 포함 (CombinedCsvLogger 생성 규칙)
+        path_filtered = [f for f in csv_files if "_combined" in f.name.lower()]
+        print(f"[data] 경로필터(combined): {len(path_filtered)}/{len(csv_files)}  "
+              f"부분목록={[f.name for f in path_filtered[:3]]}", file=sys.stderr)
+        if path_filtered:
+            csv_files = path_filtered
+            print(f"[data] sensor_type=combined 파일명 필터 → {len(csv_files)}개 파일", file=sys.stderr)
+        else:
+            # 2차 fallback: 헤더로 combined 감지 (accel x/y/z + torque 컬럼 모두 존재)
+            csv_files = [f for f in csv_files
+                         if _detect_sensor_type_from_headers(str(f)) == "combined"]
+            print(f"[data] sensor_type=combined 헤더 감지 → {len(csv_files)}개 파일", file=sys.stderr)
 
     for csv_path in csv_files:
         segments, label_str = _read_signal_csv(str(csv_path), channels, label_column,
@@ -485,15 +575,18 @@ def load_windows_from_dir(
             continue
 
         # 구간별 윈도우 추출 (경계 오염 방지)
-        # activity_filter 사용 시 raw 상태로 추출 후 나중에 일괄 필터+정규화
-        _extract_norm = normalize if activity_filter_quantile <= 0.0 else False
         file_windows: List[Tuple[np.ndarray, int]] = []
+        file_seg_ids: List[int] = []
         short_segs = 0
         for seg in segments:
             if seg.shape[0] < window_size:
                 short_segs += 1
+                _seg_counter += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=_extract_norm))
+            seg_wins = _extract_windows(seg, label_int, window_size, stride, normalize=normalize)
+            file_windows.extend(seg_wins)
+            file_seg_ids.extend([_seg_counter] * len(seg_wins))
+            _seg_counter += 1
 
         if not file_windows:
             print(
@@ -511,11 +604,7 @@ def load_windows_from_dir(
                 file=sys.stderr,
             )
         all_windows.extend(file_windows)
-
-    # 활동성 필터 (Op 컬럼 없이 RMS 기반 Idle 제거)
-    activity_rms_thr = 0.0
-    if activity_filter_quantile > 0.0 and all_windows:
-        all_windows, activity_rms_thr = _apply_activity_filter(all_windows, activity_filter_quantile, normalize)
+        all_seg_ids.extend(file_seg_ids)
 
     # 클래스별 윈도우 수 진단 출력
     cls_dist: Dict[str, int] = {}
@@ -535,7 +624,7 @@ def load_windows_from_dir(
             f"class_names={class_names}, label_column 확인 필요.",
             file=sys.stderr,
         )
-    return all_windows, activity_rms_thr
+    return all_windows, all_seg_ids
 
 
 def load_windows_from_file_list(
@@ -547,9 +636,7 @@ def load_windows_from_file_list(
     stride: int,
     normalize: bool = True,
     filter_op_column: Optional[str] = None,
-    activity_filter_quantile: float = 0.0,
-) -> Tuple[List[Tuple[np.ndarray, int]], float]:
-    """Returns (windows, activity_rms_thr). See load_windows_from_dir."""
+) -> List[Tuple[np.ndarray, int]]:
     """명시적 파일 목록에서 윈도우를 추출합니다.
 
     Args:
@@ -565,6 +652,8 @@ def load_windows_from_file_list(
     """
     name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
     all_windows: List[Tuple[np.ndarray, int]] = []
+    all_seg_ids: List[int] = []
+    _seg_counter = 0
     skipped = 0
 
     for entry in csv_files:
@@ -587,15 +676,18 @@ def load_windows_from_file_list(
             continue
 
         # 구간별 윈도우 추출 (경계 오염 방지)
-        # activity_filter 사용 시 raw 상태로 추출 후 나중에 일괄 필터+정규화
-        _extract_norm = normalize if activity_filter_quantile <= 0.0 else False
         file_windows: List[Tuple[np.ndarray, int]] = []
+        file_seg_ids: List[int] = []
         short_segs = 0
         for seg in segments:
             if seg.shape[0] < window_size:
                 short_segs += 1
+                _seg_counter += 1
                 continue
-            file_windows.extend(_extract_windows(seg, label_int, window_size, stride, normalize=_extract_norm))
+            seg_wins = _extract_windows(seg, label_int, window_size, stride, normalize=normalize)
+            file_windows.extend(seg_wins)
+            file_seg_ids.extend([_seg_counter] * len(seg_wins))
+            _seg_counter += 1
 
         if not file_windows:
             print(
@@ -607,18 +699,14 @@ def load_windows_from_file_list(
             continue
 
         all_windows.extend(file_windows)
-
-    # 활동성 필터 (Op 컬럼 없이 RMS 기반 Idle 제거)
-    activity_rms_thr = 0.0
-    if activity_filter_quantile > 0.0 and all_windows:
-        all_windows, activity_rms_thr = _apply_activity_filter(all_windows, activity_filter_quantile, normalize)
+        all_seg_ids.extend(file_seg_ids)
 
     print(
         f"[data] 파일 목록 로드 완료: {len(csv_files) - skipped}개 파일, "
         f"{len(all_windows)}개 윈도우 (건너뜀={skipped})",
         file=sys.stderr,
     )
-    return all_windows, activity_rms_thr
+    return all_windows, all_seg_ids
 
 
 # ── PyTorch Dataset ──────────────────────────────────────────────────────────
@@ -737,31 +825,24 @@ class AE1DCNN(nn.Module):
 
     입력/출력 포맷: (B, T, C) — channels last, C# 대시보드와 동일.
     구조: Encoder(Conv × 3, MaxPool × 2) → interpolate(T 복원) → Decoder(Conv × 3)
-
-    Args:
-        n_channels:   입력/출력 채널 수
-        base_filters: 첫 번째 인코더 레이어 필터 수 (기본 32).
-                      낮출수록 모델 용량 감소 → 이상 패턴 재구성 실패 확률 상승
-                      (이상탐지 민감도 ↑).  권장: 8 / 16 / 32 / 64
     """
 
-    def __init__(self, n_channels: int, base_filters: int = 32) -> None:
+    def __init__(self, n_channels: int) -> None:
         super().__init__()
-        f = base_filters
         self.encoder = nn.Sequential(
-            nn.Conv1d(n_channels, f,   kernel_size=7, padding=3),
-            nn.BatchNorm1d(f),   nn.ReLU(inplace=True), nn.MaxPool1d(2),
-            nn.Conv1d(f,   f*2, kernel_size=5, padding=2),
-            nn.BatchNorm1d(f*2), nn.ReLU(inplace=True), nn.MaxPool1d(2),
-            nn.Conv1d(f*2, f*4, kernel_size=3, padding=1),
-            nn.BatchNorm1d(f*4), nn.ReLU(inplace=True),
+            nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
+            nn.BatchNorm1d(32), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64), nn.ReLU(inplace=True), nn.MaxPool1d(2),
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128), nn.ReLU(inplace=True),
         )
         self.decoder = nn.Sequential(
-            nn.Conv1d(f*4, f*2, kernel_size=3, padding=1),
-            nn.BatchNorm1d(f*2), nn.ReLU(inplace=True),
-            nn.Conv1d(f*2, f,   kernel_size=5, padding=2),
-            nn.BatchNorm1d(f),   nn.ReLU(inplace=True),
-            nn.Conv1d(f, n_channels, kernel_size=7, padding=3),
+            nn.Conv1d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64), nn.ReLU(inplace=True),
+            nn.Conv1d(64, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32), nn.ReLU(inplace=True),
+            nn.Conv1d(32, n_channels, kernel_size=7, padding=3),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -774,11 +855,11 @@ class AE1DCNN(nn.Module):
             recon: (B, T, C) — 복원 신호
         """
         T = x.size(1)
-        z = self.encoder(x.permute(0, 2, 1))         # (B, C, T) → (B, f*4, T//4)
-        z_up = torch.nn.functional.interpolate(       # (B, f*4, T//4) → (B, f*4, T)
+        z = self.encoder(x.permute(0, 2, 1))         # (B, C, T) → encoder → (B, 128, T//4)
+        z_up = torch.nn.functional.interpolate(       # (B, 128, T//4) → (B, 128, T)
             z, size=T, mode="linear", align_corners=False
         )
-        return self.decoder(z_up).permute(0, 2, 1)   # (B, T, C)
+        return self.decoder(z_up).permute(0, 2, 1)   # (B, C, T) → (B, T, C)
 
 
 # ── AE 학습 루프 ──────────────────────────────────────────────────────────────
@@ -788,14 +869,16 @@ def train_ae(
     windows: List[Tuple[np.ndarray, int]],
     n_channels: int,
     mlflow_run=None,
-    ae_threshold_percentile: float = 99,
-) -> Tuple["AE1DCNN", float, int, float, float, float, float, np.ndarray, np.ndarray]:
-    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std)를 반환합니다.
+) -> Tuple["AE1DCNN", float, int, float, float, float]:
+    """AE-CNN1D 모델을 학습하고 (model, best_val_mae, epochs, mae_thr, rms_mean, rms_thr)를 반환합니다.
 
     정규화 전략:
-        - 전역(global) 정규화: 훈련 데이터 전체의 채널별 mean/std 로 정규화.
-          → 절대 진폭·에너지 정보가 보존되어 AE 재구성 오차로 이상 탐지 가능.
-        - norm_mean / norm_std 는 _meta.json 에 저장되어 평가 시 동일하게 적용.
+        - 윈도우별 per-sample z-score 로 학습 (형태·주파수 패턴 학습, 수렴 안정).
+        - 진폭(에너지) 이상은 별도 RMS 통계로 감지 → 복합 스코어 사용.
+
+    스코어 = mae_score + alpha * rms_score  (C# 에서 계산)
+        mae_score  = ae_mae  / mae_thr    (형태 이상)
+        rms_score  = max(0, (rms - rms_mean) / rms_std)  (진폭 이상)
     """
     seed = int(params.get("seed", 42))
     torch.manual_seed(seed); random.seed(seed); np.random.seed(seed)
@@ -822,14 +905,8 @@ def train_ae(
         file=sys.stderr,
     )
 
-    # ── 전역 정규화 (진폭 보존) ──────────────────────────────────────────────
-    norm_mean, norm_std = _compute_global_stats(windows)
-    print(
-        f"[train_ae] 전역 정규화 — mean={np.round(norm_mean, 4).tolist()}  "
-        f"std={np.round(norm_std, 4).tolist()}",
-        file=sys.stderr,
-    )
-    windows_norm = _apply_global_norm(windows, norm_mean, norm_std)
+    # ── per-sample z-score 적용 (형태 학습) ─────────────────────────────────
+    windows_norm = [(_zscore_normalize(w), lbl) for w, lbl in windows]
 
     # 랜덤 분할 (레이블 불필요)
     n = len(windows_norm)
@@ -843,10 +920,8 @@ def train_ae(
     val_loader   = DataLoader(Subset(dataset, val_idx),   batch_size=batch_size,
                               shuffle=False, num_workers=0, pin_memory=False)
 
-    base_filters = int(params.get("ae_base_filters", 32))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = AE1DCNN(n_channels=n_channels, base_filters=base_filters).to(device)
-    print(f"[train_ae] AE1DCNN base_filters={base_filters}  파라미터 수≈{sum(p.numel() for p in model.parameters()):,}", file=sys.stderr)
+    model  = AE1DCNN(n_channels=n_channels).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
@@ -911,23 +986,17 @@ def train_ae(
             per_sample_maes.extend(mae_per.cpu().numpy().tolist())
 
     if per_sample_maes:
-        err_arr = np.array(per_sample_maes, dtype=np.float64)
-        # 퍼센타일 기반 임계값: mean+2σ보다 분포 형태에 덜 민감하고 해석이 명확함
-        mae_thr = float(np.percentile(err_arr, ae_threshold_percentile))
-        print(
-            f"[train_ae] MAE 임계값 ({ae_threshold_percentile}th pct) = {mae_thr:.6f}  "
-            f"(mean={err_arr.mean():.6f}  std={err_arr.std():.6f})",
-            file=sys.stderr,
-        )
+        err_arr   = np.array(per_sample_maes, dtype=np.float64)
+        mae_thr   = float(err_arr.mean() + 2.0 * err_arr.std())
     else:
-        mae_thr = float(best_val_mae * 2.0)
+        mae_thr   = float(best_val_mae * 2.0)
 
     print(
         f"[train_ae] 완료 — best_val_mae={best_val_mae:.6f}  "
         f"mae_thr={mae_thr:.6f}  rms_mean={rms_mean:.4f}  rms_std={rms_std:.4f}  rms_thr={rms_thr:.4f}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std, norm_mean, norm_std
+    return model, best_val_mae, epochs_trained, mae_thr, rms_mean, rms_thr, rms_std
 
 
 # ── AE ONNX 내보내기 ──────────────────────────────────────────────────────────
@@ -976,7 +1045,8 @@ def train(
     n_classes: int,
     n_channels: int,
     mlflow_run=None,
-) -> Tuple[CNN1DClassifier, float, int]:
+    seg_ids: Optional[List[int]] = None,
+) -> Tuple[CNN1DClassifier, float, Optional[float], int]:
     """CNN1D 모델을 학습하고 최적 모델을 반환합니다.
 
     Args:
@@ -1047,9 +1117,39 @@ def train(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-6
     )
-    criterion = nn.CrossEntropyLoss()
+
+    # ── 손실 함수: label smoothing + 클래스 가중치 ────────────────────────────
+    label_smoothing = float(params.get("label_smoothing", 0.1))
+
+    # 클래스 가중치 — 불균형 클래스 대응 (use_class_weights: true 기본값)
+    use_class_weights = bool(params.get("use_class_weights", True))
+    weight_tensor = None
+    if use_class_weights and n_classes > 1:
+        counts = np.bincount(
+            [lbl for _, lbl in windows], minlength=n_classes
+        ).astype(np.float64)
+        counts = np.where(counts == 0, 1.0, counts)   # 샘플 없는 클래스 0 나눗셈 방지
+        weights = 1.0 / counts
+        weights = (weights / weights.sum() * n_classes).astype(np.float32)
+        weight_tensor = torch.tensor(weights, dtype=torch.float32).to(device)
+        print(
+            f"[train] 클래스 가중치: "
+            + ", ".join(f"cls{i}={w:.3f}" for i, w in enumerate(weights)),
+            file=sys.stderr,
+        )
+
+    try:
+        criterion = nn.CrossEntropyLoss(
+            weight=weight_tensor, label_smoothing=label_smoothing
+        )
+        print(f"[train] CrossEntropyLoss(label_smoothing={label_smoothing}, weighted={weight_tensor is not None})",
+              file=sys.stderr)
+    except TypeError:
+        # PyTorch < 1.10 — label_smoothing 미지원
+        criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
     best_val_acc = 0.0
+    best_seg_acc: Optional[float] = None
     best_state: dict = {}
     no_improve = 0
     epochs_trained = 0
@@ -1074,26 +1174,50 @@ def train(
 
         # ── 검증 ─────────────────────────────────────────────────────────────
         model.eval()
-        correct = 0
-        total = 0
+        _val_preds: List[int] = []
+        _val_labels: List[int] = []
         with torch.no_grad():
             for x_batch, y_batch in val_loader:
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
                 logits = model(x_batch)
                 preds = logits.argmax(dim=1)
-                correct += (preds == y_batch).sum().item()
-                total += y_batch.size(0)
+                _val_preds.extend(preds.cpu().tolist())
+                _val_labels.extend(y_batch.cpu().tolist())
 
-        val_acc = correct / total if total > 0 else 0.0
+        # 윈도우 단위 정확도
+        _win_correct = sum(p == l for p, l in zip(_val_preds, _val_labels))
+        val_acc = _win_correct / len(_val_labels) if _val_labels else 0.0
         epochs_trained = epoch
+
+        # 구간 단위 정확도 (다수결 투표)
+        seg_acc: Optional[float] = None
+        if seg_ids is not None:
+            from collections import defaultdict, Counter as _Counter
+            _seg_p: Dict[int, List[int]] = defaultdict(list)
+            _seg_l: Dict[int, int] = {}
+            for _i, (_p, _l) in enumerate(zip(_val_preds, _val_labels)):
+                _sid = seg_ids[val_idx[_i]]
+                _seg_p[_sid].append(_p)
+                _seg_l[_sid] = _l
+            _seg_correct = sum(
+                _Counter(_preds).most_common(1)[0][0] == _seg_l[_sid]
+                for _sid, _preds in _seg_p.items()
+            )
+            seg_acc = _seg_correct / len(_seg_p) if _seg_p else 0.0
 
         # LR 스케줄러 업데이트 (val_acc 기준)
         scheduler.step(val_acc)
 
         # stdout JSON 로그 (C# 대시보드 파싱 용도)
-        log_line = json.dumps({"epoch": epoch, "loss": round(avg_loss, 6), "val_acc": round(val_acc, 6)})
-        print(log_line, flush=True)
+        log_entry: Dict[str, object] = {
+            "epoch": epoch,
+            "loss": round(avg_loss, 6),
+            "val_acc": round(val_acc, 6),
+        }
+        if seg_acc is not None:
+            log_entry["seg_acc"] = round(seg_acc, 6)
+        print(json.dumps(log_entry), flush=True)
 
         if mlflow_run is not None:
             try:
@@ -1106,6 +1230,7 @@ def train(
         # 최적 모델 저장
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+            best_seg_acc = seg_acc
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             no_improve = 0
         else:
@@ -1124,11 +1249,13 @@ def train(
         model.load_state_dict(best_state)
 
     model.eval()
+    _seg_str = f"{best_seg_acc:.4f}" if best_seg_acc is not None else "N/A"
     print(
-        f"[train] 학습 완료 — best_val_acc={best_val_acc:.4f}, epochs={epochs_trained}",
+        f"[train] 학습 완료 — val_acc(윈도우)={best_val_acc:.4f}  "
+        f"val_acc(구간)={_seg_str}  epochs={epochs_trained}",
         file=sys.stderr,
     )
-    return model, best_val_acc, epochs_trained
+    return model, best_val_acc, best_seg_acc, epochs_trained
 
 
 # ── ONNX 내보내기 ─────────────────────────────────────────────────────────────
@@ -1199,14 +1326,11 @@ def save_meta(
     rms_mean: Optional[float] = None,
     rms_thr:  Optional[float] = None,
     rms_std:  Optional[float] = None,
-    norm_mean: Optional[np.ndarray] = None,
-    norm_std:  Optional[np.ndarray] = None,
-    n_channels_override: Optional[int] = None,
-    activity_rms_thr: float = 0.0,  # 추론 시 Idle 스킵 기준 RMS 하한값 (0.0=필터 없음)
+    n_channels_override: Optional[int] = None,  # _resolve_channels 확장 후 실제 채널 수
 ) -> str:
     """ONNX 파일 옆에 _meta.json 사이드카를 저장합니다.
 
-    session="AD" (AE) 인 경우 kind=AE-CNN1D, output_name=recon, threshold/norm_mean/norm_std 포함.
+    session="AD" (AE) 인 경우 kind=AE-CNN1D, output_name=recon, threshold 포함.
     session="FD" (CLS) 인 경우 kind=CNN1D, output_name=logits, val_accuracy 포함.
 
     Returns:
@@ -1228,20 +1352,21 @@ def save_meta(
         "window_size": int(params.get("window_size", 1024)),
         "input_name":  "input",
         "output_name": "recon" if is_ae else "logits",
-        # norm_mean이 있으면 전역 정규화 → per-sample 불필요
-        "standardize_per_sample": norm_mean is None,
+        "standardize_per_sample": True,
         "epochs_trained": epochs_trained,
     }
 
-    # 전역 정규화 통계 저장 (추론 시 동일 정규화 적용)
-    if norm_mean is not None:
-        meta["norm_mean"] = [round(float(v), 8) for v in norm_mean]
-    if norm_std is not None:
-        meta["norm_std"]  = [round(float(v), 8) for v in norm_std]
+    # ── 채널 증강 파라미터 (추론 서버 전처리 재현용) ────────────────────────────
+    meta["augment_mode"]            = params.get("augment_mode", "standard")
+    meta["add_augmented_channels"]  = bool(params.get("add_augmented_channels", True))
+    meta["add_fft_channels"]        = bool(params.get("add_fft_channels",        True))
+    meta["add_derivative_channels"] = bool(params.get("add_derivative_channels", True))
+    meta["add_abs_channels"]        = bool(params.get("add_abs_channels",        True))
+    meta["add_torque_stats"]        = bool(params.get("add_torque_stats",        True))
 
     if is_ae:
         meta["val_mae"]   = round(val_mse or 0.0, 6)   # val_mse 인수가 실제로는 val_mae 값
-        meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (global norm 공간)
+        meta["threshold"] = round(threshold or 0.0, 6)  # MAE 임계값 (z-score 공간)
         normal_classes    = params.get("normal_classes", class_names)
         meta["normal_classes"] = normal_classes
         # RMS 진폭 이상 감지용 통계 (외력 등 진폭 변화 감지)
@@ -1251,9 +1376,6 @@ def save_meta(
             meta["rms_thr"]  = round(float(rms_thr),  6)
         if rms_std is not None:
             meta["rms_std"]  = round(float(rms_std),  6)
-        # 활동성 필터 임계값: 추론 시 RMS < activity_rms_thr 이면 윈도우 건너뜀
-        # 0.0이면 필터 비활성 (전체 윈도우 추론)
-        meta["activity_rms_thr"] = round(float(activity_rms_thr), 8)
     else:
         meta["class_names"] = class_names
         meta["n_classes"]   = len(class_names)
@@ -1404,7 +1526,6 @@ def main() -> None:
     )
     label_column: str = params.get("label_column", "Label")
     filter_op_column: Optional[str] = params.get("filter_op_column", None)
-    activity_filter_quantile: float = float(params.get("activity_filter_quantile", 0.0))
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
@@ -1424,8 +1545,7 @@ def main() -> None:
     print(
         f"[main] session={session} | 채널={channels} | "
         f"{'정상클래스' if is_ae else '클래스'}={load_class_names} | "
-        f"window_size={window_size}, stride={stride} | "
-        f"filter_op={filter_op_column} | activity_filter_q={activity_filter_quantile if activity_filter_quantile > 0 else 'off'}",
+        f"window_size={window_size}, stride={stride}",
         file=sys.stderr,
     )
 
@@ -1433,12 +1553,13 @@ def main() -> None:
     windows: List[Tuple[np.ndarray, int]] = []
 
     # AE 학습: windows는 RAW로 전달 (train_ae 내부에서 RMS 통계 계산 후 z-score 적용)
-    # CLS 학습: per-sample z-score 정규화 적용
-    normalize_windows = not is_ae
+    # CLS 학습: 기본 per-sample z-score 정규화.
+    #   params["normalize"]=False 로 설정하면 RAW 로드 (_add_mixed_feature_channels 전용).
+    normalize_windows = bool(params.get("normalize", not is_ae))
 
-    activity_rms_thr = 0.0
+    seg_ids: List[int] = []
     if "csv_files" in params and params["csv_files"]:
-        windows, activity_rms_thr = load_windows_from_file_list(
+        windows, seg_ids = load_windows_from_file_list(
             csv_files=params["csv_files"],
             channels=channels,
             label_column=label_column,
@@ -1447,10 +1568,9 @@ def main() -> None:
             stride=stride,
             normalize=normalize_windows,
             filter_op_column=filter_op_column,
-            activity_filter_quantile=activity_filter_quantile,
         )
     elif "data_dir" in params and params["data_dir"]:
-        windows, activity_rms_thr = load_windows_from_dir(
+        windows, seg_ids = load_windows_from_dir(
             data_dir=params["data_dir"],
             channels=channels,
             label_column=label_column,
@@ -1460,17 +1580,14 @@ def main() -> None:
             sensor_type=params.get("sensor_type", ""),
             normalize=normalize_windows,
             filter_op_column=filter_op_column,
-            activity_filter_quantile=activity_filter_quantile,
         )
     else:
         print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
         sys.exit(1)
 
     if len(windows) == 0:
-        print(json.dumps({"warning": "유효한 윈도우가 없어 학습을 건너뜁니다 (데이터 없음). 수집 후 재시도하세요."}), flush=True)
-        print(f"[main] ⚠ 데이터 없음 — 학습 건너뜀 (sensor_type={params.get('sensor_type','?')}, "
-              f"channels={channels}, filter_op={params.get('filter_op_column')})", file=sys.stderr)
-        sys.exit(0)   # 데이터 없음은 오류가 아닌 정상 종료
+        print(json.dumps({"error": "유효한 윈도우를 하나도 추출하지 못했습니다. 데이터 경로와 채널 설정을 확인하십시오."}))
+        sys.exit(1)
 
     # _resolve_channels 가 채널을 확장했을 수 있으므로 실제 데이터 shape 으로 재설정
     # 예: channels=["Trq(%)"] → Ax0_Trq(%)/Ax1_Trq(%)/Ax2_Trq(%) 3채널로 확장된 경우
@@ -1482,6 +1599,51 @@ def main() -> None:
             file=sys.stderr,
         )
         n_channels = actual_n_channels
+
+    # ── 채널 증강 (CLS 전용) ─────────────────────────────────────────────────
+    # AE는 원신호 재구성이 목적이므로 증강 채널 추가 불필요.
+    #
+    # augment_mode="mixed"  → _add_mixed_feature_channels()
+    #   가속도: FFT + derivative / 토크: derivative + stats(6종) / 공통: abs
+    #   normalize=False 와 함께 사용 — RAW 진폭 정보 보존.
+    #
+    # augment_mode="standard" (기본) → _add_feature_channels()
+    #   전채널 균일: FFT + derivative + abs
+    #   normalize=True(per-window z-score) 와 함께 사용.
+    if not is_ae and params.get("add_augmented_channels", True):
+        pre_aug_channels = n_channels
+        augment_mode = str(params.get("augment_mode", "standard")).lower()
+
+        if augment_mode == "mixed":
+            windows = _add_mixed_feature_channels(
+                windows,
+                channels=channels,
+                add_accel_fft       =bool(params.get("add_fft_channels",        True)),
+                add_accel_derivative=bool(params.get("add_derivative_channels",  True)),
+                add_torque_derivative=bool(params.get("add_derivative_channels", True)),
+                add_torque_stats    =bool(params.get("add_torque_stats",         True)),
+                add_abs             =bool(params.get("add_abs_channels",         True)),
+            )
+            n_channels = windows[0][0].shape[1]
+            print(
+                f"[main] 채널 증강(mixed) 완료: {pre_aug_channels} → {n_channels}채널 "
+                f"(가속도: FFT+deriv / 토크: deriv+stats×6 / 공통: abs)",
+                file=sys.stderr,
+            )
+        else:
+            windows = _add_feature_channels(
+                windows,
+                add_fft=bool(params.get("add_fft_channels", True)),
+                add_derivative=bool(params.get("add_derivative_channels", True)),
+                add_abs=bool(params.get("add_abs_channels", True)),
+            )
+            n_channels = windows[0][0].shape[1]
+            factor = n_channels // pre_aug_channels
+            print(
+                f"[main] 채널 증강(standard) 완료: {pre_aug_channels} → {n_channels}채널 "
+                f"(원본×{factor}: 원본+FFT+deriv+abs)",
+                file=sys.stderr,
+            )
 
     # 클래스 분포 출력
     label_counts: Dict[int, int] = {}
@@ -1530,7 +1692,7 @@ def main() -> None:
         # AE는 RAW 데이터 필요 (RMS 통계 계산) — normalize=False 로 재로드
         print("[main] AE 모드 데이터 재로드 (normalize=False)...", file=sys.stderr)
         if "csv_files" in params and params["csv_files"]:
-            windows, activity_rms_thr = load_windows_from_file_list(
+            windows, seg_ids = load_windows_from_file_list(
                 csv_files=params["csv_files"],
                 channels=channels,
                 label_column=label_column,
@@ -1539,10 +1701,9 @@ def main() -> None:
                 stride=stride,
                 normalize=False,
                 filter_op_column=filter_op_column,
-                activity_filter_quantile=activity_filter_quantile,
             )
         else:
-            windows, activity_rms_thr = load_windows_from_dir(
+            windows, seg_ids = load_windows_from_dir(
                 data_dir=params["data_dir"],
                 channels=channels,
                 label_column=label_column,
@@ -1552,7 +1713,6 @@ def main() -> None:
                 sensor_type=params.get("sensor_type", ""),
                 normalize=False,
                 filter_op_column=filter_op_column,
-                activity_filter_quantile=activity_filter_quantile,
             )
 
         # 출력 파일명을 AE 용으로 변경
@@ -1578,12 +1738,11 @@ def main() -> None:
         print(f"[main] AE 학습 시작 — 정상 샘플 {len(windows)}개 윈도우", file=sys.stderr)
         mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
-        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std, norm_mean, norm_std = train_ae(
+        ae_model, best_val_mse, epochs_trained, threshold, rms_mean, rms_thr, rms_std = train_ae(
             params=params,
             windows=windows,
             n_channels=n_channels,
             mlflow_run=mlflow_run,
-            ae_threshold_percentile=float(params.get("ae_threshold_percentile", 99)),
         )
 
         export_onnx_ae(
@@ -1606,10 +1765,7 @@ def main() -> None:
             rms_mean=rms_mean,
             rms_thr=rms_thr,
             rms_std=rms_std,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            n_channels_override=n_channels,
-            activity_rms_thr=activity_rms_thr,
+            n_channels_override=n_channels,  # _resolve_channels 확장 후 실제 채널 수
         )
 
         _try_end_mlflow(
@@ -1639,12 +1795,13 @@ def main() -> None:
     mlflow_run, mlflow_mod = _try_setup_mlflow(params)
 
     # ── 학습 ─────────────────────────────────────────────────────────────────
-    model, best_val_acc, epochs_trained = train(
+    model, best_val_acc, best_seg_acc, epochs_trained = train(
         params=params,
         windows=windows,
         n_classes=n_classes,
         n_channels=n_channels,
         mlflow_run=mlflow_run,
+        seg_ids=seg_ids if seg_ids else None,
     )
 
     # ── ONNX 내보내기 ─────────────────────────────────────────────────────────
@@ -1680,13 +1837,15 @@ def main() -> None:
     )
 
     # ── 최종 결과 출력 ────────────────────────────────────────────────────────
+    _seg_acc_str = f"{best_seg_acc:.4f}" if best_seg_acc is not None else "N/A"
     info_str = (
-        f"CNN1D 학습 완료 | 윈도우={len(windows)} | "
-        f"클래스={n_classes} | val_acc={best_val_acc:.4f} | epochs={epochs_trained}"
+        f"CNN1D 학습 완료 | 윈도우={len(windows)} | 클래스={n_classes} | "
+        f"val_acc(윈도우)={best_val_acc:.4f} | val_acc(구간)={_seg_acc_str} | epochs={epochs_trained}"
     )
     result = {
         "info": info_str,
         "accuracy": round(best_val_acc, 6),
+        "seg_accuracy": round(best_seg_acc, 6) if best_seg_acc is not None else None,
         "epochs": epochs_trained,
     }
     print(json.dumps(result, ensure_ascii=False))

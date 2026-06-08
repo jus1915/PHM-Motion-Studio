@@ -138,39 +138,21 @@ def _global_norm(arr: np.ndarray, mean: list, std: list) -> np.ndarray:
     return (arr - m) / s
 
 
-def _build_window_channels(base: np.ndarray, meta: dict) -> np.ndarray:
-    """학습 시와 동일한 추가 채널을 원본 채널에만 적용합니다.
+def _add_fft_channels(window: np.ndarray) -> np.ndarray:
+    """(T, C) → (T, 2C): 채널별 FFT 크기 스펙트럼을 추가 채널로 붙입니다.
 
-    train_dl_model.py _extract_windows 와 완전히 동일한 순서로 적용해야
-    학습/평가 채널 수와 의미가 일치합니다:
-        extras = [base, abs(base)?, diff(base)?, fft(base)?]
-    모든 추가 채널은 원본 C채널을 기준으로 계산되며 뒤에 이어 붙습니다.
-    최종 채널 수: C × (1 + add_abs + add_derivative + add_fft)
+    train_dl_model.py 의 동일 함수와 동일 로직 — 학습/평가 전처리 일관성 유지.
     """
-    T, C_orig = base.shape
-    extras: list = [base]
-
-    if meta.get("add_abs_channels"):
-        extras.append(np.abs(base))
-
-    if meta.get("add_derivative_channels"):
-        deriv = np.empty_like(base)
-        deriv[0] = 0.0
-        deriv[1:] = base[1:] - base[:-1]
-        extras.append(deriv)
-
-    if meta.get("add_fft_channels"):
-        fft_mag = np.abs(np.fft.rfft(base, axis=0))   # (T//2+1, C_orig)
-        fft_len = fft_mag.shape[0]
-        x_old   = np.linspace(0.0, 1.0, fft_len)
-        x_new   = np.linspace(0.0, 1.0, T)
-        fft_resized = np.stack(
-            [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C_orig)],
-            axis=1,
-        ).astype(np.float32)
-        extras.append(fft_resized)
-
-    return np.concatenate(extras, axis=1).astype(np.float32)
+    T, C = window.shape
+    fft_mag = np.abs(np.fft.rfft(window, axis=0))   # (T//2+1, C)
+    fft_len = fft_mag.shape[0]
+    x_old   = np.linspace(0.0, 1.0, fft_len)
+    x_new   = np.linspace(0.0, 1.0, T)
+    fft_resized = np.stack(
+        [np.interp(x_new, x_old, fft_mag[:, c]) for c in range(C)],
+        axis=1,
+    ).astype(np.float32)
+    return np.concatenate([window, fft_resized], axis=1)   # (T, 2C)
 
 
 # ── 모델 판별 ─────────────────────────────────────────────────────────────────
@@ -198,13 +180,10 @@ def run_eval(
     model_ws    = int(meta.get("window_size", window_size))
     thr         = float(meta.get("threshold", 0.1))
     is_ae       = _detect_is_ae(sess)
-    norm_mean_m = meta.get("norm_mean")
-    norm_std_m  = meta.get("norm_std")
+    norm_mean_m = meta.get("norm_mean")   # 전역 정규화: 학습 시 저장된 채널별 mean
+    norm_std_m  = meta.get("norm_std")    # 전역 정규화: 학습 시 저장된 채널별 std
     use_global  = (norm_mean_m is not None) and (norm_std_m is not None)
-    # 추가 채널 여부 — meta에서 읽어 학습 시와 동일한 전처리 보장
-    has_extra_ch = any(meta.get(k) for k in (
-        "add_fft_channels", "add_derivative_channels", "add_abs_channels"
-    ))
+    use_fft     = bool(meta.get("add_fft_channels", False))
 
     seg_scores: List[List[float]] = []
 
@@ -220,10 +199,9 @@ def run_eval(
                     continue
                 window = window[-model_ws:]
 
-            # 학습과 동일한 순서로 추가 채널 적용 (모두 원본 채널 기준)
-            if has_extra_ch:
-                window = _build_window_channels(window, meta)
-            arr  = window[np.newaxis].astype(np.float32)
+            if use_fft:
+                window = _add_fft_channels(window)          # (T, C) → (T, 2C)
+            arr  = window[np.newaxis].astype(np.float32)   # (1, T, C or 2C)
             norm = _global_norm(arr, norm_mean_m, norm_std_m) if use_global else _zscore(arr)
 
             if is_ae:
@@ -349,17 +327,11 @@ def main():
     if meta_says_ae != is_ae:
         print(f"[eval] ⚠ meta session={session_meta!r}({kind_meta}) 와 실제 출력 shape 불일치 → {kind} 로 추론합니다.", file=sys.stderr)
 
-    extra_ch_flags = [
-        k.replace("add_", "").replace("_channels", "").upper()
-        for k in ("add_abs_channels", "add_derivative_channels", "add_fft_channels")
-        if meta.get(k)
-    ]
-    extra_ch_str = ("  추가채널=" + "+".join(extra_ch_flags)) if extra_ch_flags else ""
-    norm_str = "  정규화=전역" if meta.get("norm_mean") else "  정규화=per-sample"
+    fft_active = bool(meta.get("add_fft_channels", False))
     print(f"[eval] 모델: {model_path.name}  {label_kind}  "
           f"window_size={meta.get('window_size', window_size)}  "
           f"seg_agg={seg_agg}  threshold={thr_norm}"
-          f"{extra_ch_str}{norm_str}", file=sys.stderr)
+          f"{'  FFT채널=ON' if fft_active else ''}", file=sys.stderr)
 
     csv_entries = p.get("csv_files", [])
     all_results: list  = []

@@ -760,22 +760,26 @@ def run_training_ae_channel_active(**context) -> None:
     accel_chs  = ["x", "y", "z"]
     channels   = accel_chs + torque_chs
 
-    params = {**_DEFAULT_CONF, **conf}
-    params["data_dir"]              = _normalize_data_dir(params.get("data_dir", _DATA_ROOT))
-    params["channels"]              = channels
-    params.setdefault("window_size",              128)
-    params.setdefault("stride",                    64)
-    params.setdefault("active_top_ratio",         0.20)
-    params.setdefault("inactive_bottom_ratio",    0.50)
-    params.setdefault("latent_dim",                  4)
-    params.setdefault("epochs",                    100)
-    params.setdefault("batch_size",                 64)
-    params.setdefault("lr",                       1e-3)
-    params.setdefault("patience",                   15)
-    params.setdefault("min_active_windows",         50)
-    params.setdefault("val_ratio",                 0.2)
-    params.setdefault("seed",                       42)
-    params.setdefault("save_plots",               True)
+    # _DEFAULT_CONF 를 베이스로 하되, 채널 AE 전용 기본값은 conf 미지정 시 강제 적용
+    # (setdefault 는 _DEFAULT_CONF 에 이미 값이 있으면 무시되므로 conf 기준으로 결정)
+    _CH_AE_DEFAULTS = {
+        "window_size":            128,
+        "stride":                  64,   # _DEFAULT_CONF stride=32 와 다름 — 채널 AE 전용
+        "active_top_ratio":       0.20,
+        "inactive_bottom_ratio":  0.50,
+        "latent_dim":                4,
+        "epochs":                  100,
+        "batch_size":               64,
+        "lr":                     1e-3,
+        "patience":                 15,
+        "min_active_windows":       50,
+        "val_ratio":               0.2,
+        "seed":                     42,
+        "save_plots":             True,
+    }
+    params = {**_DEFAULT_CONF, **_CH_AE_DEFAULTS, **conf}
+    params["data_dir"]  = _normalize_data_dir(params.get("data_dir", _DATA_ROOT))
+    params["channels"]  = channels
     params["output"] = str(profile_dir / "ch_ae_meta.json")
 
     # ── 단일 CSV 파일 지정 (재현성 검증용) ─────────────────────────────────
