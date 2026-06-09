@@ -469,8 +469,7 @@ def health():
     }
 
 
-@app.get("/models/reload")
-def reload_models():
+def reload_models():  # 채널 AE 섹션의 reload_models_v2 로 대체됩니다
     _sessions.clear()
     return {"status": "reloaded", "message": "다음 /predict 호출 시 재로드됩니다."}
 
@@ -837,6 +836,256 @@ def predict_combined(req: CombinedPredictRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"추론 실패: {type(e).__name__}: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  채널별 활성 윈도우 AE (Channel Active AE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CH_AE_META_FILENAME = "ch_ae_meta.json"
+
+# 채널 AE 전용 캐시
+_ch_ae_meta_cache: Optional[dict] = None      # ch_ae_meta.json 내용
+_ch_ae_sessions: dict = {}                    # {channel_name: ort.InferenceSession}
+
+
+def _load_ch_ae_meta() -> Optional[dict]:
+    """ch_ae_meta.json 을 로드합니다 (프로파일 디렉토리 스캔)."""
+    global _ch_ae_meta_cache
+    if _ch_ae_meta_cache is not None:
+        return _ch_ae_meta_cache
+
+    # 프로파일 서브디렉토리 포함 탐색
+    candidates = [MODELS_ROOT / CH_AE_META_FILENAME] + \
+                 sorted((MODELS_ROOT).glob(f"*/{CH_AE_META_FILENAME}"))
+    for path in candidates:
+        if path.exists():
+            try:
+                _ch_ae_meta_cache = json.loads(path.read_text(encoding="utf-8"))
+                _ch_ae_meta_cache["_meta_dir"] = str(path.parent)
+                print(f"[ch_ae] 메타 로드: {path}", flush=True)
+                return _ch_ae_meta_cache
+            except Exception as e:
+                print(f"[ch_ae] 메타 로드 실패 {path}: {e}", flush=True)
+    return None
+
+
+def _load_ch_ae_session(channel: str) -> Optional[ort.InferenceSession]:
+    """채널 AE ONNX 세션을 로드합니다."""
+    if channel in _ch_ae_sessions:
+        return _ch_ae_sessions[channel]
+
+    meta = _load_ch_ae_meta()
+    if meta is None:
+        return None
+
+    ch_info = meta.get("channels", {}).get(channel)
+    if ch_info is None:
+        return None
+
+    model_file = ch_info.get("model_file")
+    if not model_file:
+        return None
+
+    meta_dir = Path(meta.get("_meta_dir", str(MODELS_ROOT)))
+    model_path = meta_dir / model_file
+    if not model_path.exists():
+        # MODELS_ROOT 에서도 시도
+        model_path = MODELS_ROOT / model_file
+    if not model_path.exists():
+        print(f"[ch_ae] 모델 파일 없음: {model_file}", flush=True)
+        return None
+
+    try:
+        sess = ort.InferenceSession(str(model_path))
+        _ch_ae_sessions[channel] = sess
+        print(f"[ch_ae] 모델 로드: {model_path}", flush=True)
+        return sess
+    except Exception as e:
+        print(f"[ch_ae] 모델 로드 실패 {model_path}: {e}", flush=True)
+        return None
+
+
+def _ch_ae_compute_features(window: np.ndarray) -> dict:
+    """단일 채널 윈도우 → 13개 통계 피처 (학습과 동일 로직)."""
+    try:
+        from scipy.stats import skew as _skew, kurtosis as _kurtosis
+        _use_scipy = True
+    except ImportError:
+        _use_scipy = False
+
+    eps = 1e-8
+    x = window.astype(np.float32)
+
+    min_v  = float(np.min(x))
+    max_v  = float(np.max(x))
+    rms_v  = float(np.sqrt(np.mean(x ** 2)))
+    std_v  = float(np.std(x))
+    var_v  = float(np.var(x))
+    p2p_v  = max_v - min_v
+    mabs_v = float(np.mean(np.abs(x)))
+    pabs_v = float(np.max(np.abs(x)))
+
+    if std_v < eps:
+        skew_v, kurt_v = 0.0, 3.0
+    elif _use_scipy:
+        skew_v = float(_skew(x, bias=False))
+        kurt_v = float(_kurtosis(x, fisher=False, bias=False))
+    else:
+        # scipy 없을 때 numpy 근사
+        n = len(x)
+        mu = x.mean(); s = x.std()
+        skew_v = float(np.mean(((x - mu) / (s + eps)) ** 3))
+        kurt_v = float(np.mean(((x - mu) / (s + eps)) ** 4))
+
+    crest_v   = pabs_v / (rms_v + eps)
+    shape_v   = rms_v  / (mabs_v + eps)
+    impulse_v = pabs_v / (mabs_v + eps)
+
+    return {
+        "min": min_v, "max": max_v, "rms": rms_v, "std": std_v, "var": var_v,
+        "p2p": p2p_v, "mean_abs": mabs_v, "peak_abs": pabs_v,
+        "skewness": skew_v, "kurtosis": kurt_v,
+        "crest": crest_v, "shape": shape_v, "impulse": impulse_v,
+    }
+
+
+def _ch_ae_active_score(features: dict, ch_meta: dict) -> float:
+    """active_score 를 계산합니다 (robust z-score of p2p/rms/std, clipped ≥ 0)."""
+    score = 0.0
+    for col in ("p2p", "rms", "std"):
+        med_key = f"score_{col}_median"
+        mad_key = f"score_{col}_mad"
+        med = ch_meta.get(med_key, 0.0)
+        mad = ch_meta.get(mad_key, 1.0)
+        if mad < 1e-8:
+            mad = 1.0
+        z = 0.6745 * (features[col] - med) / mad
+        score += max(0.0, z)
+    return score / 3.0
+
+
+# ── Pydantic 모델 ──────────────────────────────────────────────────────────────
+class ChannelAePredictRequest(BaseModel):
+    channel: str                    # 예: "x", "Ax0_Trq(%)"
+    window: List[float]             # 단일 채널 원시 샘플 (window_size 개)
+    window_size: int = 128
+
+
+class ChannelAePredictResponse(BaseModel):
+    channel: str
+    active_state: str               # "active" | "inactive" | "uncertain"
+    active_score: float
+    is_anomaly: bool = False
+    anomaly_score: float = 0.0      # 0~1+ 정규화 (thr95 기준)
+    threshold: float = 1.0
+    recon_error: Optional[float] = None
+    raw_threshold: Optional[float] = None
+
+
+# ── 엔드포인트 ────────────────────────────────────────────────────────────────
+@app.get("/channel_ae_info")
+def channel_ae_info():
+    """ch_ae_meta.json 내용을 반환합니다."""
+    meta = _load_ch_ae_meta()
+    if meta is None:
+        raise HTTPException(status_code=404, detail="ch_ae_meta.json 없음 — 학습을 먼저 실행하세요.")
+    # _meta_dir 는 내부 필드이므로 제외
+    return {k: v for k, v in meta.items() if not k.startswith("_")}
+
+
+@app.post("/predict/channel_ae", response_model=ChannelAePredictResponse)
+def predict_channel_ae(req: ChannelAePredictRequest):
+    """단일 채널 윈도우 → active 판정 + (active면) AE 이상탐지."""
+    if len(req.window) < req.window_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"window 길이 {len(req.window)} < window_size {req.window_size}",
+        )
+
+    meta = _load_ch_ae_meta()
+    if meta is None:
+        raise HTTPException(status_code=404, detail="ch_ae_meta.json 없음")
+
+    ch_info = meta.get("channels", {}).get(req.channel)
+    if ch_info is None:
+        raise HTTPException(status_code=404, detail=f"채널 없음: {req.channel}")
+
+    # ── 1. 13개 피처 계산 ──────────────────────────────────────────────────────
+    window_arr = np.array(req.window[-req.window_size:], dtype=np.float32)
+    features   = _ch_ae_compute_features(window_arr)
+
+    # ── 2. active_score 계산 ──────────────────────────────────────────────────
+    active_score = _ch_ae_active_score(features, ch_info)
+    active_thr   = ch_info.get("active_threshold",   float("inf"))
+    inactive_thr = ch_info.get("inactive_threshold", 0.0)
+
+    if active_score >= active_thr:
+        active_state = "active"
+    elif active_score <= inactive_thr:
+        active_state = "inactive"
+    else:
+        active_state = "uncertain"
+
+    # inactive / uncertain → AE 건너뜀
+    if active_state != "active":
+        return ChannelAePredictResponse(
+            channel=req.channel,
+            active_state=active_state,
+            active_score=round(active_score, 6),
+        )
+
+    # ── 3. 피처 정규화 ────────────────────────────────────────────────────────
+    FEATURE_COLS = ["min", "max", "rms", "std", "var", "p2p",
+                    "mean_abs", "peak_abs", "skewness", "kurtosis",
+                    "crest", "shape", "impulse"]
+    feat_vec = np.array([features[c] for c in FEATURE_COLS], dtype=np.float32)
+
+    scaler_mean = np.array(ch_info.get("scaler_mean", [0.0] * 13), dtype=np.float32)
+    scaler_std  = np.array(ch_info.get("scaler_std",  [1.0] * 13), dtype=np.float32)
+    scaler_std  = np.where(scaler_std < 1e-8, 1.0, scaler_std)
+    feat_norm   = (feat_vec - scaler_mean) / scaler_std
+    feat_input  = feat_norm.reshape(1, -1)  # (1, 13)
+
+    # ── 4. ONNX 추론 ──────────────────────────────────────────────────────────
+    sess = _load_ch_ae_session(req.channel)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"채널 모델 없음: {req.channel}")
+
+    try:
+        input_name = sess.get_inputs()[0].name
+        recon      = sess.run(None, {input_name: feat_input})[0]  # (1, 13)
+        recon_error = float(np.mean((feat_input - recon) ** 2))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AE 추론 실패: {e}")
+
+    # ── 5. 이상 점수 정규화 (thr95 기준) ─────────────────────────────────────
+    thr95      = ch_info.get("recon_error_thr_95", 1e-3)
+    if thr95 < 1e-10:
+        thr95 = 1e-3
+    anomaly_score = recon_error / thr95          # >1.0 이면 이상
+    is_anomaly    = anomaly_score > 1.0
+
+    return ChannelAePredictResponse(
+        channel       = req.channel,
+        active_state  = "active",
+        active_score  = round(active_score,  6),
+        is_anomaly    = is_anomaly,
+        anomaly_score = round(anomaly_score, 6),
+        threshold     = 1.0,
+        recon_error   = round(recon_error,   8),
+        raw_threshold = round(thr95,         8),
+    )
+
+
+# ── 모델 재로드 시 채널 AE 캐시도 초기화 ──────────────────────────────────────
+@app.get("/models/reload")
+def reload_models_v2():
+    global _ch_ae_meta_cache, _ch_ae_sessions
+    _sessions.clear()
+    _ch_ae_meta_cache = None
+    _ch_ae_sessions   = {}
+    return {"status": "reloaded", "message": "AE + 채널 AE 캐시가 초기화됩니다."}
 
 
 # ── 엔트리포인트 ──────────────────────────────────────────────────────────────
