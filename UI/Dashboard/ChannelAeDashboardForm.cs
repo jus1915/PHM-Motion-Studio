@@ -42,6 +42,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // (가속도는 단일 센서라 신호 크기만으로 축 운동 여부를 구분 못 함)
         private volatile bool _gating = true;
 
+        // 가속도 x/y/z 합성 magnitude 가상 채널 (학습 스크립트와 동일 규약).
+        // 이 채널은 CSV의 x/y/z 컬럼을 읽어 √(x²+y²+z²) 로 변환해 전송한다.
+        private const string AccelMagChannel = "accel_mag";
+
         // 채널별 직전 이상 여부 — 정상↔이상 전이 시에만 이벤트 로그 (스팸 방지)
         private readonly System.Collections.Generic.Dictionary<string, bool> _lastAnomaly
             = new System.Collections.Generic.Dictionary<string, bool>();
@@ -393,7 +397,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             catch { return null; }
         }
 
-        /// <summary>CSV에서 channel 컬럼의 마지막 windowSize 샘플을 읽음. 부족하면 null.</summary>
+        /// <summary>
+        /// CSV에서 channel 컬럼의 마지막 windowSize 샘플을 읽음. 부족하면 null.
+        /// channel == "accel_mag" 이면 x/y/z 를 읽어 √(x²+y²+z²) 로 합성한다.
+        /// </summary>
         private static float[] ReadLastWindow(string csvPath, string channel, int windowSize)
         {
             try
@@ -407,26 +414,59 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 if (lines.Length < windowSize + 1) return null;
 
                 string[] headers = lines[0].Split(',');
-                int col = -1;
-                for (int i = 0; i < headers.Length; i++)
-                    if (string.Equals(headers[i].Trim(), channel, StringComparison.OrdinalIgnoreCase))
-                    { col = i; break; }
-                if (col < 0) return null;
+                bool isMag = string.Equals(channel, AccelMagChannel, StringComparison.OrdinalIgnoreCase);
+
+                int[] cols;
+                if (isMag)
+                {
+                    int ix = FindCol(headers, "x"), iy = FindCol(headers, "y"), iz = FindCol(headers, "z");
+                    if (ix < 0 || iy < 0 || iz < 0) return null;
+                    cols = new[] { ix, iy, iz };
+                }
+                else
+                {
+                    int c = FindCol(headers, channel);
+                    if (c < 0) return null;
+                    cols = new[] { c };
+                }
 
                 int dataCount = lines.Length - 1;
                 var window = new float[windowSize];
                 int start = dataCount - windowSize;
                 for (int i = 0; i < windowSize; i++)
                 {
-                    string[] cols = lines[start + i + 1].Split(',');
-                    float v = 0f;
-                    if (col < cols.Length)
-                        float.TryParse(cols[col], NumberStyles.Float, CultureInfo.InvariantCulture, out v);
-                    window[i] = v;
+                    string[] parts = lines[start + i + 1].Split(',');
+                    if (isMag)
+                    {
+                        float sx = ParseAt(parts, cols[0]);
+                        float sy = ParseAt(parts, cols[1]);
+                        float sz = ParseAt(parts, cols[2]);
+                        window[i] = (float)Math.Sqrt(sx * sx + sy * sy + sz * sz);
+                    }
+                    else
+                    {
+                        window[i] = ParseAt(parts, cols[0]);
+                    }
                 }
                 return window;
             }
             catch { return null; }
+        }
+
+        private static int FindCol(string[] headers, string name)
+        {
+            for (int i = 0; i < headers.Length; i++)
+                if (string.Equals(headers[i].Trim(), name, StringComparison.OrdinalIgnoreCase))
+                    return i;
+            return -1;
+        }
+
+        private static float ParseAt(string[] cols, int idx)
+        {
+            float v = 0f;
+            if (idx >= 0 && idx < cols.Length)
+                float.TryParse(cols[idx], NumberStyles.Float, CultureInfo.InvariantCulture, out v);
+            return v;
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
