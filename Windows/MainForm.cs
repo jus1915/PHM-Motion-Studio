@@ -403,6 +403,9 @@ namespace PHM_Project_DockPanel
             menuDataAnalysis.DropDownItems.Add(
                 CreateDockMenuItem<DashboardForm>("실시간 추론", DockState.Document));
             menuDataAnalysis.DropDownItems.Add(
+                CreateDockMenuItem<PHM_Project_DockPanel.UI.Dashboard.ChannelAeDashboardForm>(
+                    "채널 AE 추론", DockState.Document));
+            menuDataAnalysis.DropDownItems.Add(
                 CreateDockMenuItem<RealtimeMonitorForm>("실시간 이상탐지 모니터", DockState.Document));
 
             // ── AI 관제 보조원 ────────────────────────────────────────────────
@@ -670,6 +673,8 @@ namespace PHM_Project_DockPanel
                 if (persistString == typeof(AnomalyDetectionForm).ToString()) return new AnomalyDetectionForm();
                 if (persistString == typeof(AIForm).ToString()) return new AIForm();
                 if (persistString == typeof(DashboardForm).ToString()) return new DashboardForm();
+                if (persistString == typeof(PHM_Project_DockPanel.UI.Dashboard.ChannelAeDashboardForm).ToString())
+                    return new PHM_Project_DockPanel.UI.Dashboard.ChannelAeDashboardForm();
                 if (persistString == typeof(RealtimeMonitorForm).ToString()) return new RealtimeMonitorForm();
                 if (persistString == typeof(PHM_Project_DockPanel.UI.DataCollection.RealtimeSignalForm).ToString())
                     return new PHM_Project_DockPanel.UI.DataCollection.RealtimeSignalForm();

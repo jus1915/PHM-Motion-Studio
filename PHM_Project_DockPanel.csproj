@@ -196,6 +196,9 @@
     <Compile Include="UI\Dashboard\DashboardForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UI\Dashboard\ChannelAeDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="UI\Dashboard\RealtimeMonitorForm.cs">
       <SubType>Form</SubType>
     </Compile>
