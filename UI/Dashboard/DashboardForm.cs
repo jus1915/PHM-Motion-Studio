@@ -3455,9 +3455,26 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             bool hasAe = _axisOnnx != null && _axisOnnx.Values.Any(om => om?.Session != null && om.IsAutoencoder);
             bool hasCls = _axisOnnxCls != null && _axisOnnxCls.Values.Any(om => om?.Session != null && !om.IsAutoencoder);
             bool hasSkl = _axisSklModels != null && _axisSklModels.Values.Any(sm => sm?.OnnxSession != null);
-            if (!hasKnn && !hasAe && !hasCls && !hasSkl)
+
+            // 채널 AE: 서버 측 모델 — 로컬 모델 없어도 서버에 ch_ae_meta.json 있으면 시작 허용
+            bool hasChannelAe = false;
+            if (!hasKnn && !hasAe && !hasCls && !hasSkl && _profileClient != null)
             {
-                MessageBox.Show("먼저 모델을 추가하세요. (SKL ONNX / AE ONNX / 분류 ONNX / KNN JSON)");
+                try
+                {
+                    var meta = _profileClient.GetChannelAeInfoAsync()
+                                             .GetAwaiter().GetResult();
+                    hasChannelAe = meta != null
+                                   && meta.Channels != null
+                                   && meta.Channels.Count > 0;
+                }
+                catch { /* 서버 미응답 시 무시 */ }
+            }
+
+            if (!hasKnn && !hasAe && !hasCls && !hasSkl && !hasChannelAe)
+            {
+                MessageBox.Show("먼저 모델을 추가하세요. (SKL ONNX / AE ONNX / 분류 ONNX / KNN JSON)\n" +
+                                "또는 Airflow에서 채널 AE 학습을 실행하세요.");
                 return;
             }
 
