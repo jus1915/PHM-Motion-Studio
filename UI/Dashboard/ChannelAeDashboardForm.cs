@@ -36,11 +36,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Label        _lblInfo;
         private readonly NumericUpDown _numInterval;
         private readonly ListBox      _events;
-        private readonly CheckBox     _chkGating;
-
-        // 가속도 motion-gating: 토크가 전부 정지면 가속도 판정/알람을 억제.
-        // (가속도는 단일 센서라 신호 크기만으로 축 운동 여부를 구분 못 함)
-        private volatile bool _gating = true;
 
         // 가속도 x/y/z 합성 magnitude 가상 채널 (학습 스크립트와 동일 규약).
         // 이 채널은 CSV의 x/y/z 컬럼을 읽어 √(x²+y²+z²) 로 변환해 전송한다.
@@ -94,14 +89,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             toolbar.Controls.Add(_btnStop);
             toolbar.Controls.Add(new Label { Text = "주기(ms)", AutoSize = true, Padding = new Padding(8, 8, 2, 0) });
             toolbar.Controls.Add(_numInterval);
-
-            _chkGating = new CheckBox
-            {
-                Text = "가속도 motion-gating (토크 정지 시 가속도 무시)",
-                Checked = true, AutoSize = true, Padding = new Padding(12, 6, 0, 0),
-            };
-            _chkGating.CheckedChanged += (s, e) => _gating = _chkGating.Checked;
-            toolbar.Controls.Add(_chkGating);
 
             // ── 정보/상태 라벨 ─────────────────────────────────────────────────
             _lblInfo = new Label
@@ -237,48 +224,28 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
                 int ws = _meta.WindowSize > 0 ? _meta.WindowSize : 128;
 
-                // ── 1패스: 토크 채널 먼저 추론 → 축 운동(active) 여부 집계 ──────
-                bool anyTorqueActive = false;
+                // 각 채널 독립 추론 (가속도는 게이팅 없이 항상 추론 — 정지/운동을
+                // 신호만으로 구분할 수 없어 전체 베이스라인으로 학습됨)
                 foreach (var kv in _meta.Channels)
                 {
                     if (ct.IsCancellationRequested) break;
-                    if (!IsTorque(kv.Key)) continue;
-                    anyTorqueActive |= await InferChannelAsync(kv.Key, _csvPath, ws, false, ct)
-                                             .ConfigureAwait(false);
+                    await InferChannelAsync(kv.Key, _csvPath, ws, ct).ConfigureAwait(false);
                 }
 
-                // ── 2패스: 가속도 채널 — 토크 전부 정지면 gating ──────────────
-                bool gateAccel = _gating && !anyTorqueActive;
-                foreach (var kv in _meta.Channels)
-                {
-                    if (ct.IsCancellationRequested) break;
-                    if (IsTorque(kv.Key)) continue;
-                    await InferChannelAsync(kv.Key, _csvPath, ws, gateAccel, ct)
-                          .ConfigureAwait(false);
-                }
-
-                string gate = gateAccel ? "  ·  가속도 gating(토크 정지)" : "";
-                Ui(() => SetStatus($"상태: 추론 중...  ({_meta.Channels.Count} 채널){gate}  ·  {Path.GetFileName(_csvPath)}"));
+                Ui(() => SetStatus($"상태: 추론 중...  ({_meta.Channels.Count} 채널)  ·  {Path.GetFileName(_csvPath)}"));
             }
         }
 
-        /// <summary>채널명에 "Trq" 포함 → 토크 채널.</summary>
-        private static bool IsTorque(string channel)
-            => channel != null && channel.IndexOf("Trq", StringComparison.OrdinalIgnoreCase) >= 0;
-
-        /// <summary>
-        /// 단일 채널 추론 → 그리드/이벤트 갱신. 실제 active 여부를 반환(gating 적용 전).
-        /// gatedInactive=true 이면 active_score는 그대로 표시하되 판정/알람은 억제(정지 처리).
-        /// </summary>
-        private async Task<bool> InferChannelAsync(
-            string channel, string csvPath, int ws, bool gatedInactive, CancellationToken ct)
+        /// <summary>단일 채널 추론 → 그리드/이벤트 갱신.</summary>
+        private async Task InferChannelAsync(
+            string channel, string csvPath, int ws, CancellationToken ct)
         {
             float[] window = ReadLastWindow(csvPath, channel, ws);
             if (window == null)
             {
                 _lastAnomaly[channel] = false;
                 Ui(() => SetRow(channel, "데이터부족", null, null, null, "-", Color.Gray));
-                return false;
+                return;
             }
 
             ChannelAePredictResponse r =
@@ -288,30 +255,28 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             {
                 _lastAnomaly[channel] = false;
                 Ui(() => SetRow(channel, "모델없음", null, null, null, "-", Color.Gray));
-                return false;
+                return;
             }
             if (r.IsError)
             {
                 _lastAnomaly[channel] = false;
                 Ui(() => SetRow(channel, "오류", null, null, null, r.Error, Color.OrangeRed));
-                return false;
+                return;
             }
 
-            bool actuallyActive  = r.ChannelState == ChannelActiveState.Active;
-            bool effectiveActive = actuallyActive && !gatedInactive;
+            bool isActive = r.ChannelState == ChannelActiveState.Active;
 
             string verdict;
             Color  color;
-            if (gatedInactive && actuallyActive) { verdict = "⏸ 정지(gated)"; color = Color.SlateGray; }
-            else if (!effectiveActive)           { verdict = "-";            color = Color.Gray; }
-            else if (r.IsAnomaly)                { verdict = "⚠ 이상";        color = Color.Red; }
-            else                                 { verdict = "✓ 정상";        color = Color.ForestGreen; }
+            if (!isActive)        { verdict = "-";     color = Color.Gray; }
+            else if (r.IsAnomaly) { verdict = "⚠ 이상"; color = Color.Red; }
+            else                  { verdict = "✓ 정상"; color = Color.ForestGreen; }
 
-            double? ano   = effectiveActive ? (double?)r.AnomalyScore : null;
-            double? recon = effectiveActive ? r.ReconError : null;
+            double? ano   = isActive ? (double?)r.AnomalyScore : null;
+            double? recon = isActive ? r.ReconError : null;
 
             // 정상↔이상 전이 시에만 이벤트 로그 (매 주기 스팸 방지)
-            bool nowAnomaly = effectiveActive && r.IsAnomaly;
+            bool nowAnomaly = isActive && r.IsAnomaly;
             bool wasAnomaly;
             _lastAnomaly.TryGetValue(channel, out wasAnomaly);
             if (nowAnomaly && !wasAnomaly)
@@ -321,7 +286,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _lastAnomaly[channel] = nowAnomaly;
 
             Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color, nowAnomaly));
-            return actuallyActive;
         }
 
         // ── 그리드 헬퍼 ────────────────────────────────────────────────────────
