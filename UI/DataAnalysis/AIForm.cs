@@ -154,6 +154,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private CheckBox _aflChkAeAccelG, _aflChkAeTorqueG,              // AE 전역
                          _aflChkAeTorqueAx,                              // AE 토크 축별
                          _aflChkAeCombG,   _aflChkAeCombAx;             // AE 결합
+        private CheckBox _aflChkChannelAe;                              // 채널 AE (accel_mag + 토크 축별)
         private CheckBox _aflChkClsAccel,  _aflChkClsTorque,            // CLS
                          _aflChkClsComb;
         private bool     _aflUpdatingAll;
@@ -2418,6 +2419,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflChkAeTorqueAx = AflMakeChk("Torque 축별",  true); _aflChkAeTorqueAx.CheckedChanged += (s, e) => onModelChk();
             _aflChkAeCombG    = AflMakeChk("Comb 전역",    true); _aflChkAeCombG.CheckedChanged    += (s, e) => onModelChk();
             _aflChkAeCombAx   = AflMakeChk("Comb 축별",    true); _aflChkAeCombAx.CheckedChanged   += (s, e) => onModelChk();
+            _aflChkChannelAe  = AflMakeChk("채널 AE",      true); _aflChkChannelAe.CheckedChanged  += (s, e) => onModelChk();
 
             // CLS 체크박스
             _aflChkClsAccel  = AflMakeChk("Accel",    true); _aflChkClsAccel.CheckedChanged  += (s, e) => onModelChk();
@@ -2457,7 +2459,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             {
                 _aflChkAll,
                 _aflChkAeAccelG, _aflChkAeTorqueG, _aflChkAeTorqueAx,
-                _aflChkAeCombG,  _aflChkAeCombAx,
+                _aflChkAeCombG,  _aflChkAeCombAx,  _aflChkChannelAe,
                 _aflChkClsAccel, _aflChkClsTorque, _aflChkClsComb,
                 lblAxis, _aflAxisCombo,
             });
@@ -2565,6 +2567,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflChkAeTorqueAx.Visible = isAe;
             _aflChkAeCombG.Visible    = isAe;
             _aflChkAeCombAx.Visible   = isAe;
+            _aflChkChannelAe.Visible  = isAe;
 
             // CLS 체크박스
             _aflChkClsAccel.Visible  = !isAe;
@@ -2598,6 +2601,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (_aflChkAeTorqueAx?.Checked == true) tasks.Add("Torque 축별");
                 if (_aflChkAeCombG?.Checked    == true) tasks.Add("Comb 전역");
                 if (_aflChkAeCombAx?.Checked   == true) tasks.Add("Comb 축별");
+                if (_aflChkChannelAe?.Checked  == true) tasks.Add("채널 AE");
             }
             else
             {
@@ -2666,6 +2670,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (_aflChkAeTorqueAx?.Checked == true) modeList.Add("ae_torque");
                 if (_aflChkAeCombG?.Checked    == true) modeList.Add("ae_combined_global");
                 if (_aflChkAeCombAx?.Checked   == true) modeList.Add("ae_combined");
+                if (_aflChkChannelAe?.Checked  == true) modeList.Add("ae_channel_active");
             }
             else
             {
