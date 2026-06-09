@@ -111,6 +111,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _grid.Columns.Add("ch",   "채널");
             _grid.Columns.Add("st",   "상태");
             _grid.Columns.Add("act",  "active_score");
+            _grid.Columns.Add("thr",  "임계(act/inact)");
             _grid.Columns.Add("ano",  "anomaly_score");
             _grid.Columns.Add("recon","recon_error");
             _grid.Columns.Add("verdict", "판정");
@@ -276,7 +277,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _lastAnomaly.Clear();
             foreach (var kv in _meta.Channels)
             {
-                int i = _grid.Rows.Add(kv.Key, "-", "-", "-", "-", "-", "-");
+                var info = kv.Value;
+                string thr = info == null ? "-"
+                    : $"{info.ActiveThreshold.ToString("F2", CultureInfo.InvariantCulture)} / "
+                    + $"{info.InactiveThreshold.ToString("F2", CultureInfo.InvariantCulture)}";
+                int i = _grid.Rows.Add(kv.Key, "-", "-", thr, "-", "-", "-", "-");
                 _grid.Rows[i].Tag = kv.Key;
             }
         }
