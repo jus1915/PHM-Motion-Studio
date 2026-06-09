@@ -245,12 +245,15 @@ def _robust_zscore(s: pd.Series, eps=1e-8):
 
 
 # ── 채널별 active/inactive 라벨링 ─────────────────────────────────────────────
-def _add_active_state(df, score_cols, active_top_ratio, inactive_bottom_ratio):
+def _add_active_state(df, score_cols, active_top_ratio, inactive_bottom_ratio,
+                      no_gating_channels=()):
     result = df.copy()
     result["active_score"]       = np.nan
     result["active_threshold"]   = np.nan
     result["inactive_threshold"] = np.nan
     result["state"]              = "uncertain"
+
+    no_gating = set(no_gating_channels)
 
     for channel, idx in result.groupby("channel").groups.items():
         sub = result.loc[idx].copy()
@@ -261,11 +264,23 @@ def _add_active_state(df, score_cols, active_top_ratio, inactive_bottom_ratio):
             score += z.to_numpy(dtype=np.float32)
         score /= len(score_cols)
 
+        result.loc[sub.index, "active_score"] = score
+
+        # ── 게이팅 면제 채널 (예: accel_mag) ─────────────────────────────
+        # 가속도는 정지/운동을 신호만으로 구분할 수 없음(실측 확인: 두 상태의
+        # rms/주파수 특성이 거의 동일). 따라서 active 선별 없이 전체 윈도우를
+        # 정상 베이스라인으로 학습하고, 추론 시 항상 active 처리한다.
+        #   active_threshold=0 → active_score(≥0) 항상 임계 이상 → 항상 active
+        if channel in no_gating:
+            result.loc[sub.index, "active_threshold"]   = 0.0
+            result.loc[sub.index, "inactive_threshold"] = -1.0
+            result.loc[sub.index, "state"]              = "active"
+            continue
+
         sub["active_score"] = score
         active_thr   = sub["active_score"].quantile(1.0 - active_top_ratio)
         inactive_thr = sub["active_score"].quantile(inactive_bottom_ratio)
 
-        result.loc[sub.index, "active_score"]       = score
         result.loc[sub.index, "active_threshold"]   = active_thr
         result.loc[sub.index, "inactive_threshold"] = inactive_thr
 
@@ -586,7 +601,10 @@ def main():
     print("\n[Step 2] Active/inactive 라벨링 중...", flush=True)
     active_top_ratio      = params.get("active_top_ratio",      0.20)
     inactive_bottom_ratio = params.get("inactive_bottom_ratio", 0.50)
-    df = _add_active_state(df, SCORE_COLS, active_top_ratio, inactive_bottom_ratio)
+    # 게이팅 면제 채널: 기본은 accel_mag (가속도는 신호만으로 정지/운동 구분 불가)
+    no_gating_channels = set(params.get("no_gating_channels", [ACCEL_MAG_CHANNEL]))
+    df = _add_active_state(df, SCORE_COLS, active_top_ratio, inactive_bottom_ratio,
+                           no_gating_channels)
 
     print("\n[State 분포 by 채널]")
     print(df.groupby(["channel", "state"]).size().to_string(), flush=True)
