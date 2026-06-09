@@ -35,6 +35,19 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Label        _lblStatus;
         private readonly Label        _lblInfo;
         private readonly NumericUpDown _numInterval;
+        private readonly ListBox      _events;
+
+        // 채널별 직전 이상 여부 — 정상↔이상 전이 시에만 이벤트 로그 (스팸 방지)
+        private readonly System.Collections.Generic.Dictionary<string, bool> _lastAnomaly
+            = new System.Collections.Generic.Dictionary<string, bool>();
+
+        // 이벤트 로그 항목 (OwnerDraw로 위험은 빨간색)
+        private sealed class Ev
+        {
+            public string Text;
+            public bool   Danger;
+            public override string ToString() => Text;
+        }
 
         // ── 루프 상태 ─────────────────────────────────────────────────────────
         private InferenceServerClient _client;
@@ -105,10 +118,37 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _grid.Columns["verdict"].DefaultCellStyle.Font =
                 new Font(_grid.Font, FontStyle.Bold);
 
+            // ── 이벤트 로그 ────────────────────────────────────────────────────
+            _events = new ListBox
+            {
+                Dock = DockStyle.Bottom, Height = 140, IntegralHeight = false,
+                DrawMode = DrawMode.OwnerDrawFixed, BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Consolas", 9f),
+            };
+            _events.DrawItem += (s, e) =>
+            {
+                if (e.Index < 0) return;
+                e.DrawBackground();
+                var ev = _events.Items[e.Index] as Ev;
+                Color c = (ev != null && ev.Danger) ? Color.Red : Color.Black;
+                using (var br = new SolidBrush(c))
+                    e.Graphics.DrawString(_events.Items[e.Index].ToString(),
+                        e.Font, br, e.Bounds);
+                e.DrawFocusRectangle();
+            };
+            var lblEv = new Label
+            {
+                Dock = DockStyle.Bottom, Height = 20, ForeColor = Color.DimGray,
+                Padding = new Padding(8, 3, 0, 0), Text = "── 이상 감지 이벤트 ──",
+            };
+
+            // 도킹 순서: grid(Fill) → 하단(status, events, lblEv) → 상단(toolbar, info)
             Controls.Add(_grid);
-            Controls.Add(_lblInfo);
-            Controls.Add(toolbar);
             Controls.Add(_lblStatus);
+            Controls.Add(_events);
+            Controls.Add(lblEv);
+            Controls.Add(toolbar);
+            Controls.Add(_lblInfo);
         }
 
         // ── 시작/중지 ──────────────────────────────────────────────────────────
@@ -209,7 +249,18 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     double? ano   = isActive ? (double?)r.AnomalyScore : null;
                     double? recon = isActive ? r.ReconError : null;
 
-                    Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color));
+                    // 정상↔이상 전이 시에만 이벤트 로그 (매 주기 스팸 방지)
+                    bool nowAnomaly = isActive && r.IsAnomaly;
+                    bool wasAnomaly;
+                    _lastAnomaly.TryGetValue(channel, out wasAnomaly);
+                    if (nowAnomaly && !wasAnomaly)
+                        Ui(() => AddEvent($"⚠ {channel} 이상 감지  anomaly={r.AnomalyScore:F3}  recon={r.ReconError:E2}", true));
+                    else if (!nowAnomaly && wasAnomaly)
+                        Ui(() => AddEvent($"✓ {channel} 정상 복귀", false));
+                    _lastAnomaly[channel] = nowAnomaly;
+
+                    bool rowAnomaly = nowAnomaly;
+                    Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color, rowAnomaly));
                     updated++;
                 }
 
@@ -222,6 +273,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private void SeedRows()
         {
             _grid.Rows.Clear();
+            _lastAnomaly.Clear();
             foreach (var kv in _meta.Channels)
             {
                 int i = _grid.Rows.Add(kv.Key, "-", "-", "-", "-", "-", "-");
@@ -230,7 +282,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         }
 
         private void SetRow(string channel, string state, double? act, double? ano,
-                            double? recon, string verdict, Color verdictColor)
+                            double? recon, string verdict, Color verdictColor,
+                            bool anomalyRow = false)
         {
             foreach (DataGridViewRow row in _grid.Rows)
             {
@@ -242,8 +295,17 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 row.Cells["verdict"].Value = verdict;
                 row.Cells["verdict"].Style.ForeColor = verdictColor;
                 row.Cells["ts"].Value      = DateTime.Now.ToString("HH:mm:ss");
+                row.DefaultCellStyle.BackColor = anomalyRow ? Color.MistyRose : Color.White;
                 return;
             }
+        }
+
+        private void AddEvent(string msg, bool danger)
+        {
+            string line = $"[{DateTime.Now:HH:mm:ss}] {msg}";
+            _events.Items.Insert(0, new Ev { Text = line, Danger = danger });
+            while (_events.Items.Count > 200)
+                _events.Items.RemoveAt(_events.Items.Count - 1);
         }
 
         private void SetStatus(string text) => _lblStatus.Text = text;
