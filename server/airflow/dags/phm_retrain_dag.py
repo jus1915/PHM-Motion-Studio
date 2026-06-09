@@ -99,8 +99,8 @@ _DEFAULT_CONF: dict = {
     "mlflow_experiment":        "PHM-DL",
 }
 
-# Windows 드라이브 패턴 (예: C:\, D:\)
-_WIN_DRIVE_RE = __import__("re").compile(r"^[A-Za-z]:[/\\]")
+# Windows 절대경로 패턴: 드라이브(C:\, D:\) 또는 UNC(\\server\share)
+_WIN_DRIVE_RE = __import__("re").compile(r"^([A-Za-z]:[/\\]|\\\\)")
 
 
 def _normalize_data_dir(raw: str) -> str:
@@ -112,7 +112,7 @@ def _normalize_data_dir(raw: str) -> str:
     if not isinstance(raw, str) or not _WIN_DRIVE_RE.match(raw):
         return raw
     raw_posix = raw.replace("\\", "/")
-    for marker in ("phm_data/", "phm-data/", "data/"):
+    for marker in ("phm_data/", "phm-data/"):
         idx = raw_posix.lower().find(marker)
         if idx >= 0:
             rel    = raw_posix[idx + len(marker):]
@@ -133,7 +133,7 @@ def _normalize_csv_file(raw: str) -> str:
     if not isinstance(raw, str) or not _WIN_DRIVE_RE.match(raw):
         return raw
     raw_posix = raw.replace("\\", "/")
-    for marker in ("phm_data/", "phm-data/", "data/"):
+    for marker in ("phm_data/", "phm-data/"):
         idx = raw_posix.lower().find(marker)
         if idx >= 0:
             rel    = raw_posix[idx + len(marker):]
