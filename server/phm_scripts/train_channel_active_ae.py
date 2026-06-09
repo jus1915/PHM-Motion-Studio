@@ -101,6 +101,11 @@ FEATURE_COLS = [
 
 SCORE_COLS = ("p2p", "rms", "std")
 
+# 가속도 x/y/z 를 하나의 magnitude 채널로 합성하는 가상 채널.
+# channels 목록에 "accel_mag" 가 있으면 x/y/z 컬럼을 읽어 √(x²+y²+z²) 로 변환.
+ACCEL_MAG_CHANNEL = "accel_mag"
+ACCEL_AXES = ["x", "y", "z"]
+
 # 이름에서 파일명에 사용할 수 없는 문자를 치환
 def _safe_name(name: str) -> str:
     return (str(name)
@@ -150,17 +155,28 @@ def _find_normal_csvs(data_dir: str):
 
 # ── 단일 채널 윈도우 생성 (청크 처리) ────────────────────────────────────────
 def _iter_channel_windows(csv_path, channel_col, window_size, stride, chunksize=2000):
-    """단일 채널에서 슬라이딩 윈도우를 yield합니다. (메모리 효율적)"""
+    """단일 채널에서 슬라이딩 윈도우를 yield합니다. (메모리 효율적)
+
+    channel_col == "accel_mag" 이면 x/y/z 컬럼을 읽어 √(x²+y²+z²) 시계열로
+    변환한 뒤 윈도잉합니다. 그 외 채널은 해당 컬럼을 그대로 사용합니다.
+    """
+    is_mag  = (channel_col == ACCEL_MAG_CHANNEL)
+    usecols = ACCEL_AXES if is_mag else [channel_col]
     buffer = pd.DataFrame()
     try:
-        for chunk in pd.read_csv(csv_path, usecols=[channel_col],
+        for chunk in pd.read_csv(csv_path, usecols=usecols,
                                  chunksize=chunksize, on_bad_lines="skip"):
             if len(buffer) > 0:
                 chunk = pd.concat([buffer, chunk], axis=0, ignore_index=True)
             n = len(chunk)
+            if is_mag:
+                arr = chunk[ACCEL_AXES].to_numpy(dtype=np.float32)
+                series = np.sqrt((arr ** 2).sum(axis=1)).astype(np.float32)
+            else:
+                series = chunk[channel_col].to_numpy(dtype=np.float32)
             max_start = n - window_size
             for start in range(0, max_start + 1, stride):
-                yield chunk.iloc[start:start + window_size][channel_col].to_numpy(dtype=np.float32)
+                yield series[start:start + window_size]
             keep_start = max(0, n - window_size + stride)
             buffer = chunk.iloc[keep_start:].copy()
     except Exception as e:

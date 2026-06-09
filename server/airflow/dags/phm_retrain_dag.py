@@ -757,7 +757,9 @@ def run_training_ae_channel_active(**context) -> None:
     # 축 수 감지해서 torque 채널 목록 구성
     axis_count = _get_axis_count(dict(conf))  # dict 복사 (pop 부작용 방지)
     torque_chs = [f"Ax{ax}_Trq(%)" for ax in range(axis_count)]
-    accel_chs  = ["x", "y", "z"]
+    # 가속도는 x/y/z 를 magnitude 단일 채널(accel_mag)로 통합 — 단일 3축 센서이므로
+    # 채널을 따로 학습하지 않고 √(x²+y²+z²) 한 채널로 학습/추론한다.
+    accel_chs  = ["accel_mag"]
     channels   = accel_chs + torque_chs
 
     # _DEFAULT_CONF 를 베이스로 하되, 채널 AE 전용 기본값은 conf 미지정 시 강제 적용
