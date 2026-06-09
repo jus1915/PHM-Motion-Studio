@@ -271,8 +271,18 @@ namespace PHM_Project_DockPanel.Services.Core
             // 결합 CSV 우선, 없으면 개별 CSV 사용
             string csvPath = null;
             if (_combinedLogger != null && _combinedLogger.IsLogging)
-                csvPath = _combinedLogger.OutputPath;
-            else if (_accelLogger != null && _accelLogger.IsRunning)
+            {
+                string raw = _combinedLogger.OutputPath;
+                // OutputPath 가 폴더이면 하위에서 가장 최근 수정된 CSV 를 사용
+                if (!string.IsNullOrEmpty(raw))
+                {
+                    if (System.IO.File.Exists(raw))
+                        csvPath = raw;
+                    else if (System.IO.Directory.Exists(raw))
+                        csvPath = LatestCsvInDir(raw);
+                }
+            }
+            if (string.IsNullOrEmpty(csvPath) && _accelLogger != null && _accelLogger.IsRunning)
             {
                 string[] paths = _accelLogger.CsvPathByModule;
                 if (paths != null)
@@ -280,7 +290,7 @@ namespace PHM_Project_DockPanel.Services.Core
                         if (!string.IsNullOrEmpty(p) && System.IO.File.Exists(p))
                         { csvPath = p; break; }
             }
-            if (string.IsNullOrEmpty(csvPath) || !System.IO.File.Exists(csvPath)) return;
+            if (string.IsNullOrEmpty(csvPath)) return;
 
             int windowSize = _channelAeMeta.WindowSize;
 
@@ -310,6 +320,39 @@ namespace PHM_Project_DockPanel.Services.Core
                     AppEvents.RaiseInferenceResult(sensorType, resp.ToInferenceResult(sensorType));
                 }
             }
+        }
+
+        /// <summary>폴더 안에서 가장 최근에 수정된 CSV 파일 경로를 반환합니다.</summary>
+        private static string LatestCsvInDir(string dirPath)
+        {
+            try
+            {
+                // Combined 파일 우선 ("Combined" 또는 "AllAxes" 포함)
+                var csvFiles = System.IO.Directory.GetFiles(dirPath, "*.csv",
+                                   System.IO.SearchOption.AllDirectories);
+                System.IO.FileInfo best = null;
+                foreach (var f in csvFiles)
+                {
+                    var fi = new System.IO.FileInfo(f);
+                    if (!fi.Exists) continue;
+                    // AllAxes_Continuous_Combined 파일 최우선
+                    bool isCombined = fi.Name.IndexOf("Combined",
+                        System.StringComparison.OrdinalIgnoreCase) >= 0
+                        || fi.Name.IndexOf("AllAxes",
+                        System.StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (best == null
+                        || (isCombined && best.Name.IndexOf("Combined",
+                            System.StringComparison.OrdinalIgnoreCase) < 0)
+                        || (fi.LastWriteTime > best.LastWriteTime
+                            && (isCombined == (best.Name.IndexOf("Combined",
+                                System.StringComparison.OrdinalIgnoreCase) >= 0
+                                || best.Name.IndexOf("AllAxes",
+                                System.StringComparison.OrdinalIgnoreCase) >= 0))))
+                        best = fi;
+                }
+                return best?.FullName;
+            }
+            catch { return null; }
         }
 
         /// <summary>
