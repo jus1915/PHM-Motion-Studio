@@ -268,29 +268,41 @@ namespace PHM_Project_DockPanel.Services.Core
         {
             if (_channelAeMeta == null) return;  // 미학습 상태
 
-            // 결합 CSV 우선, 없으면 개별 CSV 사용
-            string csvPath = null;
+            // ── 공통 통합 CSV (accel+torque 동시 포함) ───────────────────────
+            // 통합 CSV가 있으면 모든 채널을 단일 파일에서 읽음.
+            // 없으면 채널별로 적합한 CSV(가속도 / 토크)를 개별 선택.
+            string combinedCsvPath = null;
             if (_combinedLogger != null && _combinedLogger.IsLogging)
             {
                 string raw = _combinedLogger.OutputPath;
-                // OutputPath 가 폴더이면 하위에서 가장 최근 수정된 CSV 를 사용
-                if (!string.IsNullOrEmpty(raw))
+                if (!string.IsNullOrEmpty(raw) && System.IO.File.Exists(raw))
+                    combinedCsvPath = raw;
+            }
+
+            // 통합 CSV 없는 경우를 위한 개별 CSV 경로 미리 조회
+            string accelCsvPath  = null;
+            string torqueCsvPath = null;
+            if (combinedCsvPath == null)
+            {
+                if (_accelLogger != null && _accelLogger.IsRunning)
                 {
-                    if (System.IO.File.Exists(raw))
-                        csvPath = raw;
-                    else if (System.IO.Directory.Exists(raw))
-                        csvPath = LatestCsvInDir(raw);
+                    string[] paths = _accelLogger.CsvPathByModule;
+                    if (paths != null)
+                        foreach (string p in paths)
+                            if (!string.IsNullOrEmpty(p) && System.IO.File.Exists(p))
+                            { accelCsvPath = p; break; }
+                }
+                if (_torqueLogger != null && _torqueLogger.IsLogging)
+                {
+                    string tp = _torqueLogger.OutputPath;
+                    if (!string.IsNullOrEmpty(tp) && System.IO.File.Exists(tp))
+                        torqueCsvPath = tp;
                 }
             }
-            if (string.IsNullOrEmpty(csvPath) && _accelLogger != null && _accelLogger.IsRunning)
-            {
-                string[] paths = _accelLogger.CsvPathByModule;
-                if (paths != null)
-                    foreach (string p in paths)
-                        if (!string.IsNullOrEmpty(p) && System.IO.File.Exists(p))
-                        { csvPath = p; break; }
-            }
-            if (string.IsNullOrEmpty(csvPath)) return;
+
+            // 통합 CSV도 없고 가속도·토크 CSV 둘 다 없으면 추론 불가
+            if (combinedCsvPath == null && accelCsvPath == null && torqueCsvPath == null)
+                return;
 
             int windowSize = _channelAeMeta.WindowSize;
 
@@ -298,6 +310,16 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 string channelName = kv.Key;
                 if (ct.IsCancellationRequested) return;
+
+                // 채널 이름에 "Trq" 포함 → 토크 채널로 판단
+                bool isTorque = channelName.IndexOf("Trq",
+                    System.StringComparison.OrdinalIgnoreCase) >= 0;
+
+                // 채널에 맞는 CSV 선택: 통합 > 개별
+                string csvPath = combinedCsvPath
+                    ?? (isTorque ? torqueCsvPath : accelCsvPath);
+
+                if (string.IsNullOrEmpty(csvPath)) continue;
 
                 float[] window = ReadSingleChannelWindow(csvPath, channelName, windowSize);
                 if (window == null) continue;
@@ -320,39 +342,6 @@ namespace PHM_Project_DockPanel.Services.Core
                     AppEvents.RaiseInferenceResult(sensorType, resp.ToInferenceResult(sensorType));
                 }
             }
-        }
-
-        /// <summary>폴더 안에서 가장 최근에 수정된 CSV 파일 경로를 반환합니다.</summary>
-        private static string LatestCsvInDir(string dirPath)
-        {
-            try
-            {
-                // Combined 파일 우선 ("Combined" 또는 "AllAxes" 포함)
-                var csvFiles = System.IO.Directory.GetFiles(dirPath, "*.csv",
-                                   System.IO.SearchOption.AllDirectories);
-                System.IO.FileInfo best = null;
-                foreach (var f in csvFiles)
-                {
-                    var fi = new System.IO.FileInfo(f);
-                    if (!fi.Exists) continue;
-                    // AllAxes_Continuous_Combined 파일 최우선
-                    bool isCombined = fi.Name.IndexOf("Combined",
-                        System.StringComparison.OrdinalIgnoreCase) >= 0
-                        || fi.Name.IndexOf("AllAxes",
-                        System.StringComparison.OrdinalIgnoreCase) >= 0;
-                    if (best == null
-                        || (isCombined && best.Name.IndexOf("Combined",
-                            System.StringComparison.OrdinalIgnoreCase) < 0)
-                        || (fi.LastWriteTime > best.LastWriteTime
-                            && (isCombined == (best.Name.IndexOf("Combined",
-                                System.StringComparison.OrdinalIgnoreCase) >= 0
-                                || best.Name.IndexOf("AllAxes",
-                                System.StringComparison.OrdinalIgnoreCase) >= 0))))
-                        best = fi;
-                }
-                return best?.FullName;
-            }
-            catch { return null; }
         }
 
         /// <summary>
