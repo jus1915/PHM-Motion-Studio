@@ -1059,11 +1059,15 @@ def predict_channel_ae(req: ChannelAePredictRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AE 추론 실패: {e}")
 
-    # ── 5. 이상 점수 정규화 (thr95 기준) ─────────────────────────────────────
-    thr95      = ch_info.get("recon_error_thr_95", 1e-3)
-    if thr95 < 1e-10:
-        thr95 = 1e-3
-    anomaly_score = recon_error / thr95          # >1.0 이면 이상
+    # ── 5. 이상 점수 정규화 (thr99 기준 — 오탐 1% 목표) ──────────────────────
+    # thr95 는 정의상 정상의 5%가 초과 → 간헐적 오탐. thr99 로 판정해 ~1%로 낮춘다.
+    # (thr99 미저장 구 모델은 thr95 로 폴백)
+    thr = ch_info.get("recon_error_thr_99")
+    if thr is None or thr < 1e-10:
+        thr = ch_info.get("recon_error_thr_95", 1e-3)
+    if thr < 1e-10:
+        thr = 1e-3
+    anomaly_score = recon_error / thr            # >1.0 이면 이상
     is_anomaly    = anomaly_score > 1.0
 
     return ChannelAePredictResponse(
@@ -1074,7 +1078,7 @@ def predict_channel_ae(req: ChannelAePredictRequest):
         anomaly_score = round(anomaly_score, 6),
         threshold     = 1.0,
         recon_error   = round(recon_error,   8),
-        raw_threshold = round(thr95,         8),
+        raw_threshold = round(thr,           8),
     )
 
 
