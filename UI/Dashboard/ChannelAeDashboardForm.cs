@@ -66,6 +66,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Generic.Dictionary<string, int> _cumAnomaly
             = new System.Collections.Generic.Dictionary<string, int>();
 
+        // 지속성 필터: 연속 _persistN 회 이상(raw)일 때만 "확정 이상"으로 판정.
+        // 단발 오탐(thr 꼬리분포·데이터 글리치)을 거른다.
+        private readonly System.Collections.Generic.Dictionary<string, int> _consecAnomaly
+            = new System.Collections.Generic.Dictionary<string, int>();
+        private volatile int _persistN = 3;
+        private readonly NumericUpDown _numPersist;
+
+        // anomaly 차트 y축 상한 (데이터 글리치 스파이크가 차트를 망치지 않게)
+        private const double AnomalyChartMax = 5.0;
+
         // 이벤트 로그 항목 (OwnerDraw로 위험은 빨간색)
         private sealed class Ev
         {
@@ -110,6 +120,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             toolbar.Controls.Add(_btnStop);
             toolbar.Controls.Add(new Label { Text = "주기(ms)", AutoSize = true, Padding = new Padding(8, 8, 2, 0) });
             toolbar.Controls.Add(_numInterval);
+
+            _numPersist = new NumericUpDown
+            {
+                Minimum = 1, Maximum = 20, Value = _persistN, Width = 50, Height = 28,
+            };
+            _numPersist.ValueChanged += (s, e) => _persistN = (int)_numPersist.Value;
+            toolbar.Controls.Add(new Label { Text = "이상확정(연속)", AutoSize = true, Padding = new Padding(10, 8, 2, 0) });
+            toolbar.Controls.Add(_numPersist);
 
             // ── 정보/상태 라벨 ─────────────────────────────────────────────────
             _lblInfo = new Label
@@ -216,9 +234,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             ca.AxisY.TitleForeColor        = Color.DimGray;
             chart.ChartAreas.Add(ca);
 
-            // anomaly 차트: 임계선 y=1.0 (이 위면 이상)
+            // anomaly 차트: 임계선 y=1.0 (이 위면 이상) + y축 상한 고정(글리치 스파이크 방지)
             if (anomalyLine)
             {
+                ca.AxisY.Maximum = AnomalyChartMax;
                 var strip = new StripLine
                 {
                     IntervalOffset = 1.0, StripWidth = 0,
@@ -390,27 +409,35 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             bool isActive = r.ChannelState == ChannelActiveState.Active;
 
+            // ── 지속성 필터: raw 이상이 연속 _persistN 회 이어질 때만 "확정 이상" ──
+            bool rawAnomaly = isActive && r.IsAnomaly;   // 서버 판정(score>1)
+            int consec;
+            _consecAnomaly.TryGetValue(channel, out consec);
+            consec = rawAnomaly ? consec + 1 : 0;
+            _consecAnomaly[channel] = consec;
+            bool confirmed = rawAnomaly && consec >= _persistN;
+
             string verdict;
             Color  color;
             if (!isActive)        { verdict = "-";     color = Color.Gray; }
-            else if (r.IsAnomaly) { verdict = "⚠ 이상"; color = Color.Red; }
+            else if (confirmed)   { verdict = "⚠ 이상"; color = Color.Red; }
+            else if (rawAnomaly)  { verdict = $"… 관찰({consec}/{_persistN})"; color = Color.DarkGoldenrod; }
             else                  { verdict = "✓ 정상"; color = Color.ForestGreen; }
 
             double? ano   = isActive ? (double?)r.AnomalyScore : null;
             double? recon = isActive ? r.ReconError : null;
 
-            // 정상↔이상 전이 시에만 이벤트 로그 (매 주기 스팸 방지)
-            bool nowAnomaly = isActive && r.IsAnomaly;
+            // 확정 이상 전이 시에만 이벤트 로그 (단발/관찰중 제외)
             bool wasAnomaly;
             _lastAnomaly.TryGetValue(channel, out wasAnomaly);
-            if (nowAnomaly && !wasAnomaly)
-                Ui(() => AddEvent($"⚠ {channel} 이상 감지  anomaly={r.AnomalyScore:F3}  recon={r.ReconError:E2}", true));
-            else if (!nowAnomaly && wasAnomaly)
+            if (confirmed && !wasAnomaly)
+                Ui(() => AddEvent($"⚠ {channel} 이상 확정  anomaly={r.AnomalyScore:F3}  recon={r.ReconError:E2}  (연속 {consec})", true));
+            else if (!confirmed && wasAnomaly)
                 Ui(() => AddEvent($"✓ {channel} 정상 복귀", false));
-            _lastAnomaly[channel] = nowAnomaly;
+            _lastAnomaly[channel] = confirmed;
 
             bool active = isActive;
-            Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color, nowAnomaly, active));
+            Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color, confirmed, active));
         }
 
         // ── 그리드 헬퍼 ────────────────────────────────────────────────────────
@@ -420,6 +447,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _lastAnomaly.Clear();
             _cumActive.Clear();
             _cumAnomaly.Clear();
+            _consecAnomaly.Clear();
             _channelColors.Clear();
             _chartActive.Series.Clear();
             _chartAnomaly.Series.Clear();
