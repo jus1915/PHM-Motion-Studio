@@ -5,6 +5,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Windows.Forms.DataVisualization.Charting;
 using PHM_Project_DockPanel.Services;
 using PHM_Project_DockPanel.Services.Core;
 using WeifenLuo.WinFormsUI.Docking;
@@ -36,6 +37,20 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly Label        _lblInfo;
         private readonly NumericUpDown _numInterval;
         private readonly ListBox      _events;
+        private readonly Chart        _chartActive;
+        private readonly Chart        _chartAnomaly;
+
+        // 차트 롤링 윈도우 길이 (채널별 시리즈당 최대 점 수)
+        private const int MaxChartPoints = 300;
+
+        // 채널 → 색상 (active/anomaly 차트에서 동일 색 사용)
+        private readonly System.Collections.Generic.Dictionary<string, Color> _channelColors
+            = new System.Collections.Generic.Dictionary<string, Color>();
+        private static readonly Color[] Palette =
+        {
+            Color.RoyalBlue, Color.Crimson, Color.ForestGreen, Color.DarkOrange,
+            Color.MediumPurple, Color.Teal, Color.Sienna, Color.DeepPink,
+        };
 
         // 가속도 x/y/z 합성 magnitude 가상 채널 (학습 스크립트와 동일 규약).
         // 이 채널은 CSV의 x/y/z 컬럼을 읽어 √(x²+y²+z²) 로 변환해 전송한다.
@@ -147,13 +162,112 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Padding = new Padding(8, 3, 0, 0), Text = "── 이상 감지 이벤트 ──",
             };
 
-            // 도킹 순서: grid(Fill) → 하단(status, events, lblEv) → 상단(toolbar, info)
-            Controls.Add(_grid);
+            // ── 차트 (active_score / anomaly_score 시계열) ─────────────────────
+            _chartActive  = BuildScoreChart("채널별 active_score", anomalyLine: false);
+            _chartAnomaly = BuildScoreChart("채널별 anomaly_score (>1 이상)", anomalyLine: true);
+
+            var chartTable = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+            };
+            chartTable.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            chartTable.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            chartTable.Controls.Add(_chartActive,  0, 0);
+            chartTable.Controls.Add(_chartAnomaly, 0, 1);
+
+            // 좌: 그리드 / 우: 차트 2개
+            var split = new SplitContainer
+            {
+                Dock = DockStyle.Fill, Orientation = Orientation.Vertical,
+                SplitterWidth = 6,
+            };
+            split.Panel1.Controls.Add(_grid);
+            split.Panel2.Controls.Add(chartTable);
+            split.SplitterDistance = 560;   // 좌측 그리드 기본 폭
+
+            // 도킹 순서: split(Fill) → 하단(status, events, lblEv) → 상단(toolbar, info)
+            Controls.Add(split);
             Controls.Add(_lblStatus);
             Controls.Add(_events);
             Controls.Add(lblEv);
             Controls.Add(toolbar);
             Controls.Add(_lblInfo);
+        }
+
+        // ── 차트 빌드 ──────────────────────────────────────────────────────────
+        private static Chart BuildScoreChart(string title, bool anomalyLine)
+        {
+            var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White };
+            var ca = new ChartArea("a") { BackColor = Color.White };
+            ca.AxisX.LabelStyle.Format     = "HH:mm:ss";
+            ca.AxisX.MajorGrid.LineColor   = Color.Gainsboro;
+            ca.AxisY.MajorGrid.LineColor   = Color.Gainsboro;
+            ca.AxisY.Minimum               = 0;
+            ca.AxisX.IntervalAutoMode      = IntervalAutoMode.VariableCount;
+            chart.ChartAreas.Add(ca);
+
+            // anomaly 차트: 임계선 y=1.0 (이 위면 이상)
+            if (anomalyLine)
+            {
+                var strip = new StripLine
+                {
+                    IntervalOffset = 1.0, StripWidth = 0,
+                    BorderColor = Color.Red, BorderDashStyle = ChartDashStyle.Dash,
+                    BorderWidth = 1,
+                };
+                ca.AxisY.StripLines.Add(strip);
+            }
+
+            chart.Legends.Add(new Legend("lg")
+            {
+                Docking = Docking.Top, Alignment = StringAlignment.Center,
+                Font = new Font("Segoe UI", 8f),
+            });
+            chart.Titles.Add(new Title(title, Docking.Top)
+            {
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                ForeColor = Color.DimGray,
+            });
+            return chart;
+        }
+
+        /// <summary>차트에서 채널 시리즈를 찾거나 생성합니다.</summary>
+        private Series EnsureChartSeries(Chart chart, string channel)
+        {
+            var s = chart.Series.FindByName(channel);
+            if (s != null) return s;
+
+            Color color;
+            if (!_channelColors.TryGetValue(channel, out color))
+            {
+                color = Palette[_channelColors.Count % Palette.Length];
+                _channelColors[channel] = color;
+            }
+            s = new Series(channel)
+            {
+                ChartType = SeriesChartType.FastLine, XValueType = ChartValueType.DateTime,
+                Color = color, BorderWidth = 2, LegendText = channel,
+            };
+            chart.Series.Add(s);
+            return s;
+        }
+
+        /// <summary>채널 점수를 차트에 추가하고 롤링 윈도우를 유지합니다.</summary>
+        private void PushChart(string channel, double? activeScore, double? anomalyScore)
+        {
+            DateTime now = DateTime.Now;
+            if (activeScore.HasValue)
+                AddChartPoint(_chartActive, channel, now, activeScore.Value);
+            if (anomalyScore.HasValue)
+                AddChartPoint(_chartAnomaly, channel, now, anomalyScore.Value);
+        }
+
+        private void AddChartPoint(Chart chart, string channel, DateTime t, double v)
+        {
+            var s = EnsureChartSeries(chart, channel);
+            s.Points.AddXY(t.ToOADate(), v);
+            while (s.Points.Count > MaxChartPoints)
+                s.Points.RemoveAt(0);
         }
 
         // ── 시작/중지 ──────────────────────────────────────────────────────────
@@ -293,6 +407,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             _grid.Rows.Clear();
             _lastAnomaly.Clear();
+            _channelColors.Clear();
+            _chartActive.Series.Clear();
+            _chartAnomaly.Series.Clear();
             foreach (var kv in _meta.Channels)
             {
                 var info = kv.Value;
@@ -319,8 +436,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 row.Cells["verdict"].Style.ForeColor = verdictColor;
                 row.Cells["ts"].Value      = DateTime.Now.ToString("HH:mm:ss");
                 row.DefaultCellStyle.BackColor = anomalyRow ? Color.MistyRose : Color.White;
-                return;
+                break;
             }
+
+            // 차트 갱신: active_score 는 항상, anomaly_score 는 active 일 때만 값 존재
+            PushChart(channel, act, ano);
         }
 
         private void AddEvent(string msg, bool danger)
