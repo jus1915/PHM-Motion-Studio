@@ -163,47 +163,50 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
 
             // ── 차트 (active_score / anomaly_score 시계열) ─────────────────────
-            _chartActive  = BuildScoreChart("채널별 active_score", anomalyLine: false);
-            _chartAnomaly = BuildScoreChart("채널별 anomaly_score (>1 이상)", anomalyLine: true);
+            _chartActive  = BuildScoreChart("채널별 active_score", "active_score", anomalyLine: false);
+            _chartAnomaly = BuildScoreChart("채널별 anomaly_score", "anomaly_score", anomalyLine: true);
 
+            // 차트 2개를 가로로 나란히 (각 50%) — 화면 폭을 최대 활용
             var chartTable = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+                Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
             };
-            chartTable.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-            chartTable.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            chartTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            chartTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             chartTable.Controls.Add(_chartActive,  0, 0);
-            chartTable.Controls.Add(_chartAnomaly, 0, 1);
+            chartTable.Controls.Add(_chartAnomaly, 1, 0);
 
-            // 좌: 그리드 / 우: 차트 2개
-            var split = new SplitContainer
-            {
-                Dock = DockStyle.Fill, Orientation = Orientation.Vertical,
-                SplitterWidth = 6,
-            };
-            split.Panel1.Controls.Add(_grid);
-            split.Panel2.Controls.Add(chartTable);
-            split.SplitterDistance = 560;   // 좌측 그리드 기본 폭
+            // 그리드는 위 가로 전체에 작게(채널 수가 적음), 차트는 아래 넓게
+            _grid.Dock   = DockStyle.Top;
+            _grid.Height = 150;
 
-            // 도킹 순서: split(Fill) → 하단(status, events, lblEv) → 상단(toolbar, info)
-            Controls.Add(split);
-            Controls.Add(_lblStatus);
-            Controls.Add(_events);
-            Controls.Add(lblEv);
-            Controls.Add(toolbar);
-            Controls.Add(_lblInfo);
+            // 도킹 순서: Fill 먼저, 이어서 가장자리는 바깥쪽부터 추가
+            //   상단(위→아래): toolbar, info, grid   하단(아래→위): status, events, lblEv
+            Controls.Add(chartTable);   // Fill (중앙)
+            Controls.Add(toolbar);      // Top - 최상
+            Controls.Add(_lblInfo);     // Top
+            Controls.Add(_grid);        // Top
+            Controls.Add(_lblStatus);   // Bottom - 최하
+            Controls.Add(_events);      // Bottom
+            Controls.Add(lblEv);        // Bottom
         }
 
         // ── 차트 빌드 ──────────────────────────────────────────────────────────
-        private static Chart BuildScoreChart(string title, bool anomalyLine)
+        private static Chart BuildScoreChart(string title, string yTitle, bool anomalyLine)
         {
             var chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White };
             var ca = new ChartArea("a") { BackColor = Color.White };
+            // 플롯 영역 수동 배치: 위(제목) 9% / 플롯 80% / 아래(범례) · 우측 4% 여백
+            // → 자동배치 시 마지막 시간 레이블이 오른쪽에서 잘리던 문제 해결
+            ca.Position = new ElementPosition(1f, 9f, 95f, 80f);
             ca.AxisX.LabelStyle.Format     = "HH:mm:ss";
             ca.AxisX.MajorGrid.LineColor   = Color.Gainsboro;
+            ca.AxisX.IntervalAutoMode      = IntervalAutoMode.VariableCount;
             ca.AxisY.MajorGrid.LineColor   = Color.Gainsboro;
             ca.AxisY.Minimum               = 0;
-            ca.AxisX.IntervalAutoMode      = IntervalAutoMode.VariableCount;
+            ca.AxisY.Title                 = yTitle;
+            ca.AxisY.TitleFont             = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+            ca.AxisY.TitleForeColor        = Color.DimGray;
             chart.ChartAreas.Add(ca);
 
             // anomaly 차트: 임계선 y=1.0 (이 위면 이상)
@@ -220,7 +223,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             chart.Legends.Add(new Legend("lg")
             {
-                Docking = Docking.Top, Alignment = StringAlignment.Center,
+                Docking = Docking.Bottom, Alignment = StringAlignment.Center,
                 Font = new Font("Segoe UI", 8f),
             });
             chart.Titles.Add(new Title(title, Docking.Top)
