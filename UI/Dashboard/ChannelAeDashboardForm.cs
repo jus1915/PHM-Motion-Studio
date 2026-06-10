@@ -60,6 +60,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Generic.Dictionary<string, bool> _lastAnomaly
             = new System.Collections.Generic.Dictionary<string, bool>();
 
+        // 채널별 누적 판정: active 판정 횟수 / 그 중 이상 횟수 (진단 시작 이후)
+        private readonly System.Collections.Generic.Dictionary<string, int> _cumActive
+            = new System.Collections.Generic.Dictionary<string, int>();
+        private readonly System.Collections.Generic.Dictionary<string, int> _cumAnomaly
+            = new System.Collections.Generic.Dictionary<string, int>();
+
         // 이벤트 로그 항목 (OwnerDraw로 위험은 빨간색)
         private sealed class Ev
         {
@@ -134,6 +140,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _grid.Columns.Add("ano",  "anomaly_score");
             _grid.Columns.Add("recon","recon_error");
             _grid.Columns.Add("verdict", "판정");
+            _grid.Columns.Add("cum",  "누적(정상/이상)");
             _grid.Columns.Add("ts",   "갱신");
             _grid.Columns["verdict"].DefaultCellStyle.Font =
                 new Font(_grid.Font, FontStyle.Bold);
@@ -163,8 +170,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
 
             // ── 차트 (active_score / anomaly_score 시계열) ─────────────────────
-            _chartActive  = BuildScoreChart("채널별 active_score", "active_score", anomalyLine: false);
-            _chartAnomaly = BuildScoreChart("채널별 anomaly_score", "anomaly_score", anomalyLine: true);
+            _chartActive  = BuildScoreChart("채널별 active_score", "active_score (robust z·무차원)", anomalyLine: false);
+            _chartAnomaly = BuildScoreChart("채널별 anomaly_score", "anomaly_score (= recon/thr99)", anomalyLine: true);
 
             // 차트 2개를 가로로 나란히 (각 50%) — 화면 폭을 최대 활용
             var chartTable = new TableLayoutPanel
@@ -402,7 +409,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 Ui(() => AddEvent($"✓ {channel} 정상 복귀", false));
             _lastAnomaly[channel] = nowAnomaly;
 
-            Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color, nowAnomaly));
+            bool active = isActive;
+            Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color, nowAnomaly, active));
         }
 
         // ── 그리드 헬퍼 ────────────────────────────────────────────────────────
@@ -410,6 +418,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         {
             _grid.Rows.Clear();
             _lastAnomaly.Clear();
+            _cumActive.Clear();
+            _cumAnomaly.Clear();
             _channelColors.Clear();
             _chartActive.Series.Clear();
             _chartAnomaly.Series.Clear();
@@ -419,15 +429,27 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 string thr = info == null ? "-"
                     : $"{info.ActiveThreshold.ToString("F2", CultureInfo.InvariantCulture)} / "
                     + $"{info.InactiveThreshold.ToString("F2", CultureInfo.InvariantCulture)}";
-                int i = _grid.Rows.Add(kv.Key, "-", "-", thr, "-", "-", "-", "-");
+                int i = _grid.Rows.Add(kv.Key, "-", "-", thr, "-", "-", "-", "-", "-");
                 _grid.Rows[i].Tag = kv.Key;
             }
         }
 
         private void SetRow(string channel, string state, double? act, double? ano,
                             double? recon, string verdict, Color verdictColor,
-                            bool anomalyRow = false)
+                            bool anomalyRow = false, bool countActive = false)
         {
+            // 누적 판정 집계 (active 판정일 때만 카운트)
+            if (countActive)
+            {
+                int a; _cumActive.TryGetValue(channel, out a);
+                _cumActive[channel] = a + 1;
+                if (anomalyRow)
+                {
+                    int an; _cumAnomaly.TryGetValue(channel, out an);
+                    _cumAnomaly[channel] = an + 1;
+                }
+            }
+
             foreach (DataGridViewRow row in _grid.Rows)
             {
                 if (!Equals(row.Tag, channel)) continue;
@@ -437,6 +459,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                 row.Cells["recon"].Value   = recon.HasValue ? recon.Value.ToString("E2", CultureInfo.InvariantCulture) : "-";
                 row.Cells["verdict"].Value = verdict;
                 row.Cells["verdict"].Style.ForeColor = verdictColor;
+                row.Cells["cum"].Value     = FormatCum(channel);
                 row.Cells["ts"].Value      = DateTime.Now.ToString("HH:mm:ss");
                 row.DefaultCellStyle.BackColor = anomalyRow ? Color.MistyRose : Color.White;
                 break;
@@ -444,6 +467,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // 차트 갱신: active_score 는 항상, anomaly_score 는 active 일 때만 값 존재
             PushChart(channel, act, ano);
+        }
+
+        /// <summary>채널 누적 판정 문자열: "정상수 / 이상수 (이상률%)".</summary>
+        private string FormatCum(string channel)
+        {
+            int a; _cumActive.TryGetValue(channel, out a);
+            if (a == 0) return "-";
+            int an; _cumAnomaly.TryGetValue(channel, out an);
+            double rate = (double)an / a;
+            return $"{a - an} / {an} ({rate.ToString("P1", CultureInfo.InvariantCulture)})";
         }
 
         private void AddEvent(string msg, bool danger)
