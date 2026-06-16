@@ -73,19 +73,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private volatile int _persistN = 3;
         private readonly NumericUpDown _numPersist;
 
-        // ── 상대 baseline 판정 ────────────────────────────────────────────────
-        // 절대 thr99 는 학습 분포가 넓어 둔감 → 정상 운영 중 recon median 을 EMA로
-        // 추적하고 그 K배 초과를 이상으로 본다. (부하 시 recon 4~5배 → 명확히 잡힘)
-        // 진단 시작 직후 BaselineInitN 개는 baseline 학습(판정 보류).
-        private readonly System.Collections.Generic.Dictionary<string, double> _reconBaseline
-            = new System.Collections.Generic.Dictionary<string, double>();
-        private readonly System.Collections.Generic.Dictionary<string, int> _baselineCount
-            = new System.Collections.Generic.Dictionary<string, int>();
-        private double _baselineK = 3.0;       // 이상 배수 임계
-        private const int BaselineInitN = 20;  // baseline 초기화 표본 수
-        private const double BaselineAlpha = 0.05;
-        private readonly NumericUpDown _numK;
-
         // anomaly 차트 y축 상한 (데이터 글리치 스파이크가 차트를 망치지 않게)
         private const double AnomalyChartMax = 5.0;
 
@@ -142,20 +129,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             toolbar.Controls.Add(new Label { Text = "이상확정(연속)", AutoSize = true, Padding = new Padding(10, 8, 2, 0) });
             toolbar.Controls.Add(_numPersist);
 
-            _numK = new NumericUpDown
-            {
-                Minimum = 1.5m, Maximum = 10m, Increment = 0.5m, DecimalPlaces = 1,
-                Value = (decimal)_baselineK, Width = 55, Height = 28,
-            };
-            _numK.ValueChanged += (s, e) =>
-            {
-                _baselineK = (double)_numK.Value;
-                // anomaly 차트 임계선을 K 위치로 이동
-                try { _chartAnomaly.ChartAreas[0].AxisY.StripLines[0].IntervalOffset = _baselineK; } catch { }
-            };
-            toolbar.Controls.Add(new Label { Text = "이상배수(×baseline)", AutoSize = true, Padding = new Padding(10, 8, 2, 0) });
-            toolbar.Controls.Add(_numK);
-
             // ── 정보/상태 라벨 ─────────────────────────────────────────────────
             _lblInfo = new Label
             {
@@ -182,7 +155,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _grid.Columns.Add("st",   "상태");
             _grid.Columns.Add("act",  "active_score");
             _grid.Columns.Add("thr",  "임계(act/inact)");
-            _grid.Columns.Add("ano",  "이상배수(×base)");
+            _grid.Columns.Add("ano",  "anomaly_score");
             _grid.Columns.Add("recon","recon_error");
             _grid.Columns.Add("verdict", "판정");
             _grid.Columns.Add("cum",  "누적(정상/이상)");
@@ -216,8 +189,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // ── 차트 (active_score / anomaly_score 시계열) ─────────────────────
             _chartActive  = BuildScoreChart("채널별 active_score", "active_score (robust z·무차원)", anomalyLine: false);
-            _chartAnomaly = BuildScoreChart("채널별 이상배수 (recon/baseline)", "recon / baseline", anomalyLine: true);
-            try { _chartAnomaly.ChartAreas[0].AxisY.StripLines[0].IntervalOffset = _baselineK; } catch { }
+            _chartAnomaly = BuildScoreChart("채널별 anomaly_score", "anomaly_score (= recon/thr99)", anomalyLine: true);
 
             // 차트 2개를 가로로 나란히 (각 50%) — 화면 폭을 최대 활용
             var chartTable = new TableLayoutPanel
@@ -437,13 +409,8 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             bool isActive = r.ChannelState == ChannelActiveState.Active;
 
-            // ── 상대 baseline 판정: recon 이 정상 baseline 의 K배 초과면 raw 이상 ──
-            double reconVal = r.ReconError ?? 0.0;
-            double ratio = 0.0; bool baseReady = false; bool rawAnomaly = false;
-            if (isActive)
-                rawAnomaly = UpdateBaseline(channel, reconVal, out ratio, out baseReady);
-
             // ── 지속성 필터: raw 이상이 연속 _persistN 회 이어질 때만 "확정 이상" ──
+            bool rawAnomaly = isActive && r.IsAnomaly;   // 서버 판정(score>1)
             int consec;
             _consecAnomaly.TryGetValue(channel, out consec);
             consec = rawAnomaly ? consec + 1 : 0;
@@ -452,58 +419,25 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             string verdict;
             Color  color;
-            if (!isActive)        { verdict = "-";               color = Color.Gray; }
-            else if (!baseReady)  { verdict = "baseline 학습중";  color = Color.SteelBlue; }
-            else if (confirmed)   { verdict = "⚠ 이상";           color = Color.Red; }
+            if (!isActive)        { verdict = "-";     color = Color.Gray; }
+            else if (confirmed)   { verdict = "⚠ 이상"; color = Color.Red; }
             else if (rawAnomaly)  { verdict = $"… 관찰({consec}/{_persistN})"; color = Color.DarkGoldenrod; }
-            else                  { verdict = "✓ 정상";           color = Color.ForestGreen; }
+            else                  { verdict = "✓ 정상"; color = Color.ForestGreen; }
 
-            // anomaly 표시값 = recon/baseline 비율 (baseline 학습 전엔 없음)
-            double? ano   = (isActive && baseReady) ? (double?)ratio : null;
-            double? recon = isActive ? (double?)reconVal : null;
+            double? ano   = isActive ? (double?)r.AnomalyScore : null;
+            double? recon = isActive ? r.ReconError : null;
 
             // 확정 이상 전이 시에만 이벤트 로그 (단발/관찰중 제외)
             bool wasAnomaly;
             _lastAnomaly.TryGetValue(channel, out wasAnomaly);
             if (confirmed && !wasAnomaly)
-                Ui(() => AddEvent($"⚠ {channel} 이상 확정  recon/baseline={ratio:F1}배  recon={reconVal:E2}  (연속 {consec})", true));
+                Ui(() => AddEvent($"⚠ {channel} 이상 확정  anomaly={r.AnomalyScore:F3}  recon={r.ReconError:E2}  (연속 {consec})", true));
             else if (!confirmed && wasAnomaly)
                 Ui(() => AddEvent($"✓ {channel} 정상 복귀", false));
             _lastAnomaly[channel] = confirmed;
 
             bool active = isActive;
             Ui(() => SetRow(channel, r.ActiveState, r.ActiveScore, ano, recon, verdict, color, confirmed, active));
-        }
-
-        /// <summary>
-        /// 채널별 recon baseline(EMA)을 갱신하고 recon/baseline 배수로 이상 여부를 반환.
-        /// 진단 시작 직후 BaselineInitN 개는 baseline 학습(ready=false, 판정 보류).
-        /// 이상으로 판정된 표본은 baseline 오염 방지를 위해 EMA 갱신에서 제외.
-        /// </summary>
-        private bool UpdateBaseline(string channel, double recon, out double ratio, out bool ready)
-        {
-            int cnt;
-            _baselineCount.TryGetValue(channel, out cnt);
-            double cur;
-            _reconBaseline.TryGetValue(channel, out cur);
-
-            if (cnt < BaselineInitN)
-            {
-                double sum = cur + recon;
-                cnt++;
-                _baselineCount[channel] = cnt;
-                _reconBaseline[channel] = (cnt >= BaselineInitN) ? sum / BaselineInitN : sum;
-                ratio = 0.0; ready = false;
-                return false;
-            }
-
-            double bl = cur;
-            ratio = bl > 1e-12 ? recon / bl : 0.0;
-            bool raw = ratio > _baselineK;
-            if (!raw)   // 정상 표본만 baseline 에 반영
-                _reconBaseline[channel] = BaselineAlpha * recon + (1 - BaselineAlpha) * bl;
-            ready = true;
-            return raw;
         }
 
         // ── 그리드 헬퍼 ────────────────────────────────────────────────────────
@@ -514,8 +448,6 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _cumActive.Clear();
             _cumAnomaly.Clear();
             _consecAnomaly.Clear();
-            _reconBaseline.Clear();
-            _baselineCount.Clear();
             _channelColors.Clear();
             _chartActive.Series.Clear();
             _chartAnomaly.Series.Clear();
