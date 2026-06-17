@@ -1114,21 +1114,14 @@ def predict_channel_ae(req: ChannelAePredictRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AE 추론 실패: {e}")
 
-    # ── 5. 이상 점수 정규화 ──────────────────────────────────────────────────
-    # 채널 특성에 따라 임계를 다르게 적용:
-    #  • 게이팅 채널(토크, active_threshold>0): thr95 — 약한 부하도 잡게 민감하게.
-    #    정상 5% 오탐은 클라의 "이동 이상률"(최근 N 중 P%) 판정이 흡수.
-    #  • 게이팅 면제 채널(accel_mag, active_threshold<=0): thr99 — 정지+운동이
-    #    섞여 정상 변동이 크므로 둔감하게. (thr95 면 정상 16%+ 오탐)
-    gating_exempt = ch_info.get("active_threshold", float("inf")) <= 0.0
-    if gating_exempt:
-        thr = ch_info.get("recon_error_thr_99")
-        if thr is None or thr < 1e-10:
-            thr = ch_info.get("recon_error_thr_95", 1e-3)
-    else:
-        thr = ch_info.get("recon_error_thr_95")
-        if thr is None or thr < 1e-10:
-            thr = ch_info.get("recon_error_thr_99", 1e-3)
+    # ── 5. 이상 점수 정규화 (thr95 기준) ─────────────────────────────────────
+    # thr99 는 채널에 따라 과도하게 둔감(예: Ax1 은 정상 median 의 27배)해서
+    # 약한 부하를 못 잡음. thr95 로 판정해 약한 신호도 초과시키고, 정의상 따라오는
+    # 정상 5% 오탐은 클라이언트의 "이동 이상률"(최근 N 중 P% 이상) 판정이 흡수한다.
+    # (thr95 미저장 구 모델은 thr99 로 폴백)
+    thr = ch_info.get("recon_error_thr_95")
+    if thr is None or thr < 1e-10:
+        thr = ch_info.get("recon_error_thr_99", 1e-3)
     if thr < 1e-10:
         thr = 1e-3
     anomaly_score = recon_error / thr            # >1.0 이면 이상
