@@ -77,9 +77,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private struct RawSample { public bool Raw; public DateTime T; }
         private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<RawSample>> _recentRaw
             = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<RawSample>>();
-        private volatile int _windowN  = 30;   // 최근 active 윈도우 수
+        private volatile int _windowN  = 40;   // 최근 active 윈도우 수
         private volatile int _ratioPct = 12;   // 이상률 임계 % (thr95 정상 5% 오탐을 흡수)
-        private const double RecentMaxAgeSec = 30.0;  // 표본 만료 시간(초)
+        // 표본 만료 시간(초). 간헐적으로만 운동하는 축(예: Ax1)도 표본이 모이도록
+        // 충분히 길게. 단 이 시간만큼 부하 제거 후 정상 복귀가 지연됨.
+        private const double RecentMaxAgeSec = 90.0;
+        private const int    RecentMinSamples = 3;   // 판정에 필요한 최소 표본 수
         private readonly NumericUpDown _numWindow;
         private readonly NumericUpDown _numRatio;
 
@@ -515,7 +518,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             int anom = 0;
             foreach (var smp in q) if (smp.Raw) anom++;
             double ratioPct = q.Count > 0 ? 100.0 * anom / q.Count : 0;
-            int minN = System.Math.Min(wn, 5);
+            int minN = System.Math.Min(wn, RecentMinSamples);
             bool confirmed = q.Count >= minN && ratioPct >= _ratioPct;
 
             // confirmed 우선: 정지(inactive)여도 최근 이상률이 높으면 이상 유지
