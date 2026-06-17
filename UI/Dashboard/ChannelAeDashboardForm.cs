@@ -72,10 +72,14 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 이동 이상률 판정: 최근 _windowN 개 active 윈도우 중 raw 이상 비율이
         // _ratioPct% 이상이면 "확정 이상". 부하처럼 산발적(윈도우의 일부만 thr 초과)
         // 인 이상도 잡는다. (연속 판정으로는 산발 이상이 안 잡힘)
-        private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<bool>> _recentRaw
-            = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<bool>>();
+        // 각 표본에 시각을 기록해 RecentMaxAgeSec 지난 것은 만료 → 부하 제거 후
+        // 해당 축이 정지(inactive)해도 옛 이상 기록이 사라져 정상 복귀한다.
+        private struct RawSample { public bool Raw; public DateTime T; }
+        private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<RawSample>> _recentRaw
+            = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<RawSample>>();
         private volatile int _windowN  = 30;   // 최근 active 윈도우 수
-        private volatile int _ratioPct = 8;    // 이상률 임계 %
+        private volatile int _ratioPct = 5;    // 이상률 임계 %
+        private const double RecentMaxAgeSec = 30.0;  // 표본 만료 시간(초)
         private readonly NumericUpDown _numWindow;
         private readonly NumericUpDown _numRatio;
 
@@ -494,29 +498,31 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // 최근 active 윈도우 중 이상 비율이 _ratioPct% 이상이면 "확정 이상".
             bool rawAnomaly = isActive && r.IsAnomaly;   // 서버 thr99 판정(score>1)
 
-            System.Collections.Generic.Queue<bool> q;
+            System.Collections.Generic.Queue<RawSample> q;
             if (!_recentRaw.TryGetValue(channel, out q))
-            { q = new System.Collections.Generic.Queue<bool>(); _recentRaw[channel] = q; }
+            { q = new System.Collections.Generic.Queue<RawSample>(); _recentRaw[channel] = q; }
 
-            bool confirmed = false;
-            double ratioPct = 0;
             int wn = _windowN;
+            DateTime now = DateTime.Now;
+            // active 윈도우만 표본 추가
             if (isActive)
-            {
-                q.Enqueue(rawAnomaly);
-                while (q.Count > wn) q.Dequeue();
-                int anom = 0;
-                foreach (bool b in q) if (b) anom++;
-                ratioPct = q.Count > 0 ? 100.0 * anom / q.Count : 0;
-                // 표본이 충분히 쌓였고(최소 5 또는 wn/2) 비율이 임계 이상이면 확정
-                int minN = System.Math.Min(wn, 5);
-                confirmed = q.Count >= minN && ratioPct >= _ratioPct;
-            }
+                q.Enqueue(new RawSample { Raw = rawAnomaly, T = now });
+            // 만료(시간 초과)·크기 초과 표본 제거 — 매 사이클 적용(정지해도 옛 기록 만료)
+            DateTime cut = now.AddSeconds(-RecentMaxAgeSec);
+            while (q.Count > 0 && (q.Peek().T < cut || q.Count > wn))
+                q.Dequeue();
 
+            int anom = 0;
+            foreach (var smp in q) if (smp.Raw) anom++;
+            double ratioPct = q.Count > 0 ? 100.0 * anom / q.Count : 0;
+            int minN = System.Math.Min(wn, 5);
+            bool confirmed = q.Count >= minN && ratioPct >= _ratioPct;
+
+            // confirmed 우선: 정지(inactive)여도 최근 이상률이 높으면 이상 유지
             string verdict;
             Color  color;
-            if (!isActive)      { verdict = "-";                          color = Color.Gray; }
-            else if (confirmed) { verdict = $"⚠ 이상(이상률 {ratioPct:F0}%)"; color = Color.Red; }
+            if (confirmed)      { verdict = $"⚠ 이상(이상률 {ratioPct:F0}%)"; color = Color.Red; }
+            else if (!isActive) { verdict = "-";                          color = Color.Gray; }
             else                { verdict = $"✓ 정상({ratioPct:F0}%)";      color = Color.ForestGreen; }
 
             double? ano   = isActive ? (double?)r.AnomalyScore : null;
