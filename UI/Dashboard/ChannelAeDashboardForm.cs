@@ -78,7 +78,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<RawSample>> _recentRaw
             = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<RawSample>>();
         private volatile int _windowN  = 30;   // 최근 active 윈도우 수
-        private volatile int _ratioPct = 5;    // 이상률 임계 %
+        private volatile int _ratioPct = 12;   // 이상률 임계 % (thr95 정상 5% 오탐을 흡수)
         private const double RecentMaxAgeSec = 30.0;  // 표본 만료 시간(초)
         private readonly NumericUpDown _numWindow;
         private readonly NumericUpDown _numRatio;
@@ -217,7 +217,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // ── 차트 (active_score / anomaly_score 시계열) ─────────────────────
             _chartActive  = BuildScoreChart("채널별 active_score", "active_score (robust z·무차원)", anomalyLine: false);
-            _chartAnomaly = BuildScoreChart("채널별 anomaly_score", "anomaly_score (= recon/thr99)", anomalyLine: true);
+            _chartAnomaly = BuildScoreChart("채널별 anomaly_score", "anomaly_score (= recon/thr95)", anomalyLine: true);
 
             // 차트 2개를 가로로 나란히 (각 50%) — 화면 폭을 최대 활용
             var chartTable = new TableLayoutPanel
