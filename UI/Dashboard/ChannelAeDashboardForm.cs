@@ -59,6 +59,12 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 이 채널은 CSV의 x/y/z 컬럼을 읽어 √(x²+y²+z²) 로 변환해 전송한다.
         private const string AccelMagChannel = "accel_mag";
 
+        // 파일 쓰는 중 보호: CSV 마지막 N행은 불완전할 수 있어 읽기에서 제외
+        private const int GlitchMarginRows = 16;
+        // anomaly_score 가 이 값을 넘으면 데이터 글리치로 간주 → raw 이상 카운트 제외
+        // (정상 부하/결함은 보통 thr 기준 1~10. 수십~수십만은 불완전 행 파싱 폭발)
+        private const double GlitchAnomalyMax = 30.0;
+
         // 채널별 직전 이상 여부 — 정상↔이상 전이 시에만 이벤트 로그 (스팸 방지)
         private readonly System.Collections.Generic.Dictionary<string, bool> _lastAnomaly
             = new System.Collections.Generic.Dictionary<string, bool>();
@@ -501,7 +507,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             // ── 이동 이상률 판정: 최근 _windowN active 윈도우 중 raw 이상 비율 ──
             // 부하는 산발적(윈도우의 일부만 thr 초과)이라 "연속"으로는 안 잡힘 →
             // 최근 active 윈도우 중 이상 비율이 _ratioPct% 이상이면 "확정 이상".
-            bool rawAnomaly = isActive && r.IsAnomaly;   // 서버 thr99 판정(score>1)
+            // 글리치(불완전 행 파싱으로 recon 폭발)는 raw 이상에서 제외
+            bool glitch = r.AnomalyScore > GlitchAnomalyMax;
+            bool rawAnomaly = isActive && r.IsAnomaly && !glitch;   // 서버 thr95 판정(score>1)
 
             System.Collections.Generic.Queue<RawSample> q;
             if (!_recentRaw.TryGetValue(channel, out q))
@@ -684,12 +692,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     cols = new[] { c };
                 }
 
-                int dataCount = lines.Length - 1;
+                // 파일을 쓰는 중일 수 있는 마지막 GlitchMarginRows 행은 제외
+                // (불완전하게 기록된 행을 읽으면 recon 이 폭발 → 글리치 오탐)
+                int dataCount = lines.Length - 1 - GlitchMarginRows;
+                if (dataCount < windowSize) return null;
+
+                int needCols = isMag
+                    ? Math.Max(cols[0], Math.Max(cols[1], cols[2])) + 1
+                    : cols[0] + 1;
+
                 var window = new float[windowSize];
                 int start = dataCount - windowSize;
                 for (int i = 0; i < windowSize; i++)
                 {
                     string[] parts = lines[start + i + 1].Split(',');
+                    // 컬럼 수가 부족한(불완전) 행이 끼면 글리치 → 이 윈도우 무효 처리
+                    if (parts.Length < needCols) return null;
                     if (isMag)
                     {
                         float sx = ParseAt(parts, cols[0]);
