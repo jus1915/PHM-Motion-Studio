@@ -82,7 +82,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // 표본 만료 시간(초). 간헐적으로만 운동하는 축(예: Ax1)도 표본이 모이도록
         // 충분히 길게. 단 이 시간만큼 부하 제거 후 정상 복귀가 지연됨.
         private const double RecentMaxAgeSec = 90.0;
-        private const int    RecentMinSamples = 3;   // 판정에 필요한 최소 표본 수
+        // 판정에 필요한 최소 표본 수. 너무 작으면 표본이 적을 때 비율이 폭발해
+        // 오탐(예: 4창 중 1 이상 = 25%). active 비율 ~21%면 90초 큐에 충분히 모임.
+        private const int    RecentMinSamples = 10;
         private readonly NumericUpDown _numWindow;
         private readonly NumericUpDown _numRatio;
 
