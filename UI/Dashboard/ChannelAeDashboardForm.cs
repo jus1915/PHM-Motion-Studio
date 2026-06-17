@@ -69,12 +69,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly System.Collections.Generic.Dictionary<string, int> _cumAnomaly
             = new System.Collections.Generic.Dictionary<string, int>();
 
-        // 지속성 필터: 연속 _persistN 회 이상(raw)일 때만 "확정 이상"으로 판정.
-        // 단발 오탐(thr 꼬리분포·데이터 글리치)을 거른다.
-        private readonly System.Collections.Generic.Dictionary<string, int> _consecAnomaly
-            = new System.Collections.Generic.Dictionary<string, int>();
-        private volatile int _persistN = 3;
-        private readonly NumericUpDown _numPersist;
+        // 이동 이상률 판정: 최근 _windowN 개 active 윈도우 중 raw 이상 비율이
+        // _ratioPct% 이상이면 "확정 이상". 부하처럼 산발적(윈도우의 일부만 thr 초과)
+        // 인 이상도 잡는다. (연속 판정으로는 산발 이상이 안 잡힘)
+        private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<bool>> _recentRaw
+            = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.Queue<bool>>();
+        private volatile int _windowN  = 30;   // 최근 active 윈도우 수
+        private volatile int _ratioPct = 8;    // 이상률 임계 %
+        private readonly NumericUpDown _numWindow;
+        private readonly NumericUpDown _numRatio;
 
         // anomaly 차트 y축 상한 (데이터 글리치 스파이크가 차트를 망치지 않게)
         private const double AnomalyChartMax = 5.0;
@@ -133,13 +136,22 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             toolbar.Controls.Add(new Label { Text = "주기(ms)", AutoSize = true, Padding = new Padding(8, 8, 2, 0) });
             toolbar.Controls.Add(_numInterval);
 
-            _numPersist = new NumericUpDown
+            _numWindow = new NumericUpDown
             {
-                Minimum = 1, Maximum = 20, Value = _persistN, Width = 50, Height = 28,
+                Minimum = 5, Maximum = 200, Increment = 5, Value = _windowN, Width = 55, Height = 28,
             };
-            _numPersist.ValueChanged += (s, e) => _persistN = (int)_numPersist.Value;
-            toolbar.Controls.Add(new Label { Text = "이상확정(연속)", AutoSize = true, Padding = new Padding(10, 8, 2, 0) });
-            toolbar.Controls.Add(_numPersist);
+            _numWindow.ValueChanged += (s, e) => _windowN = (int)_numWindow.Value;
+            toolbar.Controls.Add(new Label { Text = "이상률: 최근", AutoSize = true, Padding = new Padding(10, 8, 2, 0) });
+            toolbar.Controls.Add(_numWindow);
+
+            _numRatio = new NumericUpDown
+            {
+                Minimum = 1, Maximum = 100, Value = _ratioPct, Width = 50, Height = 28,
+            };
+            _numRatio.ValueChanged += (s, e) => _ratioPct = (int)_numRatio.Value;
+            toolbar.Controls.Add(new Label { Text = "중", AutoSize = true, Padding = new Padding(2, 8, 2, 0) });
+            toolbar.Controls.Add(_numRatio);
+            toolbar.Controls.Add(new Label { Text = "% 이상", AutoSize = true, Padding = new Padding(2, 8, 2, 0) });
 
             // ── 정보/상태 라벨 ─────────────────────────────────────────────────
             _lblInfo = new Label
@@ -477,31 +489,46 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             bool isActive = r.ChannelState == ChannelActiveState.Active;
 
-            // ── 지속성 필터: raw 이상이 연속 _persistN 회 이어질 때만 "확정 이상" ──
-            bool rawAnomaly = isActive && r.IsAnomaly;   // 서버 판정(score>1)
-            int consec;
-            _consecAnomaly.TryGetValue(channel, out consec);
-            consec = rawAnomaly ? consec + 1 : 0;
-            _consecAnomaly[channel] = consec;
-            bool confirmed = rawAnomaly && consec >= _persistN;
+            // ── 이동 이상률 판정: 최근 _windowN active 윈도우 중 raw 이상 비율 ──
+            // 부하는 산발적(윈도우의 일부만 thr 초과)이라 "연속"으로는 안 잡힘 →
+            // 최근 active 윈도우 중 이상 비율이 _ratioPct% 이상이면 "확정 이상".
+            bool rawAnomaly = isActive && r.IsAnomaly;   // 서버 thr99 판정(score>1)
+
+            System.Collections.Generic.Queue<bool> q;
+            if (!_recentRaw.TryGetValue(channel, out q))
+            { q = new System.Collections.Generic.Queue<bool>(); _recentRaw[channel] = q; }
+
+            bool confirmed = false;
+            double ratioPct = 0;
+            int wn = _windowN;
+            if (isActive)
+            {
+                q.Enqueue(rawAnomaly);
+                while (q.Count > wn) q.Dequeue();
+                int anom = 0;
+                foreach (bool b in q) if (b) anom++;
+                ratioPct = q.Count > 0 ? 100.0 * anom / q.Count : 0;
+                // 표본이 충분히 쌓였고(최소 5 또는 wn/2) 비율이 임계 이상이면 확정
+                int minN = System.Math.Min(wn, 5);
+                confirmed = q.Count >= minN && ratioPct >= _ratioPct;
+            }
 
             string verdict;
             Color  color;
-            if (!isActive)        { verdict = "-";     color = Color.Gray; }
-            else if (confirmed)   { verdict = "⚠ 이상"; color = Color.Red; }
-            else if (rawAnomaly)  { verdict = $"… 관찰({consec}/{_persistN})"; color = Color.DarkGoldenrod; }
-            else                  { verdict = "✓ 정상"; color = Color.ForestGreen; }
+            if (!isActive)      { verdict = "-";                          color = Color.Gray; }
+            else if (confirmed) { verdict = $"⚠ 이상(이상률 {ratioPct:F0}%)"; color = Color.Red; }
+            else                { verdict = $"✓ 정상({ratioPct:F0}%)";      color = Color.ForestGreen; }
 
             double? ano   = isActive ? (double?)r.AnomalyScore : null;
             double? recon = isActive ? r.ReconError : null;
 
-            // 확정 이상 전이 시에만 이벤트 로그 (단발/관찰중 제외)
+            // 확정 이상 전이 시에만 이벤트 로그
             bool wasAnomaly;
             _lastAnomaly.TryGetValue(channel, out wasAnomaly);
             if (confirmed && !wasAnomaly)
-                Ui(() => AddEvent($"⚠ {channel} 이상 확정  anomaly={r.AnomalyScore:F3}  recon={r.ReconError:E2}  (연속 {consec})", true));
+                Ui(() => AddEvent($"⚠ {channel} 이상 확정  이상률={ratioPct:F0}% (최근 {q.Count}창)  anomaly={r.AnomalyScore:F3}", true));
             else if (!confirmed && wasAnomaly)
-                Ui(() => AddEvent($"✓ {channel} 정상 복귀", false));
+                Ui(() => AddEvent($"✓ {channel} 정상 복귀  (이상률 {ratioPct:F0}%)", false));
             _lastAnomaly[channel] = confirmed;
 
             bool active = isActive;
@@ -515,7 +542,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             _lastAnomaly.Clear();
             _cumActive.Clear();
             _cumAnomaly.Clear();
-            _consecAnomaly.Clear();
+            _recentRaw.Clear();
             _channelColors.Clear();
             _chartActive.Series.Clear();
             _chartAnomaly.Series.Clear();
