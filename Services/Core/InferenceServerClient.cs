@@ -346,6 +346,33 @@ namespace PHM_Project_DockPanel.Services.Core
             catch { return null; }
         }
 
+        // ── 채널 AE 프로파일 조회/전환 ────────────────────────────────────────
+        /// <summary>GET /channel_ae_profiles — 사용 가능한 프로파일과 활성 프로파일.</summary>
+        public async Task<ChannelAeProfileList> GetChannelAeProfilesAsync()
+        {
+            try
+            {
+                var resp = await _http.GetAsync("channel_ae_profiles").ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return null;
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonConvert.DeserializeObject<ChannelAeProfileList>(body);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>POST /channel_ae_profiles/activate — 활성 프로파일 전환 (성공 시 true).</summary>
+        public async Task<bool> ActivateChannelAeProfileAsync(string profile)
+        {
+            try
+            {
+                string json    = JsonConvert.SerializeObject(new { profile });
+                var    content = new StringContent(json, Encoding.UTF8, "application/json");
+                var    resp    = await _http.PostAsync("channel_ae_profiles/activate", content).ConfigureAwait(false);
+                return resp.IsSuccessStatusCode;
+            }
+            catch { return false; }
+        }
+
         // ── 채널 AE 추론 요청 ─────────────────────────────────────────────────
         /// <summary>
         /// POST /predict/channel_ae — 단일 채널 raw 윈도우를 전송하고

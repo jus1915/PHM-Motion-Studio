@@ -39,6 +39,9 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private readonly ListBox      _events;
         private readonly Chart        _chartActive;
         private readonly Chart        _chartAnomaly;
+        private readonly ComboBox     _cmbProfile;     // 모델(프로파일) 선택
+        private bool                  _suppressProfileEvent;
+        private const string AutoProfileLabel = "(자동)";
 
         // 차트 롤링 윈도우 길이 (채널별 시리즈당 최대 점 수)
         private const int MaxChartPoints = 300;
@@ -118,6 +121,15 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             };
             toolbar.Controls.Add(_btnStart);
             toolbar.Controls.Add(_btnStop);
+
+            _cmbProfile = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList, Width = 120, Height = 28,
+            };
+            _cmbProfile.SelectedIndexChanged += OnProfileChanged;
+            toolbar.Controls.Add(new Label { Text = "모델", AutoSize = true, Padding = new Padding(10, 8, 2, 0) });
+            toolbar.Controls.Add(_cmbProfile);
+
             toolbar.Controls.Add(new Label { Text = "주기(ms)", AutoSize = true, Padding = new Padding(8, 8, 2, 0) });
             toolbar.Controls.Add(_numInterval);
 
@@ -214,6 +226,58 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             Controls.Add(_lblStatus);   // Bottom - 최하
             Controls.Add(_events);      // Bottom
             Controls.Add(lblEv);        // Bottom
+        }
+
+        // ── 프로파일(모델) 선택 ────────────────────────────────────────────────
+        /// <summary>서버 프로파일 목록으로 콤보박스를 채우고 현재 활성 항목을 선택합니다.</summary>
+        private void PopulateProfiles(ChannelAeProfileList pl)
+        {
+            _suppressProfileEvent = true;
+            _cmbProfile.Items.Clear();
+            _cmbProfile.Items.Add(AutoProfileLabel);
+            if (pl?.Profiles != null)
+                foreach (var p in pl.Profiles)
+                    _cmbProfile.Items.Add(p);
+
+            // active(null=자동)에 맞춰 선택. 자동이면 실제 로드 폴더(resolved)를 정보에 표시.
+            string sel = string.IsNullOrEmpty(pl?.Active) ? AutoProfileLabel : pl.Active;
+            int idx = _cmbProfile.Items.IndexOf(sel);
+            _cmbProfile.SelectedIndex = idx >= 0 ? idx : 0;
+            _suppressProfileEvent = false;
+
+            if (!string.IsNullOrEmpty(pl?.Resolved))
+                AppendResolvedInfo(pl.Resolved, string.IsNullOrEmpty(pl.Active));
+        }
+
+        private void AppendResolvedInfo(string resolved, bool isAuto)
+        {
+            string tag = isAuto ? $"  ·  모델=자동({resolved})" : $"  ·  모델={resolved}";
+            // _lblInfo 끝에 모델 정보 갱신 (기존 텍스트 유지가 어려우므로 상태줄에 병기)
+            SetStatus($"상태: 모델 '{resolved}' 로드됨");
+        }
+
+        private async void OnProfileChanged(object sender, EventArgs e)
+        {
+            if (_suppressProfileEvent || _client == null) return;
+            string sel = _cmbProfile.SelectedItem as string;
+            string profile = (sel == AutoProfileLabel) ? null : sel;
+
+            SetStatus($"상태: 모델 전환 중… ({sel})");
+            bool ok = await _client.ActivateChannelAeProfileAsync(profile).ConfigureAwait(true);
+            if (!ok)
+            {
+                SetStatus($"상태: 모델 전환 실패 — '{sel}' 메타 없음");
+                return;
+            }
+            // 새 메타로 그리드/차트/baseline 초기화
+            var meta = await _client.GetChannelAeInfoAsync().ConfigureAwait(true);
+            if (meta != null && meta.Channels != null && meta.Channels.Count > 0)
+            {
+                _meta = meta;
+                SeedRows();
+                _lblInfo.Text = $"채널 {meta.Channels.Count}개  ·  window_size={meta.WindowSize}  ·  모델={sel}  ·  서버={ServerSettings.Current.InferenceServerUrl}";
+                SetStatus($"상태: 모델 '{sel}' 적용 완료");
+            }
         }
 
         // ── 차트 빌드 ──────────────────────────────────────────────────────────
@@ -330,6 +394,10 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // ── 메인 루프 ──────────────────────────────────────────────────────────
         private async Task LoopAsync(CancellationToken ct)
         {
+            // 0) 프로파일(모델) 목록 로드 → 콤보박스 채움
+            var profs = await _client.GetChannelAeProfilesAsync().ConfigureAwait(false);
+            Ui(() => PopulateProfiles(profs));
+
             // 1) 채널 AE 메타 조회 — 없으면 종료
             _meta = await _client.GetChannelAeInfoAsync().ConfigureAwait(false);
             if (_meta == null || _meta.Channels == null || _meta.Channels.Count == 0)

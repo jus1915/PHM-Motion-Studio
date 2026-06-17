@@ -35,6 +35,17 @@ namespace PHM_Project_DockPanel.Services.Core
     }
 
     // =========================================================================
+    //  ChannelAeProfileList — GET /channel_ae_profiles 응답 DTO
+    // =========================================================================
+    public sealed class ChannelAeProfileList
+    {
+        [JsonProperty("profiles")] public System.Collections.Generic.List<string> Profiles { get; set; }
+            = new System.Collections.Generic.List<string>();
+        [JsonProperty("active")]   public string Active   { get; set; }   // null = 자동
+        [JsonProperty("resolved")] public string Resolved { get; set; }   // 실제 로드되는 폴더명
+    }
+
+    // =========================================================================
     //  ChannelAePredictResponse — POST /predict/channel_ae 응답 DTO
     // =========================================================================
     public sealed class ChannelAePredictResponse
