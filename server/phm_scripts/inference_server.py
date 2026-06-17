@@ -847,26 +847,50 @@ CH_AE_META_FILENAME = "ch_ae_meta.json"
 # 채널 AE 전용 캐시
 _ch_ae_meta_cache: Optional[dict] = None      # ch_ae_meta.json 내용
 _ch_ae_sessions: dict = {}                    # {channel_name: ort.InferenceSession}
+_ch_ae_active_profile: Optional[str] = None   # 사용자가 선택한 프로파일(폴더명). None=자동(이름순 첫째)
+ROOT_PROFILE_LABEL = "(root)"                 # MODELS_ROOT 직속 메타를 가리키는 라벨
+
+
+def _list_ch_ae_profiles() -> list:
+    """ch_ae_meta.json 을 가진 프로파일(폴더명) 목록을 반환합니다."""
+    profs = []
+    if (MODELS_ROOT / CH_AE_META_FILENAME).exists():
+        profs.append(ROOT_PROFILE_LABEL)
+    for p in sorted(MODELS_ROOT.glob(f"*/{CH_AE_META_FILENAME}")):
+        profs.append(p.parent.name)
+    return profs
+
+
+def _ch_ae_meta_path(profile: Optional[str]):
+    """프로파일명 → ch_ae_meta.json 경로. profile=None 이면 자동(루트 우선, 없으면 이름순 첫째)."""
+    if profile == ROOT_PROFILE_LABEL:
+        return MODELS_ROOT / CH_AE_META_FILENAME
+    if profile:
+        return MODELS_ROOT / profile / CH_AE_META_FILENAME
+    # 자동: 루트 직속 우선, 없으면 서브폴더 이름순 첫째
+    candidates = [MODELS_ROOT / CH_AE_META_FILENAME] + \
+                 sorted(MODELS_ROOT.glob(f"*/{CH_AE_META_FILENAME}"))
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
 
 
 def _load_ch_ae_meta() -> Optional[dict]:
-    """ch_ae_meta.json 을 로드합니다 (프로파일 디렉토리 스캔)."""
+    """ch_ae_meta.json 을 로드합니다. 활성 프로파일(_ch_ae_active_profile)을 따릅니다."""
     global _ch_ae_meta_cache
     if _ch_ae_meta_cache is not None:
         return _ch_ae_meta_cache
 
-    # 프로파일 서브디렉토리 포함 탐색
-    candidates = [MODELS_ROOT / CH_AE_META_FILENAME] + \
-                 sorted((MODELS_ROOT).glob(f"*/{CH_AE_META_FILENAME}"))
-    for path in candidates:
-        if path.exists():
-            try:
-                _ch_ae_meta_cache = json.loads(path.read_text(encoding="utf-8"))
-                _ch_ae_meta_cache["_meta_dir"] = str(path.parent)
-                print(f"[ch_ae] 메타 로드: {path}", flush=True)
-                return _ch_ae_meta_cache
-            except Exception as e:
-                print(f"[ch_ae] 메타 로드 실패 {path}: {e}", flush=True)
+    path = _ch_ae_meta_path(_ch_ae_active_profile)
+    if path is not None and path.exists():
+        try:
+            _ch_ae_meta_cache = json.loads(path.read_text(encoding="utf-8"))
+            _ch_ae_meta_cache["_meta_dir"] = str(path.parent)
+            print(f"[ch_ae] 메타 로드: {path}  (프로파일={_ch_ae_active_profile or '자동'})", flush=True)
+            return _ch_ae_meta_cache
+        except Exception as e:
+            print(f"[ch_ae] 메타 로드 실패 {path}: {e}", flush=True)
     return None
 
 
@@ -984,6 +1008,37 @@ class ChannelAePredictResponse(BaseModel):
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
+@app.get("/channel_ae_profiles")
+def channel_ae_profiles():
+    """사용 가능한 채널 AE 프로파일(폴더) 목록과 현재 활성 프로파일을 반환합니다."""
+    profs = _list_ch_ae_profiles()
+    active = _ch_ae_active_profile
+    # 자동 모드면 실제 로드될 폴더명을 함께 알려줌
+    resolved = None
+    p = _ch_ae_meta_path(_ch_ae_active_profile)
+    if p is not None:
+        resolved = ROOT_PROFILE_LABEL if p.parent == MODELS_ROOT else p.parent.name
+    return {"profiles": profs, "active": active, "resolved": resolved}
+
+
+class ChannelAeProfileActivateRequest(BaseModel):
+    profile: Optional[str] = None   # None 이면 자동(이름순 첫째)
+
+
+@app.post("/channel_ae_profiles/activate")
+def channel_ae_profiles_activate(req: ChannelAeProfileActivateRequest):
+    """채널 AE 활성 프로파일을 전환하고 메타·세션 캐시를 비웁니다."""
+    global _ch_ae_active_profile, _ch_ae_meta_cache, _ch_ae_sessions
+    _ch_ae_active_profile = req.profile or None
+    _ch_ae_meta_cache = None
+    _ch_ae_sessions = {}
+    meta = _load_ch_ae_meta()
+    if meta is None:
+        raise HTTPException(status_code=404,
+                            detail=f"프로파일 '{req.profile}' 의 ch_ae_meta.json 을 찾을 수 없습니다.")
+    return {"active": _ch_ae_active_profile, "channels": list(meta.get("channels", {}).keys())}
+
+
 @app.get("/channel_ae_info")
 def channel_ae_info():
     """ch_ae_meta.json 내용을 반환합니다."""
