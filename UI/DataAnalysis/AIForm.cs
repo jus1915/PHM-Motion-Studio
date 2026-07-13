@@ -421,7 +421,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             var grp = new GroupBox { Text = "모델 설정 / 출력", Dock = DockStyle.Fill, Padding = new Padding(8) };
             var tl  = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 11 };
-            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
             tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             for (int i = 0; i < 11; i++) tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
@@ -463,7 +463,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _dlValSplit = Nud(5, 50, 20); tl.Controls.Add(_dlValSplit, 1, row++);
 
             // AE 임계값 퍼센타일 (AE 모드 전용)
-            var lblThrPct = Lbl("임계값 퍼센타일:");
+            var lblThrPct = Lbl("임계값(%):");
             tl.Controls.Add(lblThrPct, 0, row);
             _dlThresholdPct = new NumericUpDown
             {
@@ -474,7 +474,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             tipThrPct.SetToolTip(_dlThresholdPct, "AE 정상 MAE의 N% → threshold 로 사용 (높을수록 민감도↓)");
             tl.Controls.Add(_dlThresholdPct, 1, row++);
             // 베이스 필터 수 (AE 모드 전용)
-            var lblBaseFilters = Lbl("베이스 필터  (복잡도):");
+            var lblBaseFilters = Lbl("베이스필터:");
             tl.Controls.Add(lblBaseFilters, 0, row);
             _dlBaseFilters = new NumericUpDown
             {
@@ -732,6 +732,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private static Label Lbl(string text) =>
             new Label { Text = text, AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+
+        /// <summary>AutoSize 컬럼용 짧은 레이블 (TableLayoutPanel의 AutoSize 컬럼과 Dock=Fill을 같이 쓰면
+        /// 컬럼 너비가 0으로 붕괴하므로, 이런 자리에는 AutoSize 레이블을 따로 둔다.)</summary>
+        private static Label Lbl2(string text) =>
+            new Label { Text = text, AutoSize = true, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 7, 4, 0) };
 
         private static NumericUpDown Nud(int min, int max, int val) =>
             new NumericUpDown { Minimum = min, Maximum = max, Value = val, Dock = DockStyle.Fill };
@@ -1310,25 +1315,24 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.FromArgb(0, 140, 220),
             };
 
-            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
-            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));  // row0: 서버 연결
-            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));  // row1: 모델 선택
-            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));  // row2: 저장 프로파일
-            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));  // row3: 실행 버튼
-            stack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // row4: 상태 문구
+            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));  // row0: 서버 연결
+            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));  // row1: 모델 선택 (박스로 구분)
+            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));  // row2: 축 / 프로파일 / 라벨
+            stack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // row3: 실행 버튼 + 상태
 
-            // ── row0: 서버 연결 (URL / DAG — 자주 안 바뀌므로 한 줄로 축소) ──────
+            // ── row0: 서버 연결 (URL / DAG — 자주 안 바뀌므로 작고 옅게) ─────────
             var connRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-            connRow.Controls.Add(new Label { Text = "서버:", AutoSize = true, Margin = new Padding(0, 4, 4, 0), ForeColor = SystemColors.ControlText });
-            _aflUrl = new TextBox { Width = 190, Margin = new Padding(0, 1, 12, 0),
+            connRow.Controls.Add(new Label { Text = "서버:", AutoSize = true, Margin = new Padding(0, 4, 4, 0), ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8f) });
+            _aflUrl = new TextBox { Width = 190, Margin = new Padding(0, 1, 12, 0), Font = new Font(Font.FontFamily, 8f),
                 Text = Services.ServerSettings.Current.AirflowUrl ?? "http://localhost:8080" };
             connRow.Controls.Add(_aflUrl);
-            connRow.Controls.Add(new Label { Text = "DAG:", AutoSize = true, Margin = new Padding(0, 4, 4, 0), ForeColor = SystemColors.ControlText });
-            _aflDagId = new TextBox { Width = 110,
+            connRow.Controls.Add(new Label { Text = "DAG:", AutoSize = true, Margin = new Padding(0, 4, 4, 0), ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8f) });
+            _aflDagId = new TextBox { Width = 110, Font = new Font(Font.FontFamily, 8f),
                 Text = Services.ServerSettings.Current.AirflowDagId ?? "phm_retrain" };
             connRow.Controls.Add(_aflDagId);
 
-            // ── row1: 모델 선택 체크박스 + 축 선택 ────────────────────────────
+            // ── row1: 모델 선택 체크박스 ────────────────────────────────────────
             Action onModelChk = () => { if (!_aflUpdatingAll) UpdateTriggerButtonText(); };
 
             _aflChkAll = AflMakeChk("▣ 전체", true);
@@ -1367,19 +1371,43 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflChkClsTorque = AflMakeChk("Torque",   true); _aflChkClsTorque.CheckedChanged += (s, e) => onModelChk();
             _aflChkClsComb   = AflMakeChk("Combined", true); _aflChkClsComb.CheckedChanged   += (s, e) => onModelChk();
 
-            // ── 축 선택 ComboBox (축별 모델용 단일 축 학습 지원) ─────────────────
+            _aflModelFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill, AutoSize = false,
+                FlowDirection = FlowDirection.LeftToRight, WrapContents = true,
+                Padding = new Padding(6, 4, 6, 4), Margin = new Padding(0),
+            };
+            _aflModelFlow.Controls.AddRange(new Control[]
+            {
+                _aflChkAll,
+                _aflChkAeAccelG, _aflChkAeTorqueG, _aflChkAeTorqueAx,
+                _aflChkAeCombG,  _aflChkAeCombAx,
+                _aflChkIsoAccel,
+                _aflChkClsAccel, _aflChkClsTorque, _aflChkClsComb,
+            });
+            // 체크박스 영역을 옅은 배경 + 테두리로 감싸 나머지 여백과 시각적으로 구분
+            var modelBox = new Panel
+            {
+                Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(240, 243, 248),
+            };
+            modelBox.Controls.Add(_aflModelFlow);
+
+            // ── row2: 축 선택 / 저장 프로파일 / 라벨 (한 줄로 폭을 고르게 사용) ──
+            var midRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 1 };
+            midRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            midRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
+            midRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            midRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+            midRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            midRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
+
             // "전체" 선택 시 DAG 가 axis_count 자동 감지 → 모든 축 학습
             // "Ax{N}" 선택 시 conf["axes"]=[N] 으로 해당 축만 학습
-            var lblAxis = new Label
-            {
-                Text = "│ 축:", AutoSize = true,
-                Margin = new Padding(10, 5, 2, 0),
-                ForeColor = SystemColors.ControlText,
-            };
             _aflAxisCombo = new ComboBox
             {
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Width = 70, Margin = new Padding(0, 2, 0, 0),
+                DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Left,
+                Width = 66, Margin = new Padding(0, 3, 0, 0),
             };
             _aflAxisCombo.Items.AddRange(new object[] { "전체", "Ax0", "Ax1", "Ax2" });
             _aflAxisCombo.SelectedIndex = 0;
@@ -1390,65 +1418,54 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 "전체: 모든 축(0~N-1) 학습 (기본)\n" +
                 "Ax{N}: 해당 축 하나만 학습");
 
-            _aflModelFlow = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill, AutoSize = false,
-                FlowDirection = FlowDirection.LeftToRight, WrapContents = true,
-                Padding = new Padding(0), Margin = new Padding(0),
-            };
-            _aflModelFlow.Controls.AddRange(new Control[]
-            {
-                _aflChkAll,
-                _aflChkAeAccelG, _aflChkAeTorqueG, _aflChkAeTorqueAx,
-                _aflChkAeCombG,  _aflChkAeCombAx,
-                _aflChkIsoAccel,
-                _aflChkClsAccel, _aflChkClsTorque, _aflChkClsComb,
-                lblAxis, _aflAxisCombo,
-            });
-
-            // ── row2: 저장 프로파일 ────────────────────────────────────────────
-            var profRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-            profRow.Controls.Add(new Label { Text = "프로파일:", AutoSize = true, Margin = new Padding(0, 5, 4, 0), ForeColor = SystemColors.ControlText });
-            _aflProfile = new TextBox { Width = 150, Margin = new Padding(0, 1, 14, 0), Text = "default" };
+            _aflProfile = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, 4, 14, 0), Text = "default" };
             _aflProfile.Enter += (s, e) => { if (_aflProfile.Text == "default") _aflProfile.SelectAll(); };
             var tipProfile = new ToolTip();
             tipProfile.SetToolTip(_aflProfile, "모델 저장 디렉토리 이름\n예: default, accel_only, v2026-05-11");
-            profRow.Controls.Add(_aflProfile);
 
-            profRow.Controls.Add(new Label { Text = "라벨:", AutoSize = true, Margin = new Padding(0, 5, 4, 0), ForeColor = SystemColors.ControlText });
-            _aflProfileLabel = new TextBox { Width = 220 };
+            _aflProfileLabel = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 0) };
             var tipProfileLbl = new ToolTip();
             tipProfileLbl.SetToolTip(_aflProfileLabel, "프로파일 표시 이름 (선택)\n예: 5월 재학습");
-            profRow.Controls.Add(_aflProfileLabel);
 
-            // ── row3: 실행 버튼 + 상태 조회 ────────────────────────────────────
-            var runRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            midRow.Controls.Add(Lbl2("축:"),        0, 0);
+            midRow.Controls.Add(_aflAxisCombo,       1, 0);
+            midRow.Controls.Add(Lbl2("프로파일:"),  2, 0);
+            midRow.Controls.Add(_aflProfile,         3, 0);
+            midRow.Controls.Add(Lbl2("라벨:"),      4, 0);
+            midRow.Controls.Add(_aflProfileLabel,    5, 0);
+
+            // ── row3: 실행 버튼 + 상태 조회 + 상태 문구 (남는 폭을 상태 문구가 채움) ──
+            var runRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
+            runRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+            runRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+            runRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
             _aflBtnTrigger = new Button
             {
-                Text = "▶ 지금 트리거", Width = 150, Height = 24,
+                Text = "▶ 지금 트리거", Dock = DockStyle.Fill, Height = 26,
                 BackColor = Color.FromArgb(0, 120, 60), ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
-                Margin = new Padding(0, 2, 6, 0),
+                Margin = new Padding(0, 4, 6, 0),
             };
             _aflBtnTrigger.Click += async (s, e) => await TriggerAirflowAsync();
-            runRow.Controls.Add(_aflBtnTrigger);
 
-            _aflBtnStatus = new Button { Text = "🔄 상태 조회", Width = 90, Height = 24, Margin = new Padding(0, 2, 0, 0) };
+            _aflBtnStatus = new Button { Text = "🔄 상태 조회", Dock = DockStyle.Fill, Height = 26, Margin = new Padding(0, 4, 10, 0) };
             _aflBtnStatus.Click += async (s, e) => await RefreshAirflowStatusAsync();
-            runRow.Controls.Add(_aflBtnStatus);
 
-            // ── row4: 상태 라벨 ─────────────────────────────────────────────────
             _aflStatusLbl = new Label
             {
-                Text = "—", AutoSize = false, Dock = DockStyle.Fill,
+                Text = "—", Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8.5f),
             };
 
-            stack.Controls.Add(connRow,       0, 0);
-            stack.Controls.Add(_aflModelFlow, 0, 1);
-            stack.Controls.Add(profRow,       0, 2);
-            stack.Controls.Add(runRow,        0, 3);
-            stack.Controls.Add(_aflStatusLbl, 0, 4);
+            runRow.Controls.Add(_aflBtnTrigger, 0, 0);
+            runRow.Controls.Add(_aflBtnStatus,  1, 0);
+            runRow.Controls.Add(_aflStatusLbl,  2, 0);
+
+            stack.Controls.Add(connRow,  0, 0);
+            stack.Controls.Add(modelBox, 0, 1);
+            stack.Controls.Add(midRow,   0, 2);
+            stack.Controls.Add(runRow,   0, 3);
 
             // 초기 세션(CLS)에 맞는 항목 채우기
             UpdateAflTrainModeItems();
