@@ -524,6 +524,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         private ComboBox _cmbProfile;
         private Button   _btnProfileApply, _btnProfileRefresh;
         private PHM_Project_DockPanel.Services.Core.InferenceServerClient _profileClient;
+        private string   _profileClientUrl;   // 진단 로그용 — 프로파일 조회 실패 시 어느 URL로 시도했는지 표시
 
         // 재학습 트리거
         private Button _btnRetrain;
@@ -711,11 +712,16 @@ namespace PHM_Project_DockPanel.UI.Dashboard
 
             // 프로파일 클라이언트 초기화 + 목록 로드
             string inferUrl = PHM_Project_DockPanel.Services.ServerSettings.Current.InferenceServerUrl;
+            _profileClientUrl = inferUrl;
             if (!string.IsNullOrWhiteSpace(inferUrl))
             {
                 _profileClient = new PHM_Project_DockPanel.Services.Core.InferenceServerClient(inferUrl);
                 // 비동기 로드 (UI 스레드 블로킹 없이)
                 _ = RefreshProfilesAsync();
+            }
+            else
+            {
+                AppEvents.RaiseLog("[프로파일] 추론 서버 URL이 비어 있습니다. 메뉴 > 환경 설정 > 연결 설정에서 URL을 지정하세요.");
             }
         }
 
@@ -735,9 +741,21 @@ namespace PHM_Project_DockPanel.UI.Dashboard
         // ── 프로파일 관리 ─────────────────────────────────────────────────────
         private async System.Threading.Tasks.Task RefreshProfilesAsync()
         {
-            if (_profileClient == null) return;
+            if (_profileClient == null)
+            {
+                AppEvents.RaiseLog("[프로파일] 추론 서버 URL이 설정되지 않아 목록을 조회할 수 없습니다. 연결 설정을 확인하세요.");
+                return;
+            }
             var result = await _profileClient.GetProfilesAsync().ConfigureAwait(false);
-            if (result == null) return;
+            if (result == null)
+            {
+                // GetProfilesAsync는 네트워크 오류/타임아웃/잘못된 URL 등을 모두 삼키고 null만
+                // 반환하므로, 여기서 사용자가 볼 수 있는 형태로 원인을 남긴다.
+                AppEvents.RaiseLog(
+                    $"[프로파일] 목록 조회 실패 — 추론 서버({_profileClientUrl})에 연결할 수 없습니다. " +
+                    "메뉴 > 환경 설정 > 연결 설정에서 URL을 확인하세요.");
+                return;
+            }
 
             if (!IsHandleCreated || IsDisposed) return;
             BeginInvoke(new Action(() =>
