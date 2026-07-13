@@ -711,18 +711,38 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             AppEvents.LoopCompleted              += OnLoopCompleted;
 
             // 프로파일 클라이언트 초기화 + 목록 로드
-            string inferUrl = PHM_Project_DockPanel.Services.ServerSettings.Current.InferenceServerUrl;
-            _profileClientUrl = inferUrl;
-            if (!string.IsNullOrWhiteSpace(inferUrl))
-            {
-                _profileClient = new PHM_Project_DockPanel.Services.Core.InferenceServerClient(inferUrl);
-                // 비동기 로드 (UI 스레드 블로킹 없이)
-                _ = RefreshProfilesAsync();
-            }
-            else
+            ApplyInferenceServerUrl(PHM_Project_DockPanel.Services.ServerSettings.Current.InferenceServerUrl);
+
+            // 연결 설정에서 URL을 나중에 바꿔도(이미 이 창이 열려있는 상태여도) 반영되도록 구독.
+            // 기존엔 생성 시점 URL로 딱 한 번만 클라이언트를 만들어서, 연결 설정을 고쳐도
+            // 이 창을 닫았다 다시 열기 전까지는 계속 옛 URL로 실패하는 문제가 있었다.
+            AppEvents.ServerSettingsChanged += OnServerSettingsChangedForProfile;
+        }
+
+        private void OnServerSettingsChangedForProfile(PHM_Project_DockPanel.Services.ServerSettings s)
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke(new Action(() => ApplyInferenceServerUrl(s?.InferenceServerUrl))); return; }
+            ApplyInferenceServerUrl(s?.InferenceServerUrl);
+        }
+
+        /// <summary>추론 서버 URL로 프로파일 클라이언트를 (재)생성하고 목록을 새로고침합니다.</summary>
+        private void ApplyInferenceServerUrl(string url)
+        {
+            if (string.Equals(url, _profileClientUrl, StringComparison.OrdinalIgnoreCase)) return;
+
+            try { _profileClient?.Dispose(); } catch { }
+            _profileClient    = null;
+            _profileClientUrl = url;
+
+            if (string.IsNullOrWhiteSpace(url))
             {
                 AppEvents.RaiseLog("[프로파일] 추론 서버 URL이 비어 있습니다. 메뉴 > 환경 설정 > 연결 설정에서 URL을 지정하세요.");
+                return;
             }
+
+            _profileClient = new PHM_Project_DockPanel.Services.Core.InferenceServerClient(url);
+            _ = RefreshProfilesAsync();
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -730,6 +750,7 @@ namespace PHM_Project_DockPanel.UI.Dashboard
             AppEvents.InferenceResultReceived    -= OnLiveInferenceResult;
             AppEvents.ClsInferenceResultReceived -= OnLiveClsInferenceResult;
             AppEvents.LoopCompleted              -= OnLoopCompleted;
+            AppEvents.ServerSettingsChanged      -= OnServerSettingsChangedForProfile;
             SaveAxisThresholds();
             SaveAnomalySettings();
             try { StopWatch(); _notifier?.Dispose(); } catch { }
