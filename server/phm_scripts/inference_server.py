@@ -34,7 +34,7 @@ import subprocess
 import sys
 
 # ── 패키지 자동 설치 ──────────────────────────────────────────────────────────
-_REQUIRED = ["fastapi", "uvicorn", "onnxruntime", "numpy", "pydantic"]
+_REQUIRED = ["fastapi", "uvicorn", "onnxruntime", "numpy", "pydantic", "scipy"]
 _missing = []
 for pkg in _REQUIRED:
     try:
@@ -57,6 +57,12 @@ import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+# stat_features.py 는 이 파일과 같은 디렉터리(server/phm_scripts/)에 배치된다.
+# train_isoforest_accel.py 학습 스크립트와 특징 추출 함수를 공유해
+# 학습/추론 전처리가 어긋나지 않도록 한다 (직접 복사 금지 — 이 모듈만 수정).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stat_features import extract_features_from_segment  # noqa: E402
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 _MODELS_BASE    = Path(os.getenv("PHM__models_root()", "/opt/phm/models"))
@@ -783,6 +789,22 @@ def predict(req: PredictRequest):
                 raw_threshold=round(thr, 6),
             )
 
+        # ── IF-STAT: RobustScaler+IsolationForest 통계/주파수 특징 기반 이상탐지 ──
+        if model_kind == "IF-STAT":
+            is_anomaly, score_normed, raw_score, thr = _if_stat_score(raw_arr, sess, meta)
+            return PredictResponse(
+                model_type="IF-STAT",
+                sensor_type=req.sensor_type,
+                axis=req.axis,
+                model_file=model_file,
+                is_anomaly=is_anomaly,
+                anomaly_score=round(score_normed, 6),
+                threshold=1.0,
+                class_name="anomaly" if is_anomaly else "normal",
+                raw_mae=round(raw_score, 6),
+                raw_threshold=round(thr, 6),
+            )
+
         # ── CNN1D: 분류 ──────────────────────────────────────────────────────
         logits      = sess.run(None, {input_name: proc_arr})[0]
         exp_l       = np.exp(logits - logits.max(axis=1, keepdims=True))
@@ -889,6 +911,79 @@ def _ae_score(
     return is_anomaly, score_normed, mae, thr
 
 
+# ── IF-STAT 스코어링 헬퍼 (predict / predict_combined 공용) ──────────────────
+def _if_stat_score(
+    raw_arr: "np.ndarray",
+    sess,
+    meta: dict,
+) -> tuple:
+    """RobustScaler+IsolationForest(train_isoforest_accel.py) 기반 이상 점수를 계산합니다.
+
+    raw_arr: (1, T, C_raw) — 정규화되지 않은 원본 윈도우 (_preprocess_window의 raw_arr).
+    전처리는 stat_features.extract_features_from_segment() 하나로 고정되어 있어
+    train_isoforest_accel.py가 학습 시 사용한 것과 정확히 동일한 특징을 계산합니다.
+
+    Returns:
+        (is_anomaly, score_normed, raw_score, thr)
+    """
+    thr = float(meta.get("threshold_99", 1.0))
+
+    # ── 활동성 게이팅 (AE와 동일 공식·동일 목적) ────────────────────────────
+    activity_thr_val = float(meta.get("activity_threshold", 0.0))
+    if activity_thr_val > 0.0:
+        activity = float(raw_arr[0].astype(np.float64).std(axis=0).max())
+        if activity < activity_thr_val:
+            return False, 0.0, 0.0, thr
+
+    seg = raw_arr[0].astype(np.float64)  # (T, C_raw) — 원본 진폭 그대로
+    channels    = meta.get("channels", ["x", "y", "z"])
+    fs          = float(meta.get("fs", 1000.0))
+    peak_count  = int(meta.get("peak_count", 4))
+    min_freq_hz = float(meta.get("min_freq_hz", 1.0))
+
+    row = extract_features_from_segment(
+        seg, fs, axes=channels, peak_count=peak_count, min_freq_hz=min_freq_hz
+    )
+
+    feature_names = meta.get("feature_names")
+    if not feature_names:
+        raise RuntimeError("IF-STAT meta에 feature_names가 없습니다 (구버전 모델?).")
+    try:
+        vec = np.array([[row[k] for k in feature_names]], dtype=np.float32)
+    except KeyError as e:
+        raise RuntimeError(f"IF-STAT 특징 불일치 (학습/추론 채널 구성이 다름): {e}")
+
+    input_name = meta.get("input_name") or sess.get_inputs()[0].name
+    outputs    = sess.run(None, {input_name: vec})
+    out_names  = [o.name for o in sess.get_outputs()]
+
+    scores = None
+    for name, val in zip(out_names, outputs):
+        if name == "scores":
+            scores = val
+            break
+    if scores is None:
+        raise RuntimeError("IF-STAT ONNX 모델 출력에 'scores'(decision_function)가 없습니다.")
+
+    # sklearn 아웃라이어 검출기: decision_function 음수=이상, 양수=정상 → 부호 반전
+    raw_score = float(-np.asarray(scores).reshape(-1)[0])
+
+    # ── 정규화: AE의 log2(1+ratio) 대신 차이 기반 선형 스케일을 쓴다 ─────────
+    # decision_function은 원점(0) 근방에 몰려 있어(대부분의 정상 샘플이 0 근처),
+    # threshold_99 자체가 0에 가까운 경우가 흔하다. AE처럼 raw_score/thr 비율을
+    # 쓰면 분모가 0에 가까워질 때 스코어가 폭주하거나(오탐 급증) 반대로 threshold가
+    # 항상 큰 양수라 실제 이상 샘플도 못 넘는(미탐) 문제가 생긴다.
+    # 대신 threshold_99→threshold_995 구간을 "1.0→2.0" 스케일로 매핑하는 선형
+    # 보간을 쓴다: threshold_99 값 = score_normed 1.0 (경계), threshold_995 값 =
+    # score_normed 2.0. 두 분위값의 "차이"는 라벨 스케일과 무관하게 항상 유의미한
+    # 양수이므로 0-나눗셈 문제가 없다.
+    thr995 = float(meta.get("threshold_995", thr))
+    spread = max(thr995 - thr, 1e-6)
+    score_normed = max(0.0, 1.0 + (raw_score - thr) / spread)
+    is_anomaly   = score_normed >= _ANOMALY_THRESHOLD
+    return is_anomaly, score_normed, raw_score, thr
+
+
 # ── /predict/combined ─────────────────────────────────────────────────────────
 @app.post("/predict/combined", response_model=CombinedPredictResponse)
 def predict_combined(req: CombinedPredictRequest):
@@ -946,8 +1041,12 @@ def predict_combined(req: CombinedPredictRequest):
             try:
                 raw_arr, proc_arr = _preprocess_window(
                     req.window, req.window_size, req.n_channels, ae_meta)
-                is_anomaly_ae, score_ae, mae, thr = _ae_score(
-                    proc_arr, raw_arr, ae_sess, ae_meta, req.sensor_type)
+                ae_model_kind = ae_meta.get("kind", "AE-CNN1D")
+                if ae_model_kind == "IF-STAT":
+                    is_anomaly_ae, score_ae, mae, thr = _if_stat_score(raw_arr, ae_sess, ae_meta)
+                else:
+                    is_anomaly_ae, score_ae, mae, thr = _ae_score(
+                        proc_arr, raw_arr, ae_sess, ae_meta, req.sensor_type)
                 ae_model_file = ae_meta.get("source_file")
                 is_anomaly    = is_anomaly_ae
                 anomaly_score = round(score_ae, 6)
@@ -1055,10 +1154,13 @@ def predict_combined(req: CombinedPredictRequest):
         ae_raw_arr, ae_proc_arr = _preprocess_window(eff_win, eff_ws, req.n_channels, ae_meta)
 
         ae_model_kind = ae_meta.get("kind", "AE-CNN1D")
-        if "AE" not in ae_model_kind.upper():
+        if ae_model_kind == "IF-STAT":
+            is_anomaly, ae_score, mae, thr = _if_stat_score(ae_raw_arr, ae_sess, ae_meta)
+        elif "AE" in ae_model_kind.upper():
+            is_anomaly, ae_score, mae, thr = _ae_score(ae_proc_arr, ae_raw_arr, ae_sess, ae_meta, req.sensor_type)
+        else:
             print(f"[inference] 경고: AE 슬롯에 CLS 모델({ae_model_kind}) 로드됨", flush=True)
-
-        is_anomaly, ae_score, mae, thr = _ae_score(ae_proc_arr, ae_raw_arr, ae_sess, ae_meta, req.sensor_type)
+            is_anomaly, ae_score, mae, thr = _ae_score(ae_proc_arr, ae_raw_arr, ae_sess, ae_meta, req.sensor_type)
         ae_model_file = ae_meta.get("source_file")
 
         # ── CLS 모델 로드 & 추론 (선택) ─────────────────────────

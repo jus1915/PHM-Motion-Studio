@@ -154,6 +154,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private CheckBox _aflChkAeAccelG, _aflChkAeTorqueG,              // AE 전역
                          _aflChkAeTorqueAx,                              // AE 토크 축별
                          _aflChkAeCombG,   _aflChkAeCombAx;             // AE 결합
+        private CheckBox _aflChkIsoAccel;                                // Accel IsolationForest (AE의 선택 가능한 대안)
         private CheckBox _aflChkClsAccel,  _aflChkClsTorque,            // CLS
                          _aflChkClsComb;
         private bool     _aflUpdatingAll;
@@ -2419,6 +2420,17 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflChkAeCombG    = AflMakeChk("Comb 전역",    true); _aflChkAeCombG.CheckedChanged    += (s, e) => onModelChk();
             _aflChkAeCombAx   = AflMakeChk("Comb 축별",    true); _aflChkAeCombAx.CheckedChanged   += (s, e) => onModelChk();
 
+            // Accel IsolationForest — AE-CNN(ae_accel.onnx)의 선택 가능한 대안.
+            // 파일명이 같아서 별도 프로파일(<프로파일>_isoforest)에 저장되며, default
+            // AE-CNN 모델을 덮어쓰지 않습니다. 대시보드 프로파일 콤보박스로 전환해서 씁니다.
+            _aflChkIsoAccel = AflMakeChk("Accel IsoForest", true);
+            _aflChkIsoAccel.CheckedChanged += (s, e) => onModelChk();
+            var tipIso = new System.Windows.Forms.ToolTip();
+            tipIso.SetToolTip(_aflChkIsoAccel,
+                "RobustScaler+IsolationForest 기반 가속도 이상탐지 (crest/kurtosis/주파수 피크 특징).\n" +
+                "AE-CNN과 파일명이 같아 별도 프로파일 '<프로파일>_isoforest'에 저장됩니다.\n" +
+                "대시보드 프로파일 콤보박스에서 전환해서 비교하세요.");
+
             // CLS 체크박스
             _aflChkClsAccel  = AflMakeChk("Accel",    true); _aflChkClsAccel.CheckedChanged  += (s, e) => onModelChk();
             _aflChkClsTorque = AflMakeChk("Torque",   true); _aflChkClsTorque.CheckedChanged += (s, e) => onModelChk();
@@ -2458,6 +2470,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 _aflChkAll,
                 _aflChkAeAccelG, _aflChkAeTorqueG, _aflChkAeTorqueAx,
                 _aflChkAeCombG,  _aflChkAeCombAx,
+                _aflChkIsoAccel,
                 _aflChkClsAccel, _aflChkClsTorque, _aflChkClsComb,
                 lblAxis, _aflAxisCombo,
             });
@@ -2565,6 +2578,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             _aflChkAeTorqueAx.Visible = isAe;
             _aflChkAeCombG.Visible    = isAe;
             _aflChkAeCombAx.Visible   = isAe;
+            _aflChkIsoAccel.Visible   = isAe;
 
             // CLS 체크박스
             _aflChkClsAccel.Visible  = !isAe;
@@ -2598,6 +2612,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (_aflChkAeTorqueAx?.Checked == true) tasks.Add("Torque 축별");
                 if (_aflChkAeCombG?.Checked    == true) tasks.Add("Comb 전역");
                 if (_aflChkAeCombAx?.Checked   == true) tasks.Add("Comb 축별");
+                if (_aflChkIsoAccel?.Checked   == true) tasks.Add("Accel IsoForest");
             }
             else
             {
@@ -2666,6 +2681,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (_aflChkAeTorqueAx?.Checked == true) modeList.Add("ae_torque");
                 if (_aflChkAeCombG?.Checked    == true) modeList.Add("ae_combined_global");
                 if (_aflChkAeCombAx?.Checked   == true) modeList.Add("ae_combined");
+                if (_aflChkIsoAccel?.Checked   == true) modeList.Add("isoforest_accel");
             }
             else
             {
@@ -2703,6 +2719,17 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             string profileLabel = _aflProfileLabel?.Text?.Trim();
             if (!string.IsNullOrWhiteSpace(profileLabel))
                 paramsObj["profile_label"] = profileLabel;
+
+            // ── IsolationForest 전용 프로파일 ────────────────────────────────
+            // ae_accel.onnx 파일명이 AE-CNN과 겹치므로 "<프로파일>_isoforest"로
+            // 분리해 저장한다 (DAG의 _get_isoforest_profile_dir 기본값과 별개로,
+            // 여기서 명시해 사용자가 고른 프로파일 이름과 연관되도록 함).
+            if (modeList.Contains("isoforest_accel"))
+            {
+                paramsObj["isoforest_profile"] = profileName + "_isoforest";
+                if (!string.IsNullOrWhiteSpace(profileLabel))
+                    paramsObj["isoforest_profile_label"] = profileLabel + " (IsoForest)";
+            }
 
             _aflBtnTrigger.Enabled = false;
             _aflStatusLbl.ForeColor = Color.DodgerBlue;

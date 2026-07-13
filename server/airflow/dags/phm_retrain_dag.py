@@ -11,12 +11,22 @@ C# AIForm 에서 POST /api/v1/dags/phm_retrain/dagRuns 로 즉시 트리거,
 dag_run.conf 주요 파라미터:
   train_modes     : 실행할 학습 모드 목록 (기본 ["accel","torque","combined"])
                     예) ["combined"] 이면 결합 모델만 학습
+                    "isoforest_accel" 은 기본 목록에 없음 — 명시적으로 추가해야 실행됨
   axis_count      : 학습 대상 축 수 (기본 0 → CSV 헤더 자동 감지)
   session         : "CLS" (결함진단 분류, 기본) | "AE" (이상탐지)
   data_dir        : 수집 CSV 루트 (Windows 경로는 PHM_DATA_ROOT 로 자동 변환)
   window_size     : 윈도우 크기 (기본 128)
   epochs          : 학습 에폭 (기본 150)
   class_names     : 분류 클래스 목록 (기본 ["normal","overload","looseness"])
+
+  isoforest_accel 전용 (train_modes에 "isoforest_accel" 포함 시):
+    isoforest_profile      : 출력 프로파일 디렉터리명 (기본 "isoforest_accel" — ae_accel.onnx와
+                              파일명이 같아서 default 프로파일과 분리해야 서로 덮어쓰지 않음)
+    isoforest_channels     : 채널 목록 (기본 ["x","y","z"])
+    isoforest_window_size  : 윈도우 크기 (기본 128, ae_accel.onnx 없는 별도 값도 가능)
+    isoforest_stride       : 슬라이딩 스트라이드 (기본 32)
+    isoforest_n_estimators : IsolationForest 트리 수 (기본 400)
+    isoforest_contamination: 오염도 파라미터 (기본 0.01)
 
 환경변수:
   PHM_SCRIPTS_DIR      : train_dl_model.py 위치 (기본: /opt/phm/scripts)
@@ -51,7 +61,8 @@ _SCRIPTS_DIR = Path(os.getenv(
     "PHM_SCRIPTS_DIR",
     Path(__file__).resolve().parents[1],  # dags/ 의 부모 = scripts/
 ))
-_SCRIPT_PATH = _SCRIPTS_DIR / "train_dl_model.py"
+_SCRIPT_PATH            = _SCRIPTS_DIR / "train_dl_model.py"
+_SCRIPT_PATH_ISOFOREST  = _SCRIPTS_DIR / "train_isoforest_accel.py"
 
 _DATA_ROOT     = os.getenv("PHM_DATA_ROOT",     "/opt/phm/data")
 _MODELS_ROOT   = os.getenv("PHM_MODELS_ROOT",   "/opt/phm/models")
@@ -151,11 +162,15 @@ def _detect_axis_count(data_root: str) -> int:
 
 
 # ── 핵심 실행 헬퍼 ─────────────────────────────────────────────────────────────
-def _execute_training(params: dict, run_id: str) -> None:
+def _execute_training(params: dict, run_id: str, script_path: Path = None) -> None:
     """
-    params dict 를 JSON 파일로 저장한 뒤 train_dl_model.py 를 실행합니다.
+    params dict 를 JSON 파일로 저장한 뒤 학습 스크립트를 실행합니다.
     학습 결과(로그)를 Airflow 로그에 실시간 출력합니다.
+
+    script_path 를 지정하지 않으면 기본값(train_dl_model.py)을 사용합니다.
+    train_isoforest_accel.py 처럼 다른 스크립트를 실행할 때만 명시적으로 넘깁니다.
     """
+    script_path = script_path or _SCRIPT_PATH
     # Windows 경로 정규화
     params["data_dir"] = _normalize_data_dir(params.get("data_dir", _DATA_ROOT))
     if "output" in params:
@@ -175,8 +190,8 @@ def _execute_training(params: dict, run_id: str) -> None:
     print(f"[PHM] 파라미터 파일: {params_file}", flush=True)
     print(f"[PHM] 파라미터 내용:\n{params_file.read_text(encoding='utf-8')}", flush=True)
 
-    if not _SCRIPT_PATH.exists():
-        raise FileNotFoundError(f"train_dl_model.py 없음: {_SCRIPT_PATH}")
+    if not script_path.exists():
+        raise FileNotFoundError(f"학습 스크립트 없음: {script_path}")
 
     # 가상환경 python 우선 사용
     venv_python     = _SCRIPTS_DIR / ".venv" / "bin" / "python"
@@ -188,7 +203,7 @@ def _execute_training(params: dict, run_id: str) -> None:
     else:
         python = sys.executable
 
-    cmd = [python, str(_SCRIPT_PATH), "--params", str(params_file)]
+    cmd = [python, str(script_path), "--params", str(params_file)]
     print(f"[PHM] 학습 명령: {' '.join(cmd)}", flush=True)
 
     proc = subprocess.Popen(
@@ -208,7 +223,7 @@ def _execute_training(params: dict, run_id: str) -> None:
     returncode = proc.wait()
     if returncode != 0:
         raise RuntimeError(
-            f"train_dl_model.py 실패 (exit={returncode}). 위 출력을 확인하세요."
+            f"{script_path.name} 실패 (exit={returncode}). 위 출력을 확인하세요."
         )
     print(f"[PHM] 학습 완료 → {output_path}", flush=True)
 
@@ -311,6 +326,35 @@ def _get_profile_dir(conf: dict) -> Path:
         info_path.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"[PHM] 프로파일 디렉토리: {profile_dir}", flush=True)
+    return profile_dir
+
+
+def _get_isoforest_profile_dir(conf: dict) -> Path:
+    """IsolationForest 가속도 모델 전용 프로파일 디렉토리를 반환합니다.
+
+    출력 파일명이 기존 AE-CNN(ae_accel.onnx)과 동일하므로, 같은 profile_dir을
+    쓰면 서로 덮어씁니다. 그래서 conf["profile"](CLS/AE 태스크들이 공유하는 키)과는
+    별도로 conf["isoforest_profile"]을 두고 기본값을 "isoforest_accel"로 분리합니다.
+    대시보드의 기존 프로파일 콤보박스에서 "default" ↔ "isoforest_accel"로 전환해
+    두 모델을 나란히 비교할 수 있습니다.
+    """
+    profile = str(conf.get("isoforest_profile", "isoforest_accel"))
+    profile_dir = Path(_MODELS_ROOT) / profile
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    info_path = profile_dir / "profile_info.json"
+    if not info_path.exists():
+        info = {
+            "label":       conf.get("isoforest_profile_label", profile),
+            "description": conf.get(
+                "isoforest_profile_desc",
+                "RobustScaler+IsolationForest 통계/주파수 특징 기반 가속도 이상탐지 (AE-CNN 대안)",
+            ),
+            "created":     datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        info_path.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print(f"[PHM] IsolationForest 프로파일 디렉토리: {profile_dir}", flush=True)
     return profile_dir
 
 
@@ -650,6 +694,48 @@ def run_training_ae_combined(**context) -> None:
     print(f"\n[PHM] AE 결합 축별 학습 완료 (총 {len(axes)}개 축: {axes})", flush=True)
 
 
+def run_training_isoforest_accel(**context) -> None:
+    """
+    가속도 IsolationForest(RobustScaler+통계/주파수 특징) 이상탐지 모델 학습.
+
+    AE-CNN(ae_accel.onnx)의 "선택 가능한 대안" 모델 — 미탐(놓침)이 잦을 때
+    crest/impulse/kurtosis 등 임펄시브 결함에 민감한 통계 특징으로 재구성오차와는
+    다른 신호를 잡기 위한 것. 기본적으로 train_modes에 없으므로 명시적으로
+    conf["train_modes"]에 "isoforest_accel"을 추가해야 실행됩니다.
+
+    출력은 default 프로파일이 아니라 별도 profile_dir(기본 "isoforest_accel")에
+    ae_accel.onnx로 저장됩니다 — 파일명이 같은 AE-CNN과 프로파일을 분리해야
+    서로 덮어쓰지 않고, 대시보드 프로파일 콤보박스로 둘을 전환하며 비교할 수 있습니다.
+
+    전처리(특징 추출)는 stat_features.py 하나로 고정되어 있어 inference_server.py의
+    실시간 추론과 반드시 동일합니다 — 이 태스크는 학습 파라미터(윈도우 크기 등)만 결정합니다.
+    """
+    conf = dict(context["dag_run"].conf or {})
+
+    if not _is_mode_enabled(conf, "isoforest_accel"):
+        print("[PHM] train_modes 에 'isoforest_accel' 없음 → IsolationForest 가속도 학습 건너뜀", flush=True)
+        return
+
+    run_id      = str(context.get("run_id", "manual"))
+    profile_dir = _get_isoforest_profile_dir(conf)
+
+    params = {
+        "data_dir":            _normalize_data_dir(conf.get("data_dir", _DATA_ROOT)),
+        "channels":            conf.get("isoforest_channels", ["x", "y", "z"]),
+        "window_size":         int(conf.get("isoforest_window_size", 128)),
+        "stride":              int(conf.get("isoforest_stride", 32)),
+        "n_estimators":        int(conf.get("isoforest_n_estimators", 400)),
+        "contamination":       float(conf.get("isoforest_contamination", 0.01)),
+        "seed":                int(conf.get("seed", 42)),
+        "mlflow_tracking_uri": conf.get("mlflow_tracking_uri", _DEFAULT_CONF["mlflow_tracking_uri"]),
+        "mlflow_experiment":   "PHM-IsoForest",
+    }
+    params["output"] = str(profile_dir / "ae_accel.onnx")
+    print(f"[PHM] IsolationForest 가속도 모델 출력: {params['output']}", flush=True)
+    _execute_training(params, f"{run_id}_isoforest_accel", script_path=_SCRIPT_PATH_ISOFOREST)
+    print("[PHM] IsolationForest 가속도 학습 완료", flush=True)
+
+
 def reload_inference_cache(**context) -> None:
     """
     학습 완료 후 추론 서버의 모델 캐시를 재로드합니다.
@@ -754,6 +840,16 @@ with DAG(
         ),
     )
 
+    t_isoforest_accel = PythonOperator(
+        task_id="train_isoforest_accel",
+        python_callable=run_training_isoforest_accel,
+        doc_md=(
+            "가속도 RobustScaler+IsolationForest 이상탐지 모델 학습 (AE-CNN의 선택 가능한 대안). "
+            "train_modes에 'isoforest_accel'을 명시해야 실행됨 (기본 비활성). "
+            "출력: <MODELS_ROOT>/isoforest_accel/ae_accel.onnx (별도 프로파일, default를 덮어쓰지 않음)"
+        ),
+    )
+
     t_reload = PythonOperator(
         task_id="reload_inference_cache",
         python_callable=reload_inference_cache,
@@ -766,4 +862,5 @@ with DAG(
         t_ae_accel,
         t_ae_torque_global, t_ae_torque,
         t_ae_combined_global, t_ae_combined,
+        t_isoforest_accel,
     ] >> t_reload
