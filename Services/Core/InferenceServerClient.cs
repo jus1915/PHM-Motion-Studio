@@ -54,7 +54,10 @@ namespace PHM_Project_DockPanel.Services.Core
             _http = new HttpClient
             {
                 BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"),
-                Timeout     = TimeSpan.FromSeconds(10),
+                // AirflowClient(15s)/InfluxDbDataSource(30s) 대비 10s가 가장 짧았음 —
+                // 서버가 학습 직후거나 일시적으로 부하가 있을 때 /profiles 같은 저빈도
+                // 호출이 여유 없이 타임아웃되는 걸 방지하기 위해 15s로 조정.
+                Timeout     = TimeSpan.FromSeconds(15),
             };
         }
 
