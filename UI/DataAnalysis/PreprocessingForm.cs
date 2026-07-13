@@ -68,9 +68,6 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
         private TabControl tabControl;
 
-        private AIForm _aiForm;          // AI 창 핸들
-        private Button btnOpenAI;        // "AI 열기" 버튼
-
 #pragma warning disable 0649
         // 가상화된 파일 리스트 (하위 호환 — 내부 상태용, null-safe)
         private ListView fileList;
@@ -231,26 +228,6 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
         }
 
-        private void EnsureAIForm()
-        {
-            if (this.DockPanel == null)
-            {
-                if (_aiForm == null || _aiForm.IsDisposed) _aiForm = new AIForm();
-                if (!_aiForm.Visible) _aiForm.Show();
-                return;
-            }
-
-            var existing = this.DockPanel.Contents.OfType<AIForm>().FirstOrDefault();
-            if (existing == null || existing.IsDisposed)
-            {
-                _aiForm = new AIForm();
-            }
-            else
-            {
-                _aiForm = existing;
-            }
-        }
-
         private void InitializeComponent()
         {
             var split = new SplitContainer
@@ -408,27 +385,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
 
             lblFeatureInfo = new Label { AutoSize = true, Margin = new Padding(12, 8, 0, 0) };
 
-            btnOpenAI = new Button { Text = "AI 열기", Width = 80 };
-            btnOpenAI.Click += (s, e) =>
-            {
-                if (_featureTable == null || _featureTable.Count == 0)
-                {
-                    MessageBox.Show("먼저 '특징 계산/갱신'을 실행해 특징 값을 만들어 주세요.");
-                    return;
-                }
-                if (_aiForm == null || _aiForm.IsDisposed) _aiForm = new AIForm();
-                if (this.DockPanel == null) { if (!_aiForm.Visible) _aiForm.Show(this); _aiForm.Activate(); }
-                else { if (!_aiForm.Visible) _aiForm.Show(this.DockPanel, DockState.Document); _aiForm.DockHandler.Activate(); }
-                if (cmbYColumn.SelectedItem != null) _aiForm.SetYColumnName(cmbYColumn.SelectedItem.ToString());
-                _aiForm.SetFeatureData(_featureTable.Cast<object>(), FeatureList);
-            };
-
             topBar.Controls.Add(new Label { Text = "특징:", AutoSize = true, Margin = new Padding(0, 8, 4, 0) });
             topBar.Controls.Add(cmbFeature);
             topBar.Controls.Add(btnComputeFeatures);
             topBar.Controls.Add(chkFeaturesAll);
             topBar.Controls.Add(lblFeatureInfo);
-            topBar.Controls.Add(btnOpenAI);
 
             cmbDistType = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
             cmbDistType.Items.AddRange(new object[] { "Histogram", "BoxPlot", "ECDF", "Density(KDE)", "Strip" });
@@ -1452,9 +1413,6 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     ApplyNumericFormat(gridFeatures);
                     RenderFeatureDistribution();
                     lblFeatureInfo.Text = string.Format("샘플 파일: {0}개", _featureTable.Count);
-                    EnsureAIForm();
-                    _aiForm.SetYColumnName(yColumn);
-                    _aiForm.SetFeatureData(_featureTable.Cast<object>(), FeatureList);
                 }));
             }));
         }
@@ -3582,9 +3540,6 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     ApplyNumericFormat(gridFeatures);
                     RenderFeatureDistribution();
                     lblFeatureInfo.Text = $"샘플: {_featureTable.Count}개 (InfluxDB)";
-                    EnsureAIForm();
-                    _aiForm.SetYColumnName(channel);
-                    _aiForm.SetFeatureData(_featureTable.Cast<object>(), FeatureList);
                 }));
             }));
         }
