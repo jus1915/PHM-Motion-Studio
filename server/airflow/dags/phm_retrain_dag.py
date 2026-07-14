@@ -23,8 +23,8 @@ dag_run.conf 주요 파라미터:
     isoforest_profile      : 출력 프로파일 디렉터리명 (기본 "isoforest_accel" — ae_accel.onnx와
                               파일명이 같아서 default 프로파일과 분리해야 서로 덮어쓰지 않음)
     isoforest_channels     : 채널 목록 (기본 ["x","y","z"])
-    isoforest_window_size  : 윈도우 크기 (기본 128, ae_accel.onnx 없는 별도 값도 가능)
-    isoforest_stride       : 슬라이딩 스트라이드 (기본 32)
+    isoforest_window_size  : 윈도우 크기 (기본 500 — train.py 기준 WIN_S=0.5s @ fs=1000Hz)
+    isoforest_stride       : 슬라이딩 스트라이드 (기본 250 — train.py 기준 STEP_S=0.25s @ fs=1000Hz)
     isoforest_n_estimators : IsolationForest 트리 수 (기본 400)
     isoforest_contamination: 오염도 파라미터 (기본 0.01)
 
@@ -722,8 +722,8 @@ def run_training_isoforest_accel(**context) -> None:
     params = {
         "data_dir":            _normalize_data_dir(conf.get("data_dir", _DATA_ROOT)),
         "channels":            conf.get("isoforest_channels", ["x", "y", "z"]),
-        "window_size":         int(conf.get("isoforest_window_size", 128)),
-        "stride":              int(conf.get("isoforest_stride", 32)),
+        "window_size":         int(conf.get("isoforest_window_size", 500)),
+        "stride":              int(conf.get("isoforest_stride", 250)),
         "n_estimators":        int(conf.get("isoforest_n_estimators", 400)),
         "contamination":       float(conf.get("isoforest_contamination", 0.01)),
         "seed":                int(conf.get("seed", 42)),

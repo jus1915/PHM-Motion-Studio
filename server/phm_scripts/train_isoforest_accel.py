@@ -18,8 +18,8 @@ params JSON 구조:
     ],
     "output": "C:/Models/isoforest_accel/ae_accel.onnx",
     "channels": ["x", "y", "z"],
-    "window_size": 128,
-    "stride": 32,
+    "window_size": 500,                        // train.py 기준: WIN_S=0.5s @ fs=1000Hz
+    "stride": 250,                              // train.py 기준: STEP_S=0.25s @ fs=1000Hz
     "n_estimators": 400,
     "contamination": 0.01,
     "fs": null,                                // null이면 CSV time_s에서 자동 감지
@@ -120,8 +120,9 @@ def main() -> None:
     params = load_params(args.params)
 
     channels = params.get("channels", ["x", "y", "z"])
-    window_size = int(params.get("window_size", 128))
-    stride = int(params.get("stride", 32))
+    # 기본값은 train.py 기준(WIN_S=0.5s, STEP_S=0.25s @ fs=1000Hz) — 500/250샘플
+    window_size = int(params.get("window_size", 500))
+    stride = int(params.get("stride", 250))
     output_path = params["output"]
     n_estimators = int(params.get("n_estimators", 400))
     contamination = params.get("contamination", 0.01)
@@ -289,8 +290,8 @@ def _try_log_mlflow(params, feature_names, n_features, threshold_99, threshold_9
                     "n_features": n_features,
                     "n_estimators": params.get("n_estimators", 400),
                     "contamination": params.get("contamination", 0.01),
-                    "window_size": params.get("window_size", 128),
-                    "stride": params.get("stride", 32),
+                    "window_size": params.get("window_size", 500),
+                    "stride": params.get("stride", 250),
                     "features": ",".join(feature_names),
                 }
             )
