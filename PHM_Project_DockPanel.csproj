@@ -218,6 +218,9 @@
     <Compile Include="UI\DataAnalysis\PreprocessingForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UI\DataCollection\AxisConfigForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="UI\DataCollection\AxisInfoForm.cs">
       <SubType>Form</SubType>
     </Compile>
