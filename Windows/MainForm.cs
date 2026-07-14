@@ -375,7 +375,10 @@ namespace PHM_Project_DockPanel
             logMenu.DropDownItems.Add(CreateDockMenuItem<LogGraphForm>("Log Graph", DockState.Document));
 
             var configMenu = new ToolStripMenuItem("환경 설정");
-            configMenu.DropDownItems.Add(new ToolStripMenuItem("축 설정 관리", null, (s, e) => { }));
+            configMenu.DropDownItems.Add(
+                CreateDockMenuItem("축 설정 관리", DockState.DockRight,
+                    typeof(AxisConfigForm),
+                    () => new AxisConfigForm(AxisConfigFile, _axisConfigs, ApplyAxisConfigs)));
             configMenu.DropDownItems.Add(new ToolStripMenuItem("연결 설정", null, (s, e) =>
             {
                 using (var form = new PHM_Project_DockPanel.UI.DataCollection.ServerSettingsForm(ServerSettingsPath))
@@ -585,6 +588,16 @@ namespace PHM_Project_DockPanel
         // ────────────────────────────────────────────────────────────────────
         // 축 설정 저장 / 불러오기
         // ────────────────────────────────────────────────────────────────────
+
+        /// <summary>AxisConfigForm에서 "저장 & 적용" 시 호출됩니다. AxisConfigForm이 이미
+        /// JSON 파일 저장까지 마친 뒤 호출하므로, 여기서는 실행 중인 컨트롤러에만 반영합니다.</summary>
+        private void ApplyAxisConfigs(AxisConfig[] configs)
+        {
+            _axisConfigs = configs;
+            _motion.SetAxisConfigs(_axisConfigs);
+            AppEvents.RaiseLog("[축 설정] 컨트롤러에 반영 완료");
+        }
+
         private void SaveAxisConfigs()
         {
             try
