@@ -16,6 +16,14 @@ namespace PHM_Project_DockPanel.Services.DAQ
     {
         private readonly Action<string> _logAction;
 
+        // Start()/SafeStop()/ReadCallback가 모두 _reader·_running·CSV 스트림 같은 공유
+        // 상태를 건드리는데 잠금 없이 여러 스레드(연속수집 체크박스 재진입, DAQmx 콜백 스레드)
+        // 에서 동시에 실행되면 한쪽이 _reader를 만드는 도중 다른 쪽이 null로 만들어버려
+        // NullReferenceException이 나거나 CSV 파일이 절반만 써지는 문제가 있었다.
+        // lock(Monitor)은 같은 스레드에서 재진입 가능하므로 Start()가 내부에서
+        // SafeStop()을 호출해도 데드락 없음.
+        private readonly object _lifecycleLock = new object();
+
         public DaqAccelCsvLogger(Action<string> logAction = null)
         {
             _logAction = logAction;
@@ -185,6 +193,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
         public bool Start(int[] axisIndices, string filePath, string filename, uint durationMs = 5000)
         {
+          lock (_lifecycleLock)
+          {
             // ★ 이미 실행 중이면 먼저 종료
             if (_running)
             {
@@ -297,6 +307,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
                 SafeStop();
                 return false;
             }
+          }
         }
 
         private void CreateAccel(string phys, double sens_mVpg)
@@ -319,6 +330,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
         private void SafeStop()
         {
+          lock (_lifecycleLock)
+          {
             try
             {
                 // 1) 콜백 재진입 즉시 차단
@@ -364,6 +377,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
 
                 _csvPathByMod = null;
             }
+          }
         }
 
         // ===== 외부 소비자 콜백 (module, block[channels,samples], timestampUtc) =====
@@ -372,6 +386,8 @@ namespace PHM_Project_DockPanel.Services.DAQ
         // ===== Read 콜백(로깅) =====
         private void ReadCallback(IAsyncResult ar)
         {
+          lock (_lifecycleLock)
+          {
             try
             {
                 if (!_running || _reader == null) return;
@@ -452,6 +468,7 @@ namespace PHM_Project_DockPanel.Services.DAQ
             }
             catch (DaqException) { /* Stop 중일 수 있음 */ }
             catch (ObjectDisposedException) { }
+          }
         }
 
         // ===== 유틸 =====

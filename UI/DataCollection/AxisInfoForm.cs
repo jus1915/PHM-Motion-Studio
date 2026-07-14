@@ -496,45 +496,58 @@ namespace PHM_Project_DockPanel.Windows
 
         private async void OnContCollectCheckedChanged(object sender, EventArgs e)
         {
-            if (_chkContCollect.Checked)
+            // 시작/정지가 완료되기 전에 체크박스를 다시 누르면 이 핸들러가 재진입되어
+            // StartContinuousLogging/StopContinuousLogging이 동시에 실행되는 레이스가
+            // 발생한다 (DaqAccelCsvLogger._reader가 다른 스레드에서 null이 된 채로
+            // BeginReadMultiSample이 호출돼 크래시, CSV 저장도 가끔 실패). 처리 중에는
+            // 체크박스 자체를 비활성화해 재진입을 막는다.
+            _chkContCollect.Enabled = false;
+            try
             {
-                // 수집 대상이 하나도 없으면 즉시 해제
-                if (!_chkAccelCollect.Checked && !_chkTorqueCollect.Checked)
+                if (_chkContCollect.Checked)
                 {
-                    AppEvents.RaiseLog("[연속 수집] 가속도 또는 토크 수집을 먼저 체크하세요.");
-                    _chkContCollect.Checked = false;
-                    return;
+                    // 수집 대상이 하나도 없으면 즉시 해제
+                    if (!_chkAccelCollect.Checked && !_chkTorqueCollect.Checked)
+                    {
+                        AppEvents.RaiseLog("[연속 수집] 가속도 또는 토크 수집을 먼저 체크하세요.");
+                        _chkContCollect.Checked = false;
+                        return;
+                    }
+
+                    string label = _cmbLabel?.Text?.Trim() ?? "";
+                    // UI 스레드에서 미리 캡처 — Task.Run 내부에서 UI 컨트롤 접근 시
+                    // 크로스 스레드로 인해 .Checked 가 false 반환되는 문제 방지
+                    bool snapAccel  = _chkAccelCollect.Checked;
+                    bool snapTorque = _chkTorqueCollect.Checked;
+
+                    bool ok = await System.Threading.Tasks.Task.Run(
+                        () => _motion.StartContinuousLogging(label, snapAccel, snapTorque));
+
+                    if (!ok)
+                    {
+                        _chkContCollect.Checked = false;
+                        return;
+                    }
+
+                    // 수집 중에는 수집 대상 체크박스와 레이블 변경 불가
+                    _chkAccelCollect.Enabled  = false;
+                    _chkTorqueCollect.Enabled = false;
+                    _cmbLabel.Enabled         = _chkRealtime.Checked; // 실시간 전송은 유지
+                    UpdateContCollectStatusLabel(true);
                 }
-
-                string label = _cmbLabel?.Text?.Trim() ?? "";
-                // UI 스레드에서 미리 캡처 — Task.Run 내부에서 UI 컨트롤 접근 시
-                // 크로스 스레드로 인해 .Checked 가 false 반환되는 문제 방지
-                bool snapAccel  = _chkAccelCollect.Checked;
-                bool snapTorque = _chkTorqueCollect.Checked;
-
-                bool ok = await System.Threading.Tasks.Task.Run(
-                    () => _motion.StartContinuousLogging(label, snapAccel, snapTorque));
-
-                if (!ok)
+                else
                 {
-                    _chkContCollect.Checked = false;
-                    return;
-                }
+                    await System.Threading.Tasks.Task.Run(() => _motion.StopContinuousLogging());
 
-                // 수집 중에는 수집 대상 체크박스와 레이블 변경 불가
-                _chkAccelCollect.Enabled  = false;
-                _chkTorqueCollect.Enabled = false;
-                _cmbLabel.Enabled         = _chkRealtime.Checked; // 실시간 전송은 유지
-                UpdateContCollectStatusLabel(true);
+                    _chkAccelCollect.Enabled  = true;
+                    _chkTorqueCollect.Enabled = true;
+                    _cmbLabel.Enabled         = _chkRealtime.Checked;
+                    UpdateContCollectStatusLabel(false);
+                }
             }
-            else
+            finally
             {
-                await System.Threading.Tasks.Task.Run(() => _motion.StopContinuousLogging());
-
-                _chkAccelCollect.Enabled  = true;
-                _chkTorqueCollect.Enabled = true;
-                _cmbLabel.Enabled         = _chkRealtime.Checked;
-                UpdateContCollectStatusLabel(false);
+                _chkContCollect.Enabled = true;
             }
         }
 
