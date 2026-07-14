@@ -320,7 +320,12 @@ namespace PHM_Project_DockPanel.Controller
                 // ✅ 핵심: Pitch 사용
                 double unit = cfg.PitchMmPerRev > 0 ? cfg.PitchMmPerRev : 10.0;
 
-                AxmMotSetMoveUnitPerPulse(i, unit, DefaultPulse);
+                // 축마다 드라이브(모터)가 다르면 회전당 펄스 수도 다를 수 있다 — 이전엔 전 축이
+                // 이노반스 SV660N이라 DefaultPulse 하나로 충분했지만, 파나소닉 등 다른 드라이브가
+                // 섞이면 그 축만 실제 이동량이 어긋난다 (예: 명령한 10mm가 아주 조금만 움직임).
+                int pulsePerRev = cfg.PulsePerRev > 0 ? cfg.PulsePerRev : DefaultPulse;
+
+                AxmMotSetMoveUnitPerPulse(i, unit, pulsePerRev);
 
                 AxmMotSetAbsRelMode(i, ABS_MODE);
                 AxmMotSetProfileMode(i, 0);
@@ -332,7 +337,7 @@ namespace PHM_Project_DockPanel.Controller
                     AxmMotSetMaxDecel(i, cfg.Dec);
                 }
 
-                AppEvents.RaiseLog($"[Ajin] Axis {i} unit={unit} 적용");
+                AppEvents.RaiseLog($"[Ajin] Axis {i} unit={unit} pulse/rev={pulsePerRev} 적용");
             }
         }
 
