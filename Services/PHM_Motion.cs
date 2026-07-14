@@ -172,7 +172,8 @@ namespace PHM_Project_DockPanel.Services
             var status = _controller.GetStatus();
             var active = new List<int>();
             var startPos = new List<double>();
-            var targetPos = new List<double>();
+            var targetPos = new List<double>();   // 실제(물리) 목표 위치 — 범위체크/시간추정용
+            var commandPos = new List<double>();  // 컨트롤러에 실제로 보낼 목표 위치 (축별 보정 배율 적용)
             var vmax = new List<double>();
             var acc = new List<double>();
             var dec = new List<double>();
@@ -187,9 +188,16 @@ namespace PHM_Project_DockPanel.Services
                 double tp = isAbs ? values[idx] : sp + values[idx];
                 if (!IsWithinRange(tp, cfg.PositionMax)) continue;
 
+                // 드라이브 쪽 원인(모드/기어비 불일치 등)으로 명령 거리와 실제 이동 거리가
+                // 일정 비율로 어긋나는 축을 위한 보정. 피드백(sp/tp)은 그대로 실제 mm를 쓰고,
+                // 컨트롤러로 보내는 목표값(cp)에만 배율을 곱해 실제 이동량이 tp에 맞도록 한다.
+                double scale = cfg.MoveCommandScale > 0 ? cfg.MoveCommandScale : 1.0;
+                double cp = sp + (tp - sp) * scale;
+
                 active.Add(ax);
                 startPos.Add(sp);
                 targetPos.Add(tp);
+                commandPos.Add(cp);
                 vmax.Add(cfg.MaxVel);
                 acc.Add(cfg.Acc);
                 dec.Add(cfg.Dec);
@@ -294,8 +302,8 @@ namespace PHM_Project_DockPanel.Services
                     }
                 }
 
-                // === 모션 실행 ===
-                _controller.MoveAbs(active.ToArray(), targetPos.ToArray(), vmax.ToArray(), acc.ToArray(), dec.ToArray());
+                // === 모션 실행 === (commandPos: 축별 MoveCommandScale 보정이 적용된 실제 명령값)
+                _controller.MoveAbs(active.ToArray(), commandPos.ToArray(), vmax.ToArray(), acc.ToArray(), dec.ToArray());
                 await WaitForMotionsEnd(active);
                 if (extraWaitAfterMotion != null) await extraWaitAfterMotion();
             }
