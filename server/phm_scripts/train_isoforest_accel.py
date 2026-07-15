@@ -130,8 +130,13 @@ def main() -> None:
 
     # ── 데이터 로드 ──────────────────────────────────────────────────────────
     # train_dl_model.py의 로더를 그대로 써서 기존 ae_accel(AE-CNN1D)와
-    # 동일한 CSV 파싱·구간(세그먼트) 경계 규칙을 공유한다.
+    # 동일한 CSV 파싱 규칙을 공유한다.
     # normalize=False: 원본 진폭 보존 (RMS/AbsMax 등 진폭 기반 특징에 필수)
+    # use_op_filter=False: Op_Ax*/Op 컬럼의 Idle 상태로 구간을 끊지 않는다 — 이 프로젝트의
+    # 다른 accel/torque AE 학습(run_training_ae_torque 등)도 전부 이렇게 하며, train.py
+    # 원본도 애초에 구간 분리 없이 파일 전체를 그대로 슬라이딩한다. 이걸 안 끄면 실제
+    # 연속수집 데이터(정지-구동이 잦음)가 Idle마다 잘게 쪼개져서 window_size 이상인
+    # 구간이 거의 안 남는다 (실측: 2906구간 중 2898개가 500샘플 미만으로 스킵됨).
     first_csv = None
     if params.get("csv_files"):
         windows, _ = load_windows_from_file_list(
@@ -143,6 +148,7 @@ def main() -> None:
             stride=stride,
             normalize=False,
             filter_op_column=None,
+            use_op_filter=False,
         )
         if params["csv_files"]:
             first_csv = params["csv_files"][0].get("path")
@@ -158,6 +164,7 @@ def main() -> None:
             sensor_type="accel",
             normalize=False,
             filter_op_column=None,
+            use_op_filter=False,
         )
         found = list(Path(data_dir).rglob("*.csv"))
         first_csv = str(found[0]) if found else None
