@@ -1643,6 +1643,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 paramsObj["isoforest_profile"] = profileName + "_isoforest";
                 if (!string.IsNullOrWhiteSpace(profileLabel))
                     paramsObj["isoforest_profile_label"] = profileLabel + " (IsoForest)";
+
+                // "모델 설정 / 출력"의 윈도우(샘플)/스트라이드 입력을 IsoForest 전용 키로도
+                // 전달한다 — 안 넘기면 DAG 자체 기본값(train.py 기준 500/250)이 쓰이므로,
+                // 사용자가 이 화면에서 값을 바꿔도 IsoForest 학습에는 반영되지 않던 문제를 고침.
+                paramsObj["isoforest_window_size"] = (int)NudCurrent(_dlWindowSize, 500m);
+                paramsObj["isoforest_stride"]      = (int)NudCurrent(_dlStride,     250m);
             }
 
             _aflBtnTrigger.Enabled = false;
