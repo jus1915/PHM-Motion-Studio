@@ -67,6 +67,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // (전체 선택 시 DAG 가 axis_count 를 자동 감지해 모든 축 학습)
         private ComboBox _aflAxisCombo;
 
+        // ── 자동 재학습 (별도 DAG: phm_auto_retrain, 스케줄은 서버에 고정, On/Off만 여기서 제어) ──
+        private const string AutoRetrainDagId = "phm_auto_retrain";
+        private CheckBox _aflChkAutoRetrain;
+        private Label    _aflAutoStatusLbl;
+        private bool     _aflSyncingAutoRetrain;   // 상태 조회로 체크박스를 동기화할 때 CheckedChanged 재호출 방지
+
         public AIForm()
         {
             Text = "AI";
@@ -78,7 +84,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));  // 설정 패널
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 160));  // Airflow 패널
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 186));  // Airflow 패널 (+26px: 자동 재학습 행)
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 로그 영역
 
             // ── 상단: 설정 2열 ────────────────────────────────────────────
@@ -165,6 +171,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             // 컨트롤 생성 완료 후 마지막 설정 복원 (자동 저장된 dl_settings.json)
             LoadDlSettings(DlSettingsFile);
             RefreshPresetCombo();
+
+            // 자동 재학습(phm_auto_retrain) DAG의 현재 On/Off 상태를 서버에서 조회해 동기화
+            _ = RefreshAutoRetrainStatusAsync();
         }
 
         private GroupBox BuildDlLeftPanel()
@@ -1299,6 +1308,9 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             if (_aflUrl   != null) _aflUrl.Text   = s.AirflowUrl   ?? "";
             if (_aflDagId != null) _aflDagId.Text = s.AirflowDagId ?? "phm_retrain";
             // User/Password 는 ServerSettings.Current 에서 직접 읽으므로 별도 TextBox 불필요
+
+            // 서버(URL/계정)가 바뀌었을 수 있으므로 자동 재학습 On/Off 상태를 다시 조회
+            _ = RefreshAutoRetrainStatusAsync();
         }
 
         /// <summary>
@@ -1315,11 +1327,12 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.FromArgb(0, 140, 220),
             };
 
-            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));  // row0: 서버 연결
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));  // row1: 모델 선택 (박스로 구분)
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));  // row2: 축 / 프로파일 / 라벨
             stack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // row3: 실행 버튼 + 상태
+            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));  // row4: 자동 재학습 On/Off
 
             // ── row0: 서버 연결 (URL / DAG — 자주 안 바뀌므로 작고 옅게) ─────────
             var connRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
@@ -1462,10 +1475,42 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             runRow.Controls.Add(_aflBtnStatus,  1, 0);
             runRow.Controls.Add(_aflStatusLbl,  2, 0);
 
+            // ── row4: 자동 재학습 On/Off (phm_auto_retrain DAG 일시정지 전환) ──────
+            var autoRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            _aflChkAutoRetrain = new CheckBox
+            {
+                Text = "자동 재학습 (매일 새벽 2시, AE+IsoForest)",
+                AutoSize = true,
+                Margin = new Padding(0, 5, 10, 0),
+            };
+            _aflChkAutoRetrain.CheckedChanged += async (s, e) =>
+            {
+                if (_aflSyncingAutoRetrain) return;
+                await ToggleAutoRetrainAsync(_aflChkAutoRetrain.Checked);
+            };
+            var tipAuto = new ToolTip();
+            tipAuto.SetToolTip(_aflChkAutoRetrain,
+                "Airflow의 phm_auto_retrain DAG를 켜고 끕니다(스케줄 자체는 서버에 고정).\n" +
+                "켜면 CLS(레이블 필요)는 제외하고 AE-CNN + IsolationForest 이상탐지 모델만\n" +
+                "매일 새벽 2시 자동으로 재학습합니다. 서버가 꺼져 있어도 Airflow 컨테이너가\n" +
+                "살아있으면 그대로 실행됩니다 — 이 앱의 실행 여부와 무관합니다.\n" +
+                "스케줄/대상 모델을 바꾸려면 서버의 phm_auto_retrain_dag.py 환경변수를 수정하세요.");
+
+            _aflAutoStatusLbl = new Label
+            {
+                Text = "확인 중…", AutoSize = true,
+                ForeColor = Color.Gray, Font = new Font(Font.FontFamily, 8.5f),
+                Margin = new Padding(0, 8, 0, 0),
+            };
+
+            autoRow.Controls.Add(_aflChkAutoRetrain);
+            autoRow.Controls.Add(_aflAutoStatusLbl);
+
             stack.Controls.Add(connRow,  0, 0);
             stack.Controls.Add(modelBox, 0, 1);
             stack.Controls.Add(midRow,   0, 2);
             stack.Controls.Add(runRow,   0, 3);
+            stack.Controls.Add(autoRow,  0, 4);
 
             // 초기 세션(CLS)에 맞는 항목 채우기
             UpdateAflTrainModeItems();
@@ -1727,6 +1772,85 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             }
 
             _aflBtnStatus.Enabled = true;
+
+            // 같은 버튼으로 자동 재학습 On/Off 상태도 함께 갱신
+            await RefreshAutoRetrainStatusAsync();
+        }
+
+        /// <summary>
+        /// phm_auto_retrain DAG의 현재 일시정지(is_paused) 상태를 조회해 체크박스/상태 문구를
+        /// 동기화합니다. DAG가 아직 서버에 배포되지 않았으면 그 사실을 안내합니다.
+        /// </summary>
+        private async System.Threading.Tasks.Task RefreshAutoRetrainStatusAsync()
+        {
+            if (_aflChkAutoRetrain == null || _aflAutoStatusLbl == null) return;
+
+            string airflowUrl = _aflUrl?.Text?.Trim() ?? Services.ServerSettings.Current.AirflowUrl;
+            var s2 = Services.ServerSettings.Current;
+
+            _aflAutoStatusLbl.ForeColor = Color.Gray;
+            _aflAutoStatusLbl.Text      = "확인 중…";
+
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                var info = await client.GetDagInfoAsync(AutoRetrainDagId);
+                if (IsDisposed) return;
+
+                if (info.IsPaused.HasValue)
+                {
+                    _aflSyncingAutoRetrain = true;
+                    _aflChkAutoRetrain.Checked = !info.IsPaused.Value;
+                    _aflSyncingAutoRetrain = false;
+
+                    string sched = string.IsNullOrEmpty(info.Schedule) ? "" : $" ({info.Schedule})";
+                    _aflAutoStatusLbl.Text      = info.IsPaused.Value ? "꺼짐" : $"켜짐{sched}";
+                    _aflAutoStatusLbl.ForeColor = info.IsPaused.Value ? Color.Gray : Color.LightGreen;
+                }
+                else
+                {
+                    _aflAutoStatusLbl.Text      = "DAG 없음 — 서버에 phm_auto_retrain_dag.py 배포 필요";
+                    _aflAutoStatusLbl.ForeColor = Color.OrangeRed;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 자동 재학습 체크박스 On/Off를 phm_auto_retrain DAG의 일시정지 상태로 반영합니다.
+        /// On = 일시정지 해제(is_paused=false), Off = 일시정지(is_paused=true).
+        /// </summary>
+        private async System.Threading.Tasks.Task ToggleAutoRetrainAsync(bool enable)
+        {
+            string airflowUrl = _aflUrl?.Text?.Trim() ?? Services.ServerSettings.Current.AirflowUrl;
+            var s2 = Services.ServerSettings.Current;
+
+            _aflChkAutoRetrain.Enabled  = false;
+            _aflAutoStatusLbl.ForeColor = Color.DodgerBlue;
+            _aflAutoStatusLbl.Text      = enable ? "켜는 중…" : "끄는 중…";
+
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                var result = await client.SetDagPausedAsync(AutoRetrainDagId, !enable);
+                if (result.Ok)
+                {
+                    _aflAutoStatusLbl.Text      = enable ? "켜짐" : "꺼짐";
+                    _aflAutoStatusLbl.ForeColor = enable ? Color.LightGreen : Color.Gray;
+                    AppendDlLog($"[Airflow] 자동 재학습 {(enable ? "활성화" : "비활성화")} ({AutoRetrainDagId})",
+                        enable ? Color.LightGreen : Color.Gray);
+                }
+                else
+                {
+                    _aflAutoStatusLbl.Text      = "오류: " + result.Error;
+                    _aflAutoStatusLbl.ForeColor = Color.OrangeRed;
+                    AppendDlLog($"[Airflow] 자동 재학습 전환 실패: {result.Error}", Color.OrangeRed);
+
+                    // 실패했으므로 체크박스를 실제 서버 상태(직전 상태)로 되돌림
+                    _aflSyncingAutoRetrain = true;
+                    _aflChkAutoRetrain.Checked = !enable;
+                    _aflSyncingAutoRetrain = false;
+                }
+            }
+
+            _aflChkAutoRetrain.Enabled = true;
         }
 
         private static Color StateColor(string state)
