@@ -26,19 +26,28 @@ On/Off:
   CLS(결함진단 분류)는 레이블이 있는 데이터가 필요해 자동으로 확보할 수 없으므로
   제외하고, "연속 수집"으로 무레이블 데이터가 계속 쌓이는 것만으로 재학습 가능한
   이상탐지(AE-CNN + IsolationForest) 모델만 자동 재학습 대상으로 삼습니다.
-    - ae_accel, ae_torque_global, ae_torque, ae_combined_global, ae_combined
+    - ae_accel, ae_torque_global, ae_combined_global (모두 "전역" — 축 구분 없는 단일 모델)
     - isoforest_accel
-  환경변수 PHM_AUTO_RETRAIN_MODES (콤마 구분 문자열)로 재정의할 수 있습니다.
+  ae_torque / ae_combined("축별" 모델)는 기본 목록에서 제외했습니다 — 이 둘은 축 수만큼
+  하나의 태스크 안에서 순차로 전체 학습을 반복해(예: 3축이면 3번) 다른 태스크보다
+  훨씬 오래 걸리고, 특히 ae_combined는 채널 수(가속도+토크)까지 가장 많아 가장 느립니다.
+  자동으로는 전역 모델만 최신 상태로 유지하고, 축별 상세 모델이 필요하면 AI 탭에서
+  수동으로 트리거하세요. 환경변수 PHM_AUTO_RETRAIN_MODES (콤마 구분 문자열)로
+  재정의할 수 있습니다(예: "ae_accel,ae_torque_global,ae_combined_global,ae_torque,ae_combined,isoforest_accel").
+
+  학습 epoch 수도 기본값(150)보다 줄여서(기본 50, PHM_AUTO_RETRAIN_EPOCHS로 재정의)
+  자동 재학습 소요 시간을 단축합니다 — 수동 트리거(phm_retrain)는 영향받지 않습니다.
 
 실제 학습 로직은 phm_retrain_dag.py 의 태스크 함수를 그대로 재사용합니다
 (축 감지, 프로파일 디렉토리, 학습 스크립트 실행 등 ~800줄 로직 중복 방지).
 수동으로 conf를 지정해 이 DAG를 트리거하면(예: 테스트 목적) 그 값이 항상
-우선이며, 스케줄 실행처럼 conf가 비어 있을 때만 위 기본 train_modes가 채워집니다.
+우선이며, 스케줄 실행처럼 conf에 없는 값만 위 기본값(train_modes/epochs)이 채워집니다.
 
 환경변수 (phm_retrain_dag.py 와 공유):
   PHM_SCRIPTS_DIR, PHM_DATA_ROOT, PHM_MODELS_ROOT, PHM_INFERENCE_URL
   PHM_AUTO_RETRAIN_SCHEDULE : Variable "phm_auto_retrain_schedule" 미설정 시 기본값 (기본: 0 2 * * *)
-  PHM_AUTO_RETRAIN_MODES    : 콤마 구분 train_modes (기본: 위 6개 이상탐지 모델)
+  PHM_AUTO_RETRAIN_MODES    : 콤마 구분 train_modes (기본: 위 4개 전역/IsoForest 모델)
+  PHM_AUTO_RETRAIN_EPOCHS   : 자동 재학습 시 학습 epoch 수 (기본: 50)
 
 Airflow Variable:
   phm_auto_retrain_schedule : cron 식 또는 "@daily" 등 매크로. AIForm에서 갱신.
@@ -63,10 +72,8 @@ if str(_DAGS_DIR) not in sys.path:
 
 from phm_retrain_dag import (  # noqa: E402  (sys.path 보강 이후 임포트)
     run_training_ae_accel,
-    run_training_ae_torque,
     run_training_ae_torque_global,
     run_training_ae_combined_global,
-    run_training_ae_combined,
     run_training_isoforest_accel,
     reload_inference_cache,
 )
@@ -83,10 +90,12 @@ _SCHEDULE = Variable.get(
     default_var=os.getenv("PHM_AUTO_RETRAIN_SCHEDULE", "0 2 * * *"),
 )
 
+# 축별(ae_torque/ae_combined) 모델은 기본 목록에서 제외 — 하나의 태스크 안에서
+# 축 수만큼 전체 학습을 순차 반복해 다른 태스크보다 훨씬 오래 걸린다(모듈 docstring 참고).
 _DEFAULT_AUTO_MODES = [
     "ae_accel",
-    "ae_torque_global", "ae_torque",
-    "ae_combined_global", "ae_combined",
+    "ae_torque_global",
+    "ae_combined_global",
     "isoforest_accel",
 ]
 _env_modes = os.getenv("PHM_AUTO_RETRAIN_MODES")
@@ -95,12 +104,15 @@ _AUTO_MODES = (
     if _env_modes else _DEFAULT_AUTO_MODES
 )
 
+# 자동 재학습은 기본 150 epoch 대신 더 적게 돌려 소요 시간을 줄인다 (수동 트리거는 영향 없음).
+_AUTO_EPOCHS = int(os.getenv("PHM_AUTO_RETRAIN_EPOCHS", "50"))
+
 
 def _with_auto_defaults(func):
     """
-    conf에 train_modes가 이미 있으면(수동 트리거) 그대로 두고, 스케줄 실행처럼
-    conf가 비어 있을 때만 자동 재학습 기본 train_modes(_AUTO_MODES)를 채워 넣는
-    래퍼입니다. phm_retrain_dag.py의 각 태스크 함수는 매번 새로
+    conf에 train_modes/epochs가 이미 있으면(수동 트리거) 그 값을 그대로 두고,
+    스케줄 실행처럼 conf에 없는 값만 자동 재학습 기본값(_AUTO_MODES/_AUTO_EPOCHS)으로
+    채워 넣는 래퍼입니다. phm_retrain_dag.py의 각 태스크 함수는 매번 새로
     dict(context["dag_run"].conf or {}) 로 conf를 읽으므로, 같은 task 실행
     안에서 context["dag_run"].conf 를 먼저 덮어써 두면 아래 원본 함수 호출에
     그대로 반영됩니다.
@@ -108,11 +120,17 @@ def _with_auto_defaults(func):
     def _wrapped(**context):
         dag_run = context["dag_run"]
         conf = dict(dag_run.conf or {})
+        changed = False
         if "train_modes" not in conf:
             conf["train_modes"] = _AUTO_MODES
+            changed = True
+        if "epochs" not in conf:
+            conf["epochs"] = _AUTO_EPOCHS
+            changed = True
+        if changed:
             dag_run.conf = conf
-            print(f"[PHM][auto_retrain] conf에 train_modes 없음(스케줄 실행) → "
-                  f"기본값 적용: {_AUTO_MODES}", flush=True)
+            print(f"[PHM][auto_retrain] conf 기본값 적용(스케줄 실행): "
+                  f"train_modes={conf['train_modes']}, epochs={conf['epochs']}", flush=True)
         return func(**context)
     _wrapped.__name__ = getattr(func, "__name__", "wrapped")
     return _wrapped
@@ -153,17 +171,9 @@ with DAG(
         task_id="ae_torque_global_auto",
         python_callable=_with_auto_defaults(run_training_ae_torque_global),
     )
-    t_ae_torque = PythonOperator(
-        task_id="ae_torque_auto",
-        python_callable=_with_auto_defaults(run_training_ae_torque),
-    )
     t_ae_combined_global = PythonOperator(
         task_id="ae_combined_global_auto",
         python_callable=_with_auto_defaults(run_training_ae_combined_global),
-    )
-    t_ae_combined = PythonOperator(
-        task_id="ae_combined_auto",
-        python_callable=_with_auto_defaults(run_training_ae_combined),
     )
     t_isoforest_accel = PythonOperator(
         task_id="isoforest_accel_auto",
@@ -175,6 +185,5 @@ with DAG(
     )
 
     [
-        t_ae_accel, t_ae_torque_global, t_ae_torque,
-        t_ae_combined_global, t_ae_combined, t_isoforest_accel,
+        t_ae_accel, t_ae_torque_global, t_ae_combined_global, t_isoforest_accel,
     ] >> t_reload
