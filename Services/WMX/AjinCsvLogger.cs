@@ -46,6 +46,21 @@ namespace PHM_Project_DockPanel.Services.WMX
         /// <summary>외부(CombinedCsvLogger 등)에서 토크값을 폴링할 수 있도록 공개합니다.</summary>
         public double ReadTorque(int ax) => SafeGet(_getTorque, ax);
 
+        /// <summary>실제 위치 피드백(mm)을 폴링합니다. Ajin: AxmStatusGetActPos / Sim: 내부 시뮬레이션 위치.</summary>
+        public double ReadActPos(int ax) => SafeGet(_getPos, ax);
+
+        /// <summary>
+        /// 명령 위치(mm)를 폴링합니다. 주입되지 않은 경우(getCmdPos 콜백 없음) NaN을 반환합니다 —
+        /// 값을 확보할 수 없을 때 0으로 위장하지 않기 위함입니다.
+        /// </summary>
+        public double ReadCmdPos(int ax) => _getCmdPos != null ? SafeGet(_getCmdPos, ax) : double.NaN;
+
+        /// <summary>
+        /// 실제 속도 피드백(mm/s)을 폴링합니다. 주입되지 않은 경우 NaN을 반환합니다
+        /// (위치 차분 속도는 AjinCsvLogger 자체 폴링 루프 전용이며, 여기서는 신뢰할 수 없는 값을 만들지 않습니다).
+        /// </summary>
+        public double ReadActVel(int ax) => _getVel != null ? SafeGet(_getVel, ax) : double.NaN;
+
         /// <summary>장치 식별자 (InfluxDB device 태그). 미설정 시 _fileSuffix 사용.</summary>
         public string Device { get; set; }
 

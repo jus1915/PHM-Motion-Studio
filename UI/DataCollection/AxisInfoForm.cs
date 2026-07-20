@@ -35,8 +35,8 @@ namespace PHM_Project_DockPanel.Windows
         private CheckBox _chkAccelCollect;     // 가속도 수집
         private CheckBox _chkVelCollect;       // 속도 수집
         private CheckBox _chkTorqueCollect;    // 토크 수집
-        private CheckBox _chkRealtime;
-        private CheckBox _chkContCollect;      // 연속 수집
+        // 연속 수집(CSV) + 실시간 전송(InfluxDB)은 항상 함께 동작하므로 체크박스 하나로 통합.
+        private CheckBox _chkContCollect;      // 연속 수집(실시간 전송 포함)
         private ComboBox _cmbLabel;
         private Label _lblLabelCaption;
         private Button _btnAddLabel, _btnRemoveLabel;
@@ -59,7 +59,8 @@ namespace PHM_Project_DockPanel.Windows
         public CheckBox TorqueCheckBox   => _chkTorqueCollect;
         [Obsolete("Use AccelCheckBox or TorqueCheckBox instead.")]
         public CheckBox LogCheckBox => _chkLogCombined;
-        public CheckBox RealtimeSendCheckBox => _chkRealtime;
+        /// <summary>연속 수집 체크박스 — 실시간 전송(InfluxDB)이 통합되어 함께 켜지고 꺼집니다.</summary>
+        public CheckBox RealtimeSendCheckBox => _chkContCollect;
 
         // DGV 컬럼 인덱스
         private const int COL_SEL   = 0;
@@ -195,16 +196,8 @@ namespace PHM_Project_DockPanel.Windows
             _chkAccelCollect  = new CheckBox { Text = "가속도 수집",      AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
             _chkVelCollect    = new CheckBox { Text = "속도 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
             _chkTorqueCollect = new CheckBox { Text = "토크 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
-            _chkRealtime      = new CheckBox { Text = "실시간 데이터 전송", AutoSize = true, Margin = new Padding(5, 8, 5, 0) };
-            _chkContCollect   = new CheckBox { Text = "연속 수집",        AutoSize = true, Margin = new Padding(5, 8, 5, 0),
+            _chkContCollect   = new CheckBox { Text = "연속 수집 (실시간 전송 포함)", AutoSize = true, Margin = new Padding(5, 8, 5, 0),
                                                ForeColor = System.Drawing.Color.DarkSlateBlue };
-
-            _chkRealtime.CheckedChanged += (s, e) =>
-            {
-                UpdateRealtimeStatusLabel(_chkRealtime.Checked);
-                UpdateLabelEnabled();
-                AppEvents.RaiseAccelRealtimeToggled(_chkRealtime.Checked); // 로그 출력 안 함
-            };
 
             _chkContCollect.CheckedChanged += OnContCollectCheckedChanged;
 
@@ -282,7 +275,6 @@ namespace PHM_Project_DockPanel.Windows
             rightControlPanel.Controls.Add(_chkAccelCollect);
             rightControlPanel.Controls.Add(_chkVelCollect);
             rightControlPanel.Controls.Add(_chkTorqueCollect);
-            rightControlPanel.Controls.Add(_chkRealtime);
             rightControlPanel.Controls.Add(_lblLabelCaption);
             rightControlPanel.Controls.Add(_cmbLabel);
             rightControlPanel.Controls.Add(_btnAddLabel);
@@ -464,8 +456,7 @@ namespace PHM_Project_DockPanel.Windows
 
         private void UpdateLabelEnabled()
         {
-            bool enabled = _chkAccelCollect.Checked || _chkTorqueCollect.Checked
-                        || _chkRealtime.Checked     || _chkContCollect.Checked;
+            bool enabled = _chkAccelCollect.Checked || _chkTorqueCollect.Checked || _chkContCollect.Checked;
             _cmbLabel.Enabled       = enabled;
             _btnAddLabel.Enabled    = enabled;
             _btnRemoveLabel.Enabled = enabled;
@@ -529,11 +520,16 @@ namespace PHM_Project_DockPanel.Windows
                         return;
                     }
 
-                    // 수집 중에는 수집 대상 체크박스와 레이블 변경 불가
+                    // 수집 중에는 수집 대상 체크박스 변경 불가. 레이블은 실시간 전송(InfluxDB) 태그
+                    // 변경에 계속 쓰이므로 켜둔다.
                     _chkAccelCollect.Enabled  = false;
                     _chkTorqueCollect.Enabled = false;
-                    _cmbLabel.Enabled         = _chkRealtime.Checked; // 실시간 전송은 유지
+                    _cmbLabel.Enabled         = true;
                     UpdateContCollectStatusLabel(true);
+
+                    // 연속 수집과 실시간 전송(InfluxDB)은 하나의 체크박스로 통합되어 항상 함께 켜진다.
+                    UpdateRealtimeStatusLabel(true);
+                    AppEvents.RaiseAccelRealtimeToggled(true);
                 }
                 else
                 {
@@ -541,8 +537,11 @@ namespace PHM_Project_DockPanel.Windows
 
                     _chkAccelCollect.Enabled  = true;
                     _chkTorqueCollect.Enabled = true;
-                    _cmbLabel.Enabled         = _chkRealtime.Checked;
+                    UpdateLabelEnabled();
                     UpdateContCollectStatusLabel(false);
+
+                    UpdateRealtimeStatusLabel(false);
+                    AppEvents.RaiseAccelRealtimeToggled(false);
                 }
             }
             finally
@@ -799,7 +798,6 @@ namespace PHM_Project_DockPanel.Windows
                 UpdateCheckedAxesLabel();
                 SetActionButtonsEnabled(false);
 
-                if (_chkRealtime.Checked)    _chkRealtime.Checked    = false;
                 if (_chkContCollect?.Checked == true) _chkContCollect.Checked = false;
 
                 AppEvents.RaiseRequestClearSimulator();

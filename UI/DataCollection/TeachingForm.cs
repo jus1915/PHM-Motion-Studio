@@ -458,6 +458,9 @@ namespace PHM_Project_DockPanel.Windows
                     // 이번 회차 시작 표시
                     UpdateIterationStatus(iterDone + 1, plan.Loop ? -1 : total);
 
+                    // 새 시퀀스(전체 스텝 1회 반복) 시작 → CombinedCsvLogger의 SequenceID 채번
+                    AppEvents.RaiseSequenceStarted();
+
                     foreach (var step in steps)
                     {
                         // 속도 배율 적용: AxisConfigs의 MaxVel을 임시로 스케일

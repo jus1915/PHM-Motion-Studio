@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>VerifyCombinedCsvLogger</AssemblyName>
+    <!-- 검증 전용 콘솔 도구입니다. PHM_Project_DockPanel.exe 를 참조해 CombinedCsvLogger를
+         합성(synthetic) 데이터로 구동하고, CSV 스키마/동기화/MotionID/SequenceID 요구사항을
+         자동으로 점검합니다 (docs/ csv-schema-verification 참고). 배포 대상 아님. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\PHM_Project_DockPanel.csproj" />
+  </ItemGroup>
+
+</Project>

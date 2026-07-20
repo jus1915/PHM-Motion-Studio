@@ -39,6 +39,24 @@ namespace PHM_Project_DockPanel.Services
         private bool _continuousLoggingActive;
         private ContinuousInferenceService _inferenceService;
 
+        // ▶ 축별 MotionID (CSV Ax{n}_MotionID용) — 프로그램 실행 후 축마다 독립적으로 1부터 증가.
+        //   실제 모션 명령을 내리는 지점(RunMotionWithLogging의 MoveAbs 호출부)에서 채번하므로
+        //   토크 임계값 등 간접 추정 없이 "명령 시작" 이벤트를 직접 반영합니다.
+        private const int MaxTrackedAxes = 32; // 실사용 축 수보다 넉넉히 — 배열 재할당(스레드 경합) 방지용 고정 크기
+        private readonly int[] _motionIdCounters = new int[MaxTrackedAxes];
+        private readonly int[] _currentMotionId  = new int[MaxTrackedAxes];
+
+        /// <summary>해당 축의 현재 MotionID. Idle이면 0, Pos 진행 중이면 해당 모션의 ID.</summary>
+        public int GetAxisMotionId(int axisIndex)
+            => (axisIndex >= 0 && axisIndex < MaxTrackedAxes) ? _currentMotionId[axisIndex] : 0;
+
+        // ▶ SequenceID (CSV SequenceID용) — 여러 축이 조합된 장비 시퀀스 1회 반복 식별자.
+        //   TeachingForm이 스텝 목록을 1회 반복 시작할 때마다 AppEvents.SequenceStarted를 발생시키고,
+        //   여기서 구독해 1씩 증가시킵니다. 그 외 경로(AxisInfoForm 단발 이동 등)로 실행된 모션은
+        //   "시퀀스"에 속하지 않으므로 0을 유지합니다 (임의 추정 대신 명확한 시작 이벤트가 있을 때만 채번).
+        private int _sequenceId = 0;
+        public int GetSequenceId() => _sequenceId;
+
         public ControllerManager Controller => _controller;
         public AxisConfig[] AxisConfigs => _axisConfigs;
 
@@ -59,6 +77,9 @@ namespace PHM_Project_DockPanel.Services
             _isAccelEnabled    = isAccelEnabled    ?? (() => false);
             _isVelocityEnabled = isVelocityEnabled ?? (() => false);
             _isTorqueEnabled   = isTorqueEnabled   ?? (() => false);
+
+            // PHM_Motion은 앱 수명 동안 1회만 생성되는 싱글턴이므로 구독 해제 없이 유지합니다.
+            AppEvents.SequenceStarted += () => _sequenceId++;
         }
 
         // === 구 CTOR 호환(기존 단일 토글): 둘 다 동일 토글을 사용 ===
@@ -302,6 +323,15 @@ namespace PHM_Project_DockPanel.Services
                     }
                 }
 
+                // === MotionID 채번 === 실제 명령을 내리는 이 지점에서 축별로 독립적으로 +1
+                // (다른 축의 동작은 이 축의 MotionID 증가에 영향을 주지 않음 — active에 포함된 축만 갱신)
+                foreach (int ax in active)
+                {
+                    if (ax < 0 || ax >= MaxTrackedAxes) continue;
+                    _motionIdCounters[ax]++;
+                    _currentMotionId[ax] = _motionIdCounters[ax];
+                }
+
                 // === 모션 실행 === (commandPos: 축별 MoveCommandScale 보정이 적용된 실제 명령값)
                 _controller.MoveAbs(active.ToArray(), commandPos.ToArray(), vmax.ToArray(), acc.ToArray(), dec.ToArray());
                 await WaitForMotionsEnd(active);
@@ -309,6 +339,10 @@ namespace PHM_Project_DockPanel.Services
             }
             finally
             {
+                // 모션 종료(정상/예외 무관) → 해당 축들의 MotionID를 0(Idle)으로 되돌림
+                foreach (int ax in active)
+                    if (ax >= 0 && ax < MaxTrackedAxes) _currentMotionId[ax] = 0;
+
                 // === 모션 종료 후 정리 ===
                 try
                 {
@@ -424,6 +458,31 @@ namespace PHM_Project_DockPanel.Services
         /// </summary>
         /// <param name="forceAccel">null이면 _isAccelEnabled 델리게이트 사용. UI 스레드 외부에서 호출 시 미리 캡처한 값을 전달하세요.</param>
         /// <param name="forceTorque">null이면 _isTorqueEnabled 델리게이트 사용.</param>
+        /// <summary>
+        /// NI-DAQmx 가속도 하드웨어를 재시도와 함께 시작합니다.
+        /// 직전에 StopContinuousLogging()으로 방금 정지한 직후 곧바로 다시 시작하면, 드라이버가
+        /// 이전 태스크의 리소스(채널 예약)를 아직 완전히 해제하지 못해 Start()가 즉시 실패하는
+        /// 경우가 있다 — 연속 수집 체크박스를 해제했다가 바로 다시 체크하면 데이터가 전혀
+        /// 수집되지 않던 문제의 원인. 짧은 지연 후 재시도해 이 경합을 흡수한다.
+        /// </summary>
+        private bool StartAccelHardwareWithRetry(string dir, string baseName, int maxAttempts = 3, int retryDelayMs = 400)
+        {
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                bool ok = _accelLogger.Start(new int[0], dir, baseName, 0);
+                if (ok) return true;
+
+                if (attempt < maxAttempts)
+                {
+                    AppEvents.RaiseLog(
+                        $"[연속 수집] DAQ 하드웨어 시작 실패 (시도 {attempt}/{maxAttempts}) — " +
+                        $"직전 정지 이후 하드웨어 리소스 해제 대기 중, {retryDelayMs}ms 후 재시도합니다.");
+                    System.Threading.Thread.Sleep(retryDelayMs);
+                }
+            }
+            return false;
+        }
+
         public bool StartContinuousLogging(string label = "", bool? forceAccel = null, bool? forceTorque = null)
         {
             if (_continuousLoggingActive) return true;
@@ -495,13 +554,20 @@ namespace PHM_Project_DockPanel.Services
                 if (useCombined)
                 {
                     // ── 통합 모드: Accel + Torque → 단일 CSV ─────────────
+                    CombinedCsvLogger combined = null;
+                    bool blockReceivedOverridden = false;
                     try
                     {
-                        var combined = new CombinedCsvLogger(
-                            getTorque: ax => _ajinLogger.ReadTorque(ax),
-                            getAxisOp: controllerConnected ? (Func<int, string>)GetAxisOperation : null,
-                            axes:      allAxes,
-                            log:       msg => AppEvents.RaiseLog(msg));
+                        combined = new CombinedCsvLogger(
+                            getTorque:     ax => _ajinLogger.ReadTorque(ax),
+                            getAxisOp:     controllerConnected ? (Func<int, string>)GetAxisOperation : null,
+                            axes:          allAxes,
+                            log:           msg => AppEvents.RaiseLog(msg),
+                            getActPos:     controllerConnected ? (Func<int, double>)(ax => _ajinLogger.ReadActPos(ax)) : null,
+                            getCmdPos:     controllerConnected ? (Func<int, double>)(ax => _ajinLogger.ReadCmdPos(ax)) : null,
+                            getActVel:     controllerConnected ? (Func<int, double>)(ax => _ajinLogger.ReadActVel(ax)) : null,
+                            getMotionId:   controllerConnected ? (Func<int, int>)GetAxisMotionId : null,
+                            getSequenceId: GetSequenceId);
 
                         // DAQ 하드웨어 시작 (CSV 쓰기는 억제, 블록만 combined로 전달)
                         _accelLogger.SuppressCsvWrite = true;
@@ -509,6 +575,7 @@ namespace PHM_Project_DockPanel.Services
                         double accelRate = _accelLogger.SampleRate > 0
                             ? _accelLogger.SampleRate : 1000.0;
                         // ★ 기존 MainForm의 InfluxDB 구독(BlockReceived)을 보존하면서 combined 처리 추가
+                        var localCombined = combined;
                         _savedBlockReceived = _accelLogger.BlockReceived;
                         var prevBlockReceived = _savedBlockReceived;
                         _accelLogger.BlockReceived = (module, block, ts) =>
@@ -521,8 +588,9 @@ namespace PHM_Project_DockPanel.Services
                             if (modIdx < 0) return;
                             int n = block.GetLength(1);
                             if (n <= 0) return;
-                            combined.ProcessAccelBlock(modIdx, block, n, accelRate);
+                            localCombined.ProcessAccelBlock(modIdx, block, n, accelRate);
                         };
+                        blockReceivedOverridden = true;
                         // ★ InfluxDB 토크 피드 연결: combined 내부 1ms 폴링 → InfluxDB
                         {
                             string influxModule = _accelLogger.Modules.Length > 0
@@ -537,27 +605,49 @@ namespace PHM_Project_DockPanel.Services
                             };
                         }
 
-                        bool accelOk = _accelLogger.Start(new int[0], rootDir, baseName, 0);
+                        // DAQ 하드웨어가 실제로 돌아야 combined CSV에도 실제 행이 쓰인다.
+                        // (예전엔 combined.Start()만 성공하면 "시작됨"으로 취급해, DAQ가 실패해도
+                        //  헤더만 있는 빈 CSV가 만들어지는 채로 "연속 수집 중"이라고 표시되었음.)
+                        bool accelOk = StartAccelHardwareWithRetry(rootDir, baseName);
 
-                        // 통합 CSV 시작
-                        bool combOk = combined.Start(rootDir, baseName);
-                        if (combOk)
+                        if (!accelOk)
                         {
-                            _combinedLogger = combined;
-                            anyStarted = true;
-                            AppEvents.RaiseLog("[연속 수집] 통합 CSV 시작 → " + rootDir
-                                + $"  (DAQ 하드웨어: {(accelOk ? "OK" : "실패")})");
+                            AppEvents.RaiseLog("[연속 수집] DAQ 하드웨어 시작 실패 — 통합 CSV를 시작하지 않습니다.");
+                            _accelLogger.BlockReceived = prevBlockReceived;
+                            _savedBlockReceived = null;
+                            _accelLogger.SuppressCsvWrite = false;
                         }
                         else
                         {
-                            AppEvents.RaiseLog("[연속 수집] 통합 CSV 시작 실패");
-                            _accelLogger.SuppressCsvWrite = false;
+                            bool combOk = combined.Start(rootDir, baseName);
+                            if (combOk)
+                            {
+                                _combinedLogger = combined;
+                                anyStarted = true;
+                                AppEvents.RaiseLog("[연속 수집] 통합 CSV 시작 → " + rootDir);
+                            }
+                            else
+                            {
+                                AppEvents.RaiseLog("[연속 수집] 통합 CSV 시작 실패");
+                                _accelLogger.BlockReceived = prevBlockReceived;
+                                _savedBlockReceived = null;
+                                _accelLogger.SuppressCsvWrite = false;
+                                try { _accelLogger.Stop(); } catch { }   // 방금 켠 DAQ 하드웨어 정리
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
                         AppEvents.RaiseLog("[연속 수집] 통합 오류: " + ex.Message);
+                        // 부분 초기화 상태 정리 — BlockReceived가 실패한 combined를 계속 가리키지 않도록 복원
+                        if (blockReceivedOverridden)
+                        {
+                            _accelLogger.BlockReceived = _savedBlockReceived;
+                            _savedBlockReceived = null;
+                        }
                         _accelLogger.SuppressCsvWrite = false;
+                        try { if (_accelLogger.IsRunning) _accelLogger.Stop(); } catch { }
+                        try { combined?.Stop(); } catch { }
                     }
                 }
                 else
@@ -578,7 +668,7 @@ namespace PHM_Project_DockPanel.Services
                                 ? System.Linq.Enumerable.Range(0, _axCntAccel).ToArray()
                                 : null;
                             Directory.CreateDirectory(accelDir);
-                            bool ok = _accelLogger.Start(new int[0], accelDir, baseName, 0);
+                            bool ok = StartAccelHardwareWithRetry(accelDir, baseName);
                             if (ok)
                             {
                                 anyStarted = true;
@@ -619,7 +709,14 @@ namespace PHM_Project_DockPanel.Services
             }
 
             if (!anyStarted)
-                AppEvents.RaiseLog("[연속 수집] 모드 활성화 — 모션별 수집 억제 중 (CSV 저장 없음)");
+            {
+                // 요청한 로거가 하나도 실제로 시작되지 못했으면 "연속 수집 중"으로 위장하지 않는다.
+                // (이전에는 여기서 플래그만 켜둔 채 항상 true를 반환해, 체크박스는 켜져 있는데
+                //  실제로는 아무 데이터도 기록되지 않는 상태가 될 수 있었다.)
+                AppEvents.RaiseLog("[연속 수집] 시작 실패 — 로거가 하나도 시작되지 않았습니다.");
+                _continuousLoggingActive = false;
+                return false;
+            }
 
             // ── 추론 서비스 시작 ─────────────────────────────────────────────
             string inferUrl = ServerSettings.Current.InferenceServerUrl;
@@ -656,7 +753,7 @@ namespace PHM_Project_DockPanel.Services
                 _inferenceService.Start();
             }
 
-            return true;  // 플래그 활성화 성공 → 항상 true 반환
+            return true;  // anyStarted == true 인 경우에만 여기 도달
         }
 
         /// <summary>?뱀젙 異뺤쓽 ?숈옉 ?곹깭瑜?諛섑솚?⑸땲?? "Pos" ?먮뒗 "Idle".</summary>

@@ -133,5 +133,14 @@ namespace PHM_Project_DockPanel.Services
         public static event Action<int> LoopCompleted;
         public static void RaiseLoopCompleted(int count)
             => LoopCompleted?.Invoke(count);
+
+        // ── Teaching Sequence 회차 시작 (SequenceID 채번용) ──────────────────
+        /// <summary>
+        /// TeachingForm 에서 시퀀스 한 회차(전체 스텝 목록 1회 반복)가 시작될 때 발생합니다.
+        /// PHM_Motion 이 이 이벤트를 구독해 CombinedCsvLogger 의 SequenceID 를 1씩 증가시킵니다.
+        /// </summary>
+        public static event Action SequenceStarted;
+        public static void RaiseSequenceStarted()
+            => SequenceStarted?.Invoke();
     }
 }

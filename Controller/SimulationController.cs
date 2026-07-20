@@ -15,6 +15,7 @@ namespace PHM_Project_DockPanel.Controller
     {
         private int _axisCount;
         private double[] _positions;
+        private double[] _cmdPositions;  // mm, 마지막 MoveAbs/MoveRel 목표값 (CSV Ax{n}_CmdPos용)
         private double[] _velocities;   // mm/s, 토크 계산용
         private double[] _torques;      // %, 폴링 로거용
         private bool[] _servoOn;
@@ -131,15 +132,26 @@ namespace PHM_Project_DockPanel.Controller
             lock (_stateLock) { return _torques[axis]; }
         }
 
+        /// <summary>
+        /// 마지막으로 명령된 절대 목표 위치(mm)를 반환합니다. Ajin의 AxmStatusGetCmdPos와 동일한
+        /// 의미로, 모션 중/Idle 무관하게 마지막 목표값을 그대로 유지합니다 (CSV Ax{n}_CmdPos용).
+        /// </summary>
+        public double GetCmdPos(int axis)
+        {
+            if (axis < 0 || axis >= _axisCount) return 0.0;
+            lock (_stateLock) { return _cmdPositions[axis]; }
+        }
+
         private void InitArrays(int count)
         {
-            _axisCount  = count;
-            _positions  = new double[count];
-            _velocities = new double[count];
-            _torques    = new double[count];
-            _servoOn    = new bool[count];
-            _opStates   = new OperationState[count]; // 기본값: Idle (= 0)
-            _motionCts  = new CancellationTokenSource[count];
+            _axisCount     = count;
+            _positions     = new double[count];
+            _cmdPositions  = new double[count];
+            _velocities    = new double[count];
+            _torques       = new double[count];
+            _servoOn       = new bool[count];
+            _opStates      = new OperationState[count]; // 기본값: Idle (= 0)
+            _motionCts     = new CancellationTokenSource[count];
         }
 
         private void StartMotion(int axis, double start, double target,
@@ -149,7 +161,7 @@ namespace PHM_Project_DockPanel.Controller
             _motionCts[axis] = new CancellationTokenSource();
             var cts = _motionCts[axis];
 
-            lock (_stateLock) { _opStates[axis] = OperationState.Pos; }
+            lock (_stateLock) { _opStates[axis] = OperationState.Pos; _cmdPositions[axis] = target; }
 
             _ = Task.Run(async () =>
             {

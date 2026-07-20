@@ -161,6 +161,7 @@ namespace PHM_Project_DockPanel
                     getTorque:  ax => sim.GetTorque(ax),
                     log:        msg => AppEvents.RaiseLog(msg),
                     getVel:     ax => sim.GetVelocity(ax),
+                    getCmdPos:  ax => sim.GetCmdPos(ax),
                     fileSuffix: "Simulator");
                 simLogger.Device = "Simulator";
                 simLogger.TorqueSampled = (dev, ax, val, t) => _influxPublisher?.FeedTorqueSample(dev, ax, val, t);
