@@ -171,6 +171,47 @@ namespace PHM_Project_DockPanel.Services.Core
             catch (Exception ex) { return (false, ex.Message); }
         }
 
+        /// <summary>
+        /// Airflow Variable을 생성하거나 갱신합니다. DAG 파일이 이 값을 (재파싱 시) 읽어가는
+        /// 방식으로 활용됩니다 — 예: phm_auto_retrain_schedule 로 자동 재학습 주기를 UI에서
+        /// 바꿀 수 있게 함. 이미 존재하면 PATCH로 갱신, 없으면 POST로 새로 생성합니다.
+        /// </summary>
+        public async Task<(bool Ok, string Error)> SetVariableAsync(string key, string value)
+        {
+            try
+            {
+                var    body = new { key, value };
+                var    json = JsonSerializer.Serialize(body);
+
+                // 1) 이미 있으면 PATCH로 갱신
+                string patchUrl = $"{_baseUrl}/api/v1/variables/{Uri.EscapeDataString(key)}";
+                using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
+                using (var req = new HttpRequestMessage(new HttpMethod("PATCH"), patchUrl) { Content = content })
+                {
+                    var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                    if (resp.IsSuccessStatusCode) return (true, null);
+
+                    if (resp.StatusCode != System.Net.HttpStatusCode.NotFound)
+                    {
+                        string respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        return (false, $"HTTP {(int)resp.StatusCode}: {respBody.Trim()}");
+                    }
+                }
+
+                // 2) 없으면(404) POST로 새로 생성
+                string postUrl = $"{_baseUrl}/api/v1/variables";
+                using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
+                {
+                    var resp = await _http.PostAsync(postUrl, content).ConfigureAwait(false);
+                    string respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode)
+                        return (false, $"HTTP {(int)resp.StatusCode}: {respBody.Trim()}");
+                    return (true, null);
+                }
+            }
+            catch (Exception ex) { return (false, ex.Message); }
+        }
+
         public void Dispose() { _http?.Dispose(); }
     }
 }

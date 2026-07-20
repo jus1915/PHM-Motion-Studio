@@ -67,11 +67,26 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // (전체 선택 시 DAG 가 axis_count 를 자동 감지해 모든 축 학습)
         private ComboBox _aflAxisCombo;
 
-        // ── 자동 재학습 (별도 DAG: phm_auto_retrain, 스케줄은 서버에 고정, On/Off만 여기서 제어) ──
-        private const string AutoRetrainDagId = "phm_auto_retrain";
+        // ── 자동 재학습 (별도 DAG: phm_auto_retrain — On/Off + 주기(스케줄) 모두 여기서 제어) ──
+        private const string AutoRetrainDagId       = "phm_auto_retrain";
+        private const string AutoRetrainScheduleVar = "phm_auto_retrain_schedule";
         private CheckBox _aflChkAutoRetrain;
         private Label    _aflAutoStatusLbl;
         private bool     _aflSyncingAutoRetrain;   // 상태 조회로 체크박스를 동기화할 때 CheckedChanged 재호출 방지
+        private ComboBox _aflSchedulePreset;       // 자주 쓰는 주기 프리셋 → cron 텍스트박스 채움
+        private TextBox  _aflScheduleCron;         // 실제 적용되는 cron 표현식 (직접 수정 가능)
+        private Button   _aflBtnScheduleApply;
+        private bool     _aflSyncingSchedulePreset;
+
+        private static readonly (string Label, string Cron)[] AutoRetrainSchedulePresets =
+        {
+            ("매일 새벽 2시",        "0 2 * * *"),
+            ("매일 새벽 4시",        "0 4 * * *"),
+            ("6시간마다",            "0 */6 * * *"),
+            ("12시간마다",           "0 */12 * * *"),
+            ("매주 월요일 새벽 2시", "0 2 * * 1"),
+            ("사용자 지정 (cron)",   null),
+        };
 
         public AIForm()
         {
@@ -84,7 +99,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));  // 설정 패널
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 186));  // Airflow 패널 (+26px: 자동 재학습 행)
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 212));  // Airflow 패널 (+26px 자동 재학습 On/Off, +26px 주기 지정)
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 로그 영역
 
             // ── 상단: 설정 2열 ────────────────────────────────────────────
@@ -1327,12 +1342,13 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.FromArgb(0, 140, 220),
             };
 
-            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
+            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6 };
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));  // row0: 서버 연결
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));  // row1: 모델 선택 (박스로 구분)
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));  // row2: 축 / 프로파일 / 라벨
             stack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // row3: 실행 버튼 + 상태
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));  // row4: 자동 재학습 On/Off
+            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));  // row5: 자동 재학습 주기(스케줄) 지정
 
             // ── row0: 서버 연결 (URL / DAG — 자주 안 바뀌므로 작고 옅게) ─────────
             var connRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
@@ -1479,7 +1495,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             var autoRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
             _aflChkAutoRetrain = new CheckBox
             {
-                Text = "자동 재학습 (매일 새벽 2시, AE+IsoForest)",
+                Text = "자동 재학습 (AE+IsoForest, 아래 주기로 실행)",
                 AutoSize = true,
                 Margin = new Padding(0, 5, 10, 0),
             };
@@ -1490,11 +1506,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             };
             var tipAuto = new ToolTip();
             tipAuto.SetToolTip(_aflChkAutoRetrain,
-                "Airflow의 phm_auto_retrain DAG를 켜고 끕니다(스케줄 자체는 서버에 고정).\n" +
-                "켜면 CLS(레이블 필요)는 제외하고 AE-CNN + IsolationForest 이상탐지 모델만\n" +
-                "매일 새벽 2시 자동으로 재학습합니다. 서버가 꺼져 있어도 Airflow 컨테이너가\n" +
-                "살아있으면 그대로 실행됩니다 — 이 앱의 실행 여부와 무관합니다.\n" +
-                "스케줄/대상 모델을 바꾸려면 서버의 phm_auto_retrain_dag.py 환경변수를 수정하세요.");
+                "Airflow의 phm_auto_retrain DAG를 켜고 끕니다 — 아래 '주기'에서 지정한 스케줄로 실행됩니다.\n" +
+                "켜면 CLS(레이블 필요)는 제외하고 AE-CNN + IsolationForest 이상탐지 모델만 자동 재학습합니다.\n" +
+                "서버가(이 앱이) 꺼져 있어도 Airflow 컨테이너가 살아있으면 그대로 실행됩니다.\n" +
+                "대상 모델을 바꾸려면 서버의 phm_auto_retrain_dag.py 환경변수(PHM_AUTO_RETRAIN_MODES)를 수정하세요.");
 
             _aflAutoStatusLbl = new Label
             {
@@ -1506,11 +1521,46 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             autoRow.Controls.Add(_aflChkAutoRetrain);
             autoRow.Controls.Add(_aflAutoStatusLbl);
 
-            stack.Controls.Add(connRow,  0, 0);
-            stack.Controls.Add(modelBox, 0, 1);
-            stack.Controls.Add(midRow,   0, 2);
-            stack.Controls.Add(runRow,   0, 3);
-            stack.Controls.Add(autoRow,  0, 4);
+            // ── row5: 자동 재학습 주기(스케줄) 지정 ────────────────────────────
+            var scheduleRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            scheduleRow.Controls.Add(Lbl2("주기:"));
+
+            _aflSchedulePreset = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList, Width = 150,
+                Margin = new Padding(0, 3, 6, 0),
+            };
+            foreach (var preset in AutoRetrainSchedulePresets)
+                _aflSchedulePreset.Items.Add(preset.Label);
+            _aflSchedulePreset.SelectedIndex = 0;
+            _aflSchedulePreset.SelectedIndexChanged += (s, e) =>
+            {
+                if (_aflSyncingSchedulePreset) return;
+                int idx = _aflSchedulePreset.SelectedIndex;
+                if (idx < 0 || idx >= AutoRetrainSchedulePresets.Length) return;
+                string cron = AutoRetrainSchedulePresets[idx].Cron;
+                if (cron != null) _aflScheduleCron.Text = cron;   // "사용자 지정"이면 null → 텍스트박스 유지
+            };
+
+            _aflScheduleCron = new TextBox { Width = 110, Margin = new Padding(0, 4, 6, 0), Text = "0 2 * * *" };
+            _aflScheduleCron.TextChanged += (s, e) => SyncSchedulePresetFromCron();
+            var tipCron = new ToolTip();
+            tipCron.SetToolTip(_aflScheduleCron,
+                "cron 표현식(분 시 일 월 요일) 또는 \"@daily\" 같은 Airflow 매크로.\n예: \"0 2 * * *\" = 매일 새벽 2시");
+
+            _aflBtnScheduleApply = new Button { Text = "적용", Width = 50, Height = 22, Margin = new Padding(0, 2, 0, 0) };
+            _aflBtnScheduleApply.Click += async (s, e) => await ApplyAutoRetrainScheduleAsync();
+
+            scheduleRow.Controls.Add(_aflSchedulePreset);
+            scheduleRow.Controls.Add(_aflScheduleCron);
+            scheduleRow.Controls.Add(_aflBtnScheduleApply);
+
+            stack.Controls.Add(connRow,     0, 0);
+            stack.Controls.Add(modelBox,    0, 1);
+            stack.Controls.Add(midRow,      0, 2);
+            stack.Controls.Add(runRow,      0, 3);
+            stack.Controls.Add(autoRow,     0, 4);
+            stack.Controls.Add(scheduleRow, 0, 5);
 
             // 초기 세션(CLS)에 맞는 항목 채우기
             UpdateAflTrainModeItems();
@@ -1805,6 +1855,10 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     string sched = string.IsNullOrEmpty(info.Schedule) ? "" : $" ({info.Schedule})";
                     _aflAutoStatusLbl.Text      = info.IsPaused.Value ? "꺼짐" : $"켜짐{sched}";
                     _aflAutoStatusLbl.ForeColor = info.IsPaused.Value ? Color.Gray : Color.LightGreen;
+
+                    // 서버에 실제 반영된(마지막 DAG 재파싱 시점 기준) 주기를 텍스트박스에 표시
+                    if (!string.IsNullOrEmpty(info.Schedule) && _aflScheduleCron != null)
+                        _aflScheduleCron.Text = info.Schedule;
                 }
                 else
                 {
@@ -1812,6 +1866,76 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                     _aflAutoStatusLbl.ForeColor = Color.OrangeRed;
                 }
             }
+        }
+
+        /// <summary>cron 텍스트박스가 알려진 프리셋과 일치하면 콤보를 그 프리셋으로, 아니면 "사용자 지정"으로 맞춥니다.</summary>
+        private void SyncSchedulePresetFromCron()
+        {
+            if (_aflSchedulePreset == null || _aflScheduleCron == null) return;
+            string cron = _aflScheduleCron.Text.Trim();
+
+            int matchIdx = -1;
+            for (int i = 0; i < AutoRetrainSchedulePresets.Length; i++)
+                if (AutoRetrainSchedulePresets[i].Cron == cron) { matchIdx = i; break; }
+
+            int target = matchIdx >= 0 ? matchIdx : AutoRetrainSchedulePresets.Length - 1; // 마지막 = "사용자 지정"
+            if (_aflSchedulePreset.SelectedIndex == target) return;
+
+            _aflSyncingSchedulePreset = true;
+            _aflSchedulePreset.SelectedIndex = target;
+            _aflSyncingSchedulePreset = false;
+        }
+
+        /// <summary>표준 5필드 cron("분 시 일 월 요일") 또는 "@daily" 류 Airflow 매크로인지 검사합니다.</summary>
+        private static bool IsValidCronOrMacro(string cron)
+        {
+            if (string.IsNullOrWhiteSpace(cron)) return false;
+            if (cron.StartsWith("@")) return true;
+            var fields = cron.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            return fields.Length == 5;
+        }
+
+        /// <summary>
+        /// 자동 재학습 주기(cron)를 Airflow Variable(phm_auto_retrain_schedule)로 저장합니다.
+        /// Airflow가 DAG 파일을 다음에 재파싱할 때(보통 수십 초~수 분 내) 반영됩니다.
+        /// </summary>
+        private async System.Threading.Tasks.Task ApplyAutoRetrainScheduleAsync()
+        {
+            string cron = _aflScheduleCron?.Text?.Trim();
+            if (!IsValidCronOrMacro(cron))
+            {
+                MessageBox.Show(
+                    "주기(cron 표현식)가 올바르지 않습니다.\n" +
+                    "예: \"0 2 * * *\" (분 시 일 월 요일, 매일 새벽 2시) 또는 \"@daily\"",
+                    "형식 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string airflowUrl = _aflUrl?.Text?.Trim() ?? Services.ServerSettings.Current.AirflowUrl;
+            var s2 = Services.ServerSettings.Current;
+
+            _aflBtnScheduleApply.Enabled = false;
+            _aflAutoStatusLbl.ForeColor  = Color.DodgerBlue;
+            _aflAutoStatusLbl.Text       = "주기 저장 중…";
+
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                var result = await client.SetVariableAsync(AutoRetrainScheduleVar, cron);
+                if (result.Ok)
+                {
+                    _aflAutoStatusLbl.Text      = $"주기 저장됨: {cron} (다음 DAG 재스캔 시 반영, 최대 수 분 소요)";
+                    _aflAutoStatusLbl.ForeColor = Color.LightGreen;
+                    AppendDlLog($"[Airflow] 자동 재학습 주기 변경: {cron} ({AutoRetrainScheduleVar})", Color.LightGreen);
+                }
+                else
+                {
+                    _aflAutoStatusLbl.Text      = "주기 저장 실패: " + result.Error;
+                    _aflAutoStatusLbl.ForeColor = Color.OrangeRed;
+                    AppendDlLog($"[Airflow] 자동 재학습 주기 저장 실패: {result.Error}", Color.OrangeRed);
+                }
+            }
+
+            _aflBtnScheduleApply.Enabled = true;
         }
 
         /// <summary>

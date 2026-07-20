@@ -7,13 +7,20 @@ phm_retrain(C# AIForm "지금 트리거" 버튼 전용, 수동 트리거만)과 
 On/Off:
   C# AIForm의 "자동 재학습" 체크박스가 이 DAG의 일시정지(is_paused) 상태를
   PATCH /api/v1/dags/phm_auto_retrain 로 전환합니다 (AirflowClient.SetDagPausedAsync).
-  스케줄 자체(아래 PHM_AUTO_RETRAIN_SCHEDULE)는 서버에 고정되어 있고, On/Off는
-  "그 스케줄대로 실제로 돌게 둘지"만 결정합니다 — Airflow 스케줄러가 서버에서
-  계속 관리하므로 C# 앱이 꺼져 있어도 On 상태면 그대로 실행됩니다.
+  On/Off는 "정해진 주기대로 실제로 돌게 둘지"만 결정합니다 — Airflow 스케줄러가
+  서버에서 계속 관리하므로 C# 앱이 꺼져 있어도 On 상태면 그대로 실행됩니다.
   배포 직후에는 is_paused_upon_creation=True 로 항상 꺼진 상태로 시작하며,
   사용자가 AIForm에서 명시적으로 켜야 실행됩니다.
 
-스케줄: 환경변수 PHM_AUTO_RETRAIN_SCHEDULE (기본 "0 2 * * *" = 매일 새벽 2시)
+주기(스케줄): Airflow Variable "phm_auto_retrain_schedule" 값(cron 표현식 또는
+  "@daily" 같은 매크로)을 사용합니다. C# AIForm의 "주기" 입력 + "적용" 버튼이
+  PATCH/POST /api/v1/variables/phm_auto_retrain_schedule 로 이 값을 갱신합니다
+  (AirflowClient.SetVariableAsync). Variable이 아직 없으면 환경변수
+  PHM_AUTO_RETRAIN_SCHEDULE(기본 "0 2 * * *" = 매일 새벽 2시)을 기본값으로 씁니다.
+
+  ⚠ Airflow는 DAG 파일을 주기적으로만 재파싱하므로(기본 수 분 간격), 주기를
+  바꿔도 즉시 반영되지 않고 다음 재스캔 때 반영됩니다 — AIForm에도 이 점을
+  안내합니다.
 
 기본 학습 대상:
   CLS(결함진단 분류)는 레이블이 있는 데이터가 필요해 자동으로 확보할 수 없으므로
@@ -30,8 +37,11 @@ On/Off:
 
 환경변수 (phm_retrain_dag.py 와 공유):
   PHM_SCRIPTS_DIR, PHM_DATA_ROOT, PHM_MODELS_ROOT, PHM_INFERENCE_URL
-  PHM_AUTO_RETRAIN_SCHEDULE : cron 식 (기본: 0 2 * * *)
+  PHM_AUTO_RETRAIN_SCHEDULE : Variable "phm_auto_retrain_schedule" 미설정 시 기본값 (기본: 0 2 * * *)
   PHM_AUTO_RETRAIN_MODES    : 콤마 구분 train_modes (기본: 위 6개 이상탐지 모델)
+
+Airflow Variable:
+  phm_auto_retrain_schedule : cron 식 또는 "@daily" 등 매크로. AIForm에서 갱신.
 """
 
 from __future__ import annotations
@@ -42,6 +52,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from airflow import DAG
+from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 
@@ -62,7 +73,16 @@ from phm_retrain_dag import (  # noqa: E402  (sys.path 보강 이후 임포트)
 )
 
 # ── 기본 설정 ────────────────────────────────────────────────────────────────
-_SCHEDULE = os.getenv("PHM_AUTO_RETRAIN_SCHEDULE", "0 2 * * *")
+# 스케줄은 Airflow Variable로 관리 — AIForm의 "주기" 입력이 이 Variable을 갱신하면
+# Airflow가 DAG 파일을 다음에 재파싱할 때 새 스케줄이 반영된다(코드 배포/재시작 불필요).
+# Variable이 아직 없으면(최초 배포 등) 환경변수 → 하드코드 기본값 순으로 폴백한다.
+# 주: DAG 최상위 코드에서 Variable.get()을 호출하면 매 파싱마다 DB 조회가 발생하지만,
+# 이 DAG 하나뿐이고 파싱 주기가 짧지 않아(기본 수십 초~수 분) 이 규모에선 무리 없다.
+_AUTO_RETRAIN_SCHEDULE_VAR = "phm_auto_retrain_schedule"
+_SCHEDULE = Variable.get(
+    _AUTO_RETRAIN_SCHEDULE_VAR,
+    default_var=os.getenv("PHM_AUTO_RETRAIN_SCHEDULE", "0 2 * * *"),
+)
 
 _DEFAULT_AUTO_MODES = [
     "ae_accel",
