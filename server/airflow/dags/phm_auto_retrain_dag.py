@@ -48,13 +48,12 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
-from airflow.utils.dates import days_ago
 
 # phm_retrain_dag.py 를 같은 dags/ 폴더의 모듈로 임포트하기 위해 sys.path에 추가
 # (Airflow 버전에 따라 dags 폴더가 항상 sys.path에 자동으로 잡히지는 않으므로 명시적으로 보강)
@@ -133,7 +132,12 @@ with DAG(
                 "— On/Off는 AIForm의 '자동 재학습' 체크박스(DAG 일시정지 전환)로 제어",
     default_args=_default_args,
     schedule_interval=_SCHEDULE,
-    start_date=days_ago(1),
+    # 고정된 정적 날짜를 사용해야 함 — days_ago(1) 같은 동적 start_date는 DAG 파일이
+    # 재파싱될 때마다(수십 초~수 분 간격) 값이 계속 바뀌어, 실제 스케줄이 있는 DAG에서는
+    # 스케줄러의 "다음 실행" 계산이 갱신되지 않고 과거 시각에 멈춰버리는 문제가 있다
+    # (Airflow 공식 문서에서 명시적으로 경고하는 안티패턴). catchup=False이므로 과거로
+    # 밀리지 않고 "지금 이후"부터 정상적으로 스케줄링된다.
+    start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=True,   # 배포 직후엔 항상 꺼진 상태 — 사용자가 AIForm에서 명시적으로 켜야 실행
