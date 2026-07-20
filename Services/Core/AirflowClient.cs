@@ -212,6 +212,67 @@ namespace PHM_Project_DockPanel.Services.Core
             catch (Exception ex) { return (false, ex.Message); }
         }
 
+        /// <summary>
+        /// Airflow Variable의 현재 값을 조회합니다. 존재하지 않으면 (null, null)을 반환합니다
+        /// (호출자가 자체 기본값을 쓰면 되므로 "없음"은 오류로 취급하지 않습니다).
+        /// </summary>
+        public async Task<(string Value, string Error)> GetVariableAsync(string key)
+        {
+            try
+            {
+                string url = $"{_baseUrl}/api/v1/variables/{Uri.EscapeDataString(key)}";
+                var resp = await _http.GetAsync(url).ConfigureAwait(false);
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    return (null, null);
+                if (!resp.IsSuccessStatusCode)
+                    return (null, $"HTTP {(int)resp.StatusCode}: {body.Trim()}");
+
+                using (var doc = JsonDocument.Parse(body))
+                    return (doc.RootElement.GetProperty("value").GetString(), null);
+            }
+            catch (Exception ex) { return (null, ex.Message); }
+        }
+
+        /// <summary>
+        /// DAG의 가장 최근 실행 상태와 완료(또는 시작) 시각을 반환합니다.
+        /// GetLatestDagRunAsync과 달리 자동 재학습 상태 표시에 쓰기 위한 시각 정보를 포함합니다.
+        /// </summary>
+        public async Task<(string State, string RunId, string EndDate, string Error)> GetLatestDagRunInfoAsync(
+            string dagId, int limit = 1)
+        {
+            try
+            {
+                string url = $"{_baseUrl}/api/v1/dags/{Uri.EscapeDataString(dagId)}" +
+                             $"/dagRuns?limit={limit}&order_by=-execution_date";
+                var resp = await _http.GetAsync(url).ConfigureAwait(false);
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                if (!resp.IsSuccessStatusCode)
+                    return (null, null, null, $"HTTP {(int)resp.StatusCode}");
+
+                using (var doc = JsonDocument.Parse(body))
+                {
+                    var runs = doc.RootElement.GetProperty("dag_runs");
+                    if (runs.GetArrayLength() == 0) return ("none", null, null, null);
+
+                    var first = runs[0];
+                    string state = first.GetProperty("state").GetString();
+                    string runId = first.GetProperty("dag_run_id").GetString();
+
+                    string endDate = null;
+                    if (first.TryGetProperty("end_date", out var eEl) && eEl.ValueKind == JsonValueKind.String)
+                        endDate = eEl.GetString();
+                    else if (first.TryGetProperty("start_date", out var sEl) && sEl.ValueKind == JsonValueKind.String)
+                        endDate = sEl.GetString();
+
+                    return (state, runId, endDate, null);
+                }
+            }
+            catch (Exception ex) { return (null, null, null, ex.Message); }
+        }
+
         public void Dispose() { _http?.Dispose(); }
     }
 }

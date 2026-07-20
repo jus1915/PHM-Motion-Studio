@@ -38,19 +38,31 @@ On/Off:
   학습 epoch 수도 기본값(150)보다 줄여서(기본 50, PHM_AUTO_RETRAIN_EPOCHS로 재정의)
   자동 재학습 소요 시간을 단축합니다 — 수동 트리거(phm_retrain)는 영향받지 않습니다.
 
+프로파일: 자동 재학습은 기본적으로 "auto_retrain" 프로파일에 저장됩니다(수동 트리거의
+  기본 프로파일 "default"와 분리 — 자동 재학습이 사용자가 수동으로 관리 중인 모델을
+  덮어쓰지 않도록 함). C# AIForm의 "프로파일"/"라벨" 입력 + "적용" 버튼이
+  Airflow Variable phm_auto_retrain_profile / phm_auto_retrain_profile_label 을
+  갱신합니다. isoforest_accel은 파일명이 ae_accel.onnx로 AE-CNN과 겹치므로 자동으로
+  "<프로파일>_isoforest"에 저장됩니다. 프로파일/라벨은 스케줄과 달리 태스크 실행
+  시점에 읽으므로, 값을 바꾸면 DAG 재파싱을 기다리지 않고 다음 실행부터 바로 반영됩니다.
+
 실제 학습 로직은 phm_retrain_dag.py 의 태스크 함수를 그대로 재사용합니다
 (축 감지, 프로파일 디렉토리, 학습 스크립트 실행 등 ~800줄 로직 중복 방지).
 수동으로 conf를 지정해 이 DAG를 트리거하면(예: 테스트 목적) 그 값이 항상
-우선이며, 스케줄 실행처럼 conf에 없는 값만 위 기본값(train_modes/epochs)이 채워집니다.
+우선이며, 스케줄 실행처럼 conf에 없는 값만 위 기본값들이 채워집니다.
 
 환경변수 (phm_retrain_dag.py 와 공유):
   PHM_SCRIPTS_DIR, PHM_DATA_ROOT, PHM_MODELS_ROOT, PHM_INFERENCE_URL
-  PHM_AUTO_RETRAIN_SCHEDULE : Variable "phm_auto_retrain_schedule" 미설정 시 기본값 (기본: 0 2 * * *)
-  PHM_AUTO_RETRAIN_MODES    : 콤마 구분 train_modes (기본: 위 4개 전역/IsoForest 모델)
-  PHM_AUTO_RETRAIN_EPOCHS   : 자동 재학습 시 학습 epoch 수 (기본: 50)
+  PHM_AUTO_RETRAIN_SCHEDULE      : Variable "phm_auto_retrain_schedule" 미설정 시 기본값 (기본: 0 2 * * *)
+  PHM_AUTO_RETRAIN_MODES         : 콤마 구분 train_modes (기본: 위 4개 전역/IsoForest 모델)
+  PHM_AUTO_RETRAIN_EPOCHS        : 자동 재학습 시 학습 epoch 수 (기본: 50)
+  PHM_AUTO_RETRAIN_PROFILE       : Variable "phm_auto_retrain_profile" 미설정 시 기본값 (기본: auto_retrain)
+  PHM_AUTO_RETRAIN_PROFILE_LABEL : Variable "phm_auto_retrain_profile_label" 미설정 시 기본값 (기본: 자동 재학습)
 
 Airflow Variable:
-  phm_auto_retrain_schedule : cron 식 또는 "@daily" 등 매크로. AIForm에서 갱신.
+  phm_auto_retrain_schedule      : cron 식 또는 "@daily" 등 매크로. AIForm "주기"에서 갱신.
+  phm_auto_retrain_profile       : 자동 재학습 저장 프로파일명. AIForm "프로파일"에서 갱신.
+  phm_auto_retrain_profile_label : 프로파일 표시 이름(선택). AIForm "라벨"에서 갱신.
 """
 
 from __future__ import annotations
@@ -107,12 +119,21 @@ _AUTO_MODES = (
 # 자동 재학습은 기본 150 epoch 대신 더 적게 돌려 소요 시간을 줄인다 (수동 트리거는 영향 없음).
 _AUTO_EPOCHS = int(os.getenv("PHM_AUTO_RETRAIN_EPOCHS", "50"))
 
+# 자동 재학습 전용 프로파일 — 수동 트리거(phm_retrain)의 기본 프로파일 "default"와
+# 분리해서, 자동 재학습이 사용자가 수동으로 관리 중인 모델을 덮어쓰지 않게 한다.
+# 스케줄과 달리 프로파일/라벨은 DAG 최상위(파싱 시점)가 아니라 태스크 실행 시점에
+# Variable.get()으로 읽으므로, 값을 바꾸면 재파싱을 기다리지 않고 다음 실행부터 바로 반영된다.
+_AUTO_PROFILE_VAR       = "phm_auto_retrain_profile"
+_AUTO_PROFILE_LABEL_VAR = "phm_auto_retrain_profile_label"
+_AUTO_PROFILE_ENV       = os.getenv("PHM_AUTO_RETRAIN_PROFILE", "auto_retrain")
+_AUTO_PROFILE_LABEL_ENV = os.getenv("PHM_AUTO_RETRAIN_PROFILE_LABEL", "자동 재학습")
+
 
 def _with_auto_defaults(func):
     """
-    conf에 train_modes/epochs가 이미 있으면(수동 트리거) 그 값을 그대로 두고,
-    스케줄 실행처럼 conf에 없는 값만 자동 재학습 기본값(_AUTO_MODES/_AUTO_EPOCHS)으로
-    채워 넣는 래퍼입니다. phm_retrain_dag.py의 각 태스크 함수는 매번 새로
+    conf에 이미 있는 값(수동 트리거)은 그대로 두고, 스케줄 실행처럼 conf에 없는 값만
+    자동 재학습 기본값(train_modes/epochs/profile/isoforest_profile 등)으로 채워 넣는
+    래퍼입니다. phm_retrain_dag.py의 각 태스크 함수는 매번 새로
     dict(context["dag_run"].conf or {}) 로 conf를 읽으므로, 같은 task 실행
     안에서 context["dag_run"].conf 를 먼저 덮어써 두면 아래 원본 함수 호출에
     그대로 반영됩니다.
@@ -121,16 +142,38 @@ def _with_auto_defaults(func):
         dag_run = context["dag_run"]
         conf = dict(dag_run.conf or {})
         changed = False
+
         if "train_modes" not in conf:
             conf["train_modes"] = _AUTO_MODES
             changed = True
         if "epochs" not in conf:
             conf["epochs"] = _AUTO_EPOCHS
             changed = True
+
+        if "profile" not in conf:
+            conf["profile"] = Variable.get(_AUTO_PROFILE_VAR, default_var=_AUTO_PROFILE_ENV)
+            changed = True
+        if "profile_label" not in conf:
+            label = Variable.get(_AUTO_PROFILE_LABEL_VAR, default_var=_AUTO_PROFILE_LABEL_ENV)
+            if label:
+                conf["profile_label"] = label
+                changed = True
+
+        # isoforest_accel은 별도 conf 키(isoforest_profile)를 쓴다 — ae_accel.onnx와
+        # 파일명이 같아 같은 profile_dir을 쓰면 서로 덮어쓰기 때문(_get_isoforest_profile_dir 참고).
+        # 수동 트리거(AIForm)와 동일한 규칙으로 "<profile>_isoforest"를 기본값으로 둔다.
+        if "isoforest_profile" not in conf:
+            conf["isoforest_profile"] = f"{conf['profile']}_isoforest"
+            changed = True
+        if "isoforest_profile_label" not in conf and conf.get("profile_label"):
+            conf["isoforest_profile_label"] = f"{conf['profile_label']} (IsoForest)"
+            changed = True
+
         if changed:
             dag_run.conf = conf
             print(f"[PHM][auto_retrain] conf 기본값 적용(스케줄 실행): "
-                  f"train_modes={conf['train_modes']}, epochs={conf['epochs']}", flush=True)
+                  f"train_modes={conf['train_modes']}, epochs={conf['epochs']}, "
+                  f"profile={conf['profile']}, isoforest_profile={conf['isoforest_profile']}", flush=True)
         return func(**context)
     _wrapped.__name__ = getattr(func, "__name__", "wrapped")
     return _wrapped

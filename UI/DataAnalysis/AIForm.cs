@@ -67,14 +67,19 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         // (전체 선택 시 DAG 가 axis_count 를 자동 감지해 모든 축 학습)
         private ComboBox _aflAxisCombo;
 
-        // ── 자동 재학습 (별도 DAG: phm_auto_retrain — On/Off + 주기(스케줄) 모두 여기서 제어) ──
-        private const string AutoRetrainDagId       = "phm_auto_retrain";
-        private const string AutoRetrainScheduleVar = "phm_auto_retrain_schedule";
+        // ── 자동 재학습 (별도 DAG: phm_auto_retrain — On/Off + 주기(스케줄) + 프로파일 모두 여기서 제어) ──
+        private const string AutoRetrainDagId            = "phm_auto_retrain";
+        private const string AutoRetrainScheduleVar      = "phm_auto_retrain_schedule";
+        private const string AutoRetrainProfileVar       = "phm_auto_retrain_profile";
+        private const string AutoRetrainProfileLabelVar  = "phm_auto_retrain_profile_label";
         private CheckBox _aflChkAutoRetrain;
         private Label    _aflAutoStatusLbl;
         private bool     _aflSyncingAutoRetrain;   // 상태 조회로 체크박스를 동기화할 때 CheckedChanged 재호출 방지
         private ComboBox _aflSchedulePreset;       // 자주 쓰는 주기 프리셋 → cron 텍스트박스 채움
         private TextBox  _aflScheduleCron;         // 실제 적용되는 cron 표현식 (직접 수정 가능)
+        private TextBox  _aflAutoProfile;          // 자동 재학습 전용 프로파일명 (수동 트리거의 "default"와 분리)
+        private TextBox  _aflAutoProfileLabel;     // 자동 재학습 프로파일 표시 이름 (선택)
+        private Button   _aflBtnAutoProfileApply;
         private Button   _aflBtnScheduleApply;
         private bool     _aflSyncingSchedulePreset;
 
@@ -99,7 +104,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         {
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));  // 설정 패널
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 212));  // Airflow 패널 (+26px 자동 재학습 On/Off, +26px 주기 지정)
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));  // Airflow 패널 (+26px 자동 재학습 On/Off, +26px 주기, +26px 프로파일)
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // 로그 영역
 
             // ── 상단: 설정 2열 ────────────────────────────────────────────
@@ -1342,13 +1347,14 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 ForeColor = Color.FromArgb(0, 140, 220),
             };
 
-            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6 };
+            var stack = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7 };
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));  // row0: 서버 연결
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));  // row1: 모델 선택 (박스로 구분)
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));  // row2: 축 / 프로파일 / 라벨
             stack.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // row3: 실행 버튼 + 상태
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));  // row4: 자동 재학습 On/Off
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));  // row5: 자동 재학습 주기(스케줄) 지정
+            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));  // row6: 자동 재학습 프로파일/라벨 지정
 
             // ── row0: 서버 연결 (URL / DAG — 자주 안 바뀌므로 작고 옅게) ─────────
             var connRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
@@ -1555,12 +1561,38 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             scheduleRow.Controls.Add(_aflScheduleCron);
             scheduleRow.Controls.Add(_aflBtnScheduleApply);
 
+            // ── row6: 자동 재학습 전용 프로파일/라벨 지정 ──────────────────────
+            // 수동 트리거의 "default" 프로파일과 분리해서, 자동 재학습이 수동으로
+            // 관리 중인 모델을 덮어쓰지 않도록 함. IsolationForest는 자동으로
+            // "<프로파일>_isoforest"에 저장됨(DAG의 _with_auto_defaults 참고).
+            var profileRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            profileRow.Controls.Add(Lbl2("프로파일:"));
+
+            _aflAutoProfile = new TextBox { Width = 100, Margin = new Padding(0, 4, 10, 0), Text = "auto_retrain" };
+            var tipAutoProfile = new ToolTip();
+            tipAutoProfile.SetToolTip(_aflAutoProfile,
+                "자동 재학습이 저장할 프로파일 디렉토리 이름.\n" +
+                "수동 트리거가 쓰는 'default'와 분리해 서로 덮어쓰지 않게 합니다.\n" +
+                "IsolationForest는 자동으로 '<프로파일>_isoforest'에 저장됩니다.");
+            profileRow.Controls.Add(_aflAutoProfile);
+
+            profileRow.Controls.Add(Lbl2("라벨:"));
+            _aflAutoProfileLabel = new TextBox { Width = 110, Margin = new Padding(0, 4, 6, 0) };
+            var tipAutoProfileLabel = new ToolTip();
+            tipAutoProfileLabel.SetToolTip(_aflAutoProfileLabel, "프로파일 표시 이름 (선택)\n예: 자동 재학습");
+            profileRow.Controls.Add(_aflAutoProfileLabel);
+
+            _aflBtnAutoProfileApply = new Button { Text = "적용", Width = 50, Height = 22, Margin = new Padding(0, 2, 0, 0) };
+            _aflBtnAutoProfileApply.Click += async (s, e) => await ApplyAutoRetrainProfileAsync();
+            profileRow.Controls.Add(_aflBtnAutoProfileApply);
+
             stack.Controls.Add(connRow,     0, 0);
             stack.Controls.Add(modelBox,    0, 1);
             stack.Controls.Add(midRow,      0, 2);
             stack.Controls.Add(runRow,      0, 3);
             stack.Controls.Add(autoRow,     0, 4);
             stack.Controls.Add(scheduleRow, 0, 5);
+            stack.Controls.Add(profileRow,  0, 6);
 
             // 초기 세션(CLS)에 맞는 항목 채우기
             UpdateAflTrainModeItems();
@@ -1846,26 +1878,104 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 var info = await client.GetDagInfoAsync(AutoRetrainDagId);
                 if (IsDisposed) return;
 
-                if (info.IsPaused.HasValue)
-                {
-                    _aflSyncingAutoRetrain = true;
-                    _aflChkAutoRetrain.Checked = !info.IsPaused.Value;
-                    _aflSyncingAutoRetrain = false;
-
-                    string sched = string.IsNullOrEmpty(info.Schedule) ? "" : $" ({info.Schedule})";
-                    _aflAutoStatusLbl.Text      = info.IsPaused.Value ? "꺼짐" : $"켜짐{sched}";
-                    _aflAutoStatusLbl.ForeColor = info.IsPaused.Value ? Color.Gray : Color.LightGreen;
-
-                    // 서버에 실제 반영된(마지막 DAG 재파싱 시점 기준) 주기를 텍스트박스에 표시
-                    if (!string.IsNullOrEmpty(info.Schedule) && _aflScheduleCron != null)
-                        _aflScheduleCron.Text = info.Schedule;
-                }
-                else
+                if (!info.IsPaused.HasValue)
                 {
                     _aflAutoStatusLbl.Text      = "DAG 없음 — 서버에 phm_auto_retrain_dag.py 배포 필요";
                     _aflAutoStatusLbl.ForeColor = Color.OrangeRed;
+                    return;
+                }
+
+                _aflSyncingAutoRetrain = true;
+                _aflChkAutoRetrain.Checked = !info.IsPaused.Value;
+                _aflSyncingAutoRetrain = false;
+
+                // 서버에 실제 반영된(마지막 DAG 재파싱 시점 기준) 주기를 텍스트박스에 표시
+                if (!string.IsNullOrEmpty(info.Schedule) && _aflScheduleCron != null)
+                    _aflScheduleCron.Text = info.Schedule;
+
+                // 현재 설정된 자동 재학습 프로파일/라벨 조회 (없으면 DAG 자체 기본값 "auto_retrain" 안내)
+                var profVar = await client.GetVariableAsync(AutoRetrainProfileVar);
+                if (IsDisposed) return;
+                if (_aflAutoProfile != null)
+                    _aflAutoProfile.Text = string.IsNullOrEmpty(profVar.Value) ? "auto_retrain" : profVar.Value;
+
+                var labelVar = await client.GetVariableAsync(AutoRetrainProfileLabelVar);
+                if (IsDisposed) return;
+                if (_aflAutoProfileLabel != null)
+                    _aflAutoProfileLabel.Text = labelVar.Value ?? "";
+
+                // 가장 최근 실행의 상태/완료 시각 조회
+                var lastRun = await client.GetLatestDagRunInfoAsync(AutoRetrainDagId);
+                if (IsDisposed) return;
+
+                string sched = string.IsNullOrEmpty(info.Schedule) ? "" : $" ({info.Schedule})";
+                string onOff = info.IsPaused.Value ? "꺼짐" : $"켜짐{sched}";
+
+                string lastRunText = "";
+                if (!string.IsNullOrEmpty(lastRun.State) && lastRun.State != "none")
+                    lastRunText = $" · 마지막 실행: {FormatUtcTimestamp(lastRun.EndDate)} {lastRun.State} (프로파일: {_aflAutoProfile?.Text})";
+
+                _aflAutoStatusLbl.Text      = onOff + lastRunText;
+                _aflAutoStatusLbl.ForeColor = info.IsPaused.Value ? Color.Gray : Color.LightGreen;
+            }
+        }
+
+        /// <summary>ISO8601 시각 문자열을 "yyyy-MM-dd HH:mm UTC" 형태로 표시합니다. 파싱 실패 시 원본을 그대로 반환.</summary>
+        private static string FormatUtcTimestamp(string iso)
+        {
+            if (string.IsNullOrEmpty(iso)) return "?";
+            if (DateTimeOffset.TryParse(iso, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dto))
+                return dto.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture);
+            return iso;
+        }
+
+        /// <summary>
+        /// 자동 재학습 전용 프로파일/라벨을 Airflow Variable로 저장합니다.
+        /// 스케줄과 마찬가지로 다음 DAG 재파싱이 아니라 다음 태스크 실행 시점에 바로 반영됩니다
+        /// (프로파일은 태스크 실행 중에 읽으므로 스케줄처럼 재파싱을 기다릴 필요가 없음).
+        /// </summary>
+        private async System.Threading.Tasks.Task ApplyAutoRetrainProfileAsync()
+        {
+            string profile = _aflAutoProfile?.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(profile))
+            {
+                MessageBox.Show("프로파일 이름을 입력하세요.", "입력 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string label = _aflAutoProfileLabel?.Text?.Trim() ?? "";
+
+            string airflowUrl = _aflUrl?.Text?.Trim() ?? Services.ServerSettings.Current.AirflowUrl;
+            var s2 = Services.ServerSettings.Current;
+
+            _aflBtnAutoProfileApply.Enabled = false;
+            _aflAutoStatusLbl.ForeColor     = Color.DodgerBlue;
+            _aflAutoStatusLbl.Text          = "프로파일 저장 중…";
+
+            using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
+            {
+                var r1 = await client.SetVariableAsync(AutoRetrainProfileVar, profile);
+                var r2 = await client.SetVariableAsync(AutoRetrainProfileLabelVar, label);
+
+                if (r1.Ok && r2.Ok)
+                {
+                    _aflAutoStatusLbl.Text      = $"프로파일 저장됨: {profile}";
+                    _aflAutoStatusLbl.ForeColor = Color.LightGreen;
+                    AppendDlLog(
+                        $"[Airflow] 자동 재학습 프로파일 변경: {profile}" +
+                        (string.IsNullOrEmpty(label) ? "" : $" ({label})"),
+                        Color.LightGreen);
+                }
+                else
+                {
+                    string err = !r1.Ok ? r1.Error : r2.Error;
+                    _aflAutoStatusLbl.Text      = "프로파일 저장 실패: " + err;
+                    _aflAutoStatusLbl.ForeColor = Color.OrangeRed;
+                    AppendDlLog($"[Airflow] 자동 재학습 프로파일 저장 실패: {err}", Color.OrangeRed);
                 }
             }
+
+            _aflBtnAutoProfileApply.Enabled = true;
         }
 
         /// <summary>cron 텍스트박스가 알려진 프리셋과 일치하면 콤보를 그 프리셋으로, 아니면 "사용자 지정"으로 맞춥니다.</summary>
