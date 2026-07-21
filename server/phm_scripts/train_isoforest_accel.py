@@ -128,6 +128,11 @@ def main() -> None:
     contamination = params.get("contamination", 0.01)
     seed = int(params.get("seed", 42))
 
+    # 최근 N일 이내 수집된 CSV만 사용 (데이터 드리프트 반영용 — 주기적 자동 재학습 전용).
+    # None/0 이하면 비활성(전체 히스토리, 기존 동작).
+    recent_days_raw = params.get("recent_days")
+    recent_days = float(recent_days_raw) if recent_days_raw else None
+
     # ── 데이터 로드 ──────────────────────────────────────────────────────────
     # train_dl_model.py의 로더를 그대로 써서 기존 ae_accel(AE-CNN1D)와
     # 동일한 CSV 파싱 규칙을 공유한다.
@@ -165,6 +170,7 @@ def main() -> None:
             normalize=False,
             filter_op_column=None,
             use_op_filter=False,
+            recent_days=recent_days,
         )
         found = list(Path(data_dir).rglob("*.csv"))
         first_csv = str(found[0]) if found else None

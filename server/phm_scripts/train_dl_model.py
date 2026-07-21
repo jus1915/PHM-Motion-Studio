@@ -108,6 +108,10 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset
 from sklearn.model_selection import StratifiedShuffleSplit
 
+# 같은 디렉터리(phm_scripts/)의 sibling 모듈 — 스크립트를 직접 실행하면
+# 그 디렉터리가 sys.path[0]에 자동으로 잡히므로 별도 sys.path 조작 불필요.
+from recent_data_filter import filter_recent_files
+
 
 # ── 데이터 로딩 ──────────────────────────────────────────────────────────────
 
@@ -410,6 +414,7 @@ def load_windows_from_dir(
     add_derivative: bool = False,
     add_abs: bool = False,
     use_op_filter: bool = True,
+    recent_days: Optional[float] = None,
 ) -> Tuple[List[Tuple[np.ndarray, int]], List[int]]:
     """디렉터리를 재귀 탐색해 모든 CSV에서 윈도우를 추출합니다.
 
@@ -426,6 +431,8 @@ def load_windows_from_dir(
         window_size : 윈도우 크기
         stride      : 슬라이딩 스트라이드
         sensor_type : "accel" 이면 경로에 /Accel/ 포함 파일만, "torque" 이면 /Torque/ 만 처리
+        recent_days : 지정 시 최근 N일 이내에 수집된 CSV만 사용 (데이터 드리프트 반영용).
+                      None/0 이하면 비활성(기존 동작 — 전체 히스토리 사용).
 
     Returns:
         (windows, seg_ids) — 각 윈도우가 속한 구간의 전역 고유 ID 목록 (windows와 1:1 대응)
@@ -439,7 +446,13 @@ def load_windows_from_dir(
     csv_files = list(Path(data_dir).rglob("*.csv"))
     if not csv_files:
         print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
-        return []
+        return [], []  # (windows, seg_ids) 튜플 형태 유지 — 호출부의 언패킹이 깨지지 않도록
+
+    csv_files = filter_recent_files(csv_files, recent_days)
+    if not csv_files:
+        print(f"[data] 경고: 최근 {recent_days}일 필터 적용 후 남은 CSV가 없습니다 "
+              f"— recent_days를 늘리거나 0으로 비활성화하세요.", file=sys.stderr)
+        return [], []
 
     print(f"[data] rglob 결과: {len(csv_files)}개 CSV  (예: {csv_files[0] if csv_files else 'N/A'})", file=sys.stderr)
 
@@ -704,10 +717,12 @@ def load_segments_from_dir(
     sensor_type: str = "",
     filter_op_column: Optional[str] = None,
     use_op_filter: bool = True,
+    recent_days: Optional[float] = None,
 ) -> List[Tuple[np.ndarray, int]]:
     """디렉터리를 재귀 탐색해 구간(segment) 목록을 반환합니다.
 
     윈도우 추출은 하지 않습니다.
+    recent_days 지정 시 최근 N일 이내에 수집된 CSV만 사용합니다(None/0 이하면 비활성).
     """
     name_to_id = {n.lower(): i for i, n in enumerate(class_names)}
     all_segments: List[Tuple[np.ndarray, int]] = []
@@ -716,6 +731,12 @@ def load_segments_from_dir(
     csv_files = list(Path(data_dir).rglob("*.csv"))
     if not csv_files:
         print(f"[data] 경고: {data_dir} 에서 CSV 파일을 찾지 못했습니다.", file=sys.stderr)
+        return []
+
+    csv_files = filter_recent_files(csv_files, recent_days)
+    if not csv_files:
+        print(f"[data] 경고: 최근 {recent_days}일 필터 적용 후 남은 CSV가 없습니다 "
+              f"— recent_days를 늘리거나 0으로 비활성화하세요.", file=sys.stderr)
         return []
 
     # sensor_type 필터 — CSV 헤더 감지 우선, 경로/파일명은 fallback.
@@ -1809,6 +1830,11 @@ def main() -> None:
     window_size: int = int(params.get("window_size", 1024))
     stride: int = int(params.get("stride", 512))
 
+    # 최근 N일 이내 수집된 CSV만 사용 (데이터 드리프트 반영용 — 주기적 자동 재학습 전용,
+    # 수동 트리거는 지정 안 하는 게 기본이라 영향 없음). None/0 이하면 비활성(전체 히스토리).
+    recent_days_raw = params.get("recent_days")
+    recent_days: Optional[float] = float(recent_days_raw) if recent_days_raw else None
+
     add_fft:        bool = bool(params.get("add_fft_channels", False))
     add_derivative: bool = bool(params.get("add_derivative_channels", False))
     add_abs:        bool = bool(params.get("add_abs_channels", False))
@@ -1869,7 +1895,7 @@ def main() -> None:
                 sensor_type=params.get("sensor_type", ""), normalize=False,
                 filter_op_column=filter_op_column,
                 add_fft=add_fft, add_derivative=add_derivative, add_abs=add_abs,
-                use_op_filter=use_op_filter,
+                use_op_filter=use_op_filter, recent_days=recent_days,
             )
         else:
             print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))
@@ -1901,7 +1927,7 @@ def main() -> None:
                 label_column=label_column, class_names=load_class_names,
                 window_size=window_size, sensor_type=params.get("sensor_type", ""),
                 filter_op_column=filter_op_column,
-                use_op_filter=use_op_filter,
+                use_op_filter=use_op_filter, recent_days=recent_days,
             )
         else:
             print(json.dumps({"error": "params에 'data_dir' 또는 'csv_files' 중 하나가 필요합니다."}))

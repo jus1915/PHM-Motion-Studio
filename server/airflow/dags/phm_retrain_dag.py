@@ -729,6 +729,10 @@ def run_training_isoforest_accel(**context) -> None:
         "seed":                int(conf.get("seed", 42)),
         "mlflow_tracking_uri": conf.get("mlflow_tracking_uri", _DEFAULT_CONF["mlflow_tracking_uri"]),
         "mlflow_experiment":   "PHM-IsoForest",
+        # 최근 N일 이내 수집된 CSV만 사용(데이터 드리프트 반영) — auto_retrain DAG가
+        # conf["recent_days"]를 채워 넣을 때만 의미 있음. 수동 트리거는 미지정 시 None
+        # (train_isoforest_accel.py에서 비활성 처리 → 기존처럼 전체 히스토리 사용).
+        "recent_days":         conf.get("recent_days"),
     }
     params["output"] = str(profile_dir / "ae_accel.onnx")
     print(f"[PHM] IsolationForest 가속도 모델 출력: {params['output']}", flush=True)

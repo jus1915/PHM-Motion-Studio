@@ -72,6 +72,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private const string AutoRetrainScheduleVar      = "phm_auto_retrain_schedule";
         private const string AutoRetrainProfileVar       = "phm_auto_retrain_profile";
         private const string AutoRetrainProfileLabelVar  = "phm_auto_retrain_profile_label";
+        private const string AutoRetrainRecentDaysVar    = "phm_auto_retrain_recent_days";
         private CheckBox _aflChkAutoRetrain;
         private Label    _aflAutoStatusLbl;
         private bool     _aflSyncingAutoRetrain;   // 상태 조회로 체크박스를 동기화할 때 CheckedChanged 재호출 방지
@@ -79,6 +80,7 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         private TextBox  _aflScheduleCron;         // 실제 적용되는 cron 표현식 (직접 수정 가능)
         private TextBox  _aflAutoProfile;          // 자동 재학습 전용 프로파일명 (수동 트리거의 "default"와 분리)
         private TextBox  _aflAutoProfileLabel;     // 자동 재학습 프로파일 표시 이름 (선택)
+        private NumericUpDown _aflAutoRecentDays;  // 최근 N일 데이터만 사용(드리프트 반영). 0=전체 히스토리
         private Button   _aflBtnAutoProfileApply;
         private Button   _aflBtnScheduleApply;
         private bool     _aflSyncingSchedulePreset;
@@ -1561,14 +1563,15 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             scheduleRow.Controls.Add(_aflScheduleCron);
             scheduleRow.Controls.Add(_aflBtnScheduleApply);
 
-            // ── row6: 자동 재학습 전용 프로파일/라벨 지정 ──────────────────────
-            // 수동 트리거의 "default" 프로파일과 분리해서, 자동 재학습이 수동으로
+            // ── row6: 자동 재학습 전용 프로파일/라벨/최근 N일 지정 ──────────────
+            // 프로파일: 수동 트리거의 "default"와 분리해서, 자동 재학습이 수동으로
             // 관리 중인 모델을 덮어쓰지 않도록 함. IsolationForest는 자동으로
             // "<프로파일>_isoforest"에 저장됨(DAG의 _with_auto_defaults 참고).
+            // 최근 N일: 데이터 드리프트 반영용 — 전체 히스토리 대신 최근 N일치만 학습.
             var profileRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
             profileRow.Controls.Add(Lbl2("프로파일:"));
 
-            _aflAutoProfile = new TextBox { Width = 100, Margin = new Padding(0, 4, 10, 0), Text = "auto_retrain" };
+            _aflAutoProfile = new TextBox { Width = 90, Margin = new Padding(0, 4, 10, 0), Text = "auto_retrain" };
             var tipAutoProfile = new ToolTip();
             tipAutoProfile.SetToolTip(_aflAutoProfile,
                 "자동 재학습이 저장할 프로파일 디렉토리 이름.\n" +
@@ -1577,13 +1580,32 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
             profileRow.Controls.Add(_aflAutoProfile);
 
             profileRow.Controls.Add(Lbl2("라벨:"));
-            _aflAutoProfileLabel = new TextBox { Width = 110, Margin = new Padding(0, 4, 6, 0) };
+            _aflAutoProfileLabel = new TextBox { Width = 90, Margin = new Padding(0, 4, 10, 0) };
             var tipAutoProfileLabel = new ToolTip();
             tipAutoProfileLabel.SetToolTip(_aflAutoProfileLabel, "프로파일 표시 이름 (선택)\n예: 자동 재학습");
             profileRow.Controls.Add(_aflAutoProfileLabel);
 
+            profileRow.Controls.Add(Lbl2("최근:"));
+            _aflAutoRecentDays = new NumericUpDown
+            {
+                Minimum = 0, Maximum = 3650, Value = 30, Width = 55,
+                Margin = new Padding(0, 4, 4, 0),
+            };
+            profileRow.Controls.Add(_aflAutoRecentDays);
+            profileRow.Controls.Add(new Label
+            {
+                Text = "일만 사용(0=전체)", AutoSize = true,
+                Margin = new Padding(0, 7, 10, 0), ForeColor = Color.Gray,
+                Font = new Font(Font.FontFamily, 8f),
+            });
+            var tipRecentDays = new ToolTip();
+            tipRecentDays.SetToolTip(_aflAutoRecentDays,
+                "최근 N일 이내에 수집된 CSV만 학습에 사용합니다(데이터 드리프트 반영).\n" +
+                "0이면 비활성화(전체 히스토리, 수동 트리거와 동일).\n" +
+                "⚠ 너무 좁게 잡으면 드물게만 나오는 정상 패턴을 놓쳐 오탐이 늘 수 있습니다.");
+
             _aflBtnAutoProfileApply = new Button { Text = "적용", Width = 50, Height = 22, Margin = new Padding(0, 2, 0, 0) };
-            _aflBtnAutoProfileApply.Click += async (s, e) => await ApplyAutoRetrainProfileAsync();
+            _aflBtnAutoProfileApply.Click += async (s, e) => await ApplyAutoRetrainDataSettingsAsync();
             profileRow.Controls.Add(_aflBtnAutoProfileApply);
 
             stack.Controls.Add(connRow,     0, 0);
@@ -1904,6 +1926,16 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 if (_aflAutoProfileLabel != null)
                     _aflAutoProfileLabel.Text = labelVar.Value ?? "";
 
+                var recentDaysVar = await client.GetVariableAsync(AutoRetrainRecentDaysVar);
+                if (IsDisposed) return;
+                if (_aflAutoRecentDays != null)
+                {
+                    decimal parsedDays;
+                    _aflAutoRecentDays.Value = decimal.TryParse(recentDaysVar.Value, out parsedDays)
+                        ? Math.Max(_aflAutoRecentDays.Minimum, Math.Min(_aflAutoRecentDays.Maximum, parsedDays))
+                        : 30m;
+                }
+
                 // 가장 최근 실행의 상태/완료 시각 조회
                 var lastRun = await client.GetLatestDagRunInfoAsync(AutoRetrainDagId);
                 if (IsDisposed) return;
@@ -1931,11 +1963,11 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
         }
 
         /// <summary>
-        /// 자동 재학습 전용 프로파일/라벨을 Airflow Variable로 저장합니다.
-        /// 스케줄과 마찬가지로 다음 DAG 재파싱이 아니라 다음 태스크 실행 시점에 바로 반영됩니다
-        /// (프로파일은 태스크 실행 중에 읽으므로 스케줄처럼 재파싱을 기다릴 필요가 없음).
+        /// 자동 재학습 전용 프로파일/라벨/최근 N일 설정을 Airflow Variable로 저장합니다.
+        /// 스케줄과 달리 다음 DAG 재파싱이 아니라 다음 태스크 실행 시점에 바로 반영됩니다
+        /// (태스크 실행 중에 읽으므로 스케줄처럼 재파싱을 기다릴 필요가 없음).
         /// </summary>
-        private async System.Threading.Tasks.Task ApplyAutoRetrainProfileAsync()
+        private async System.Threading.Tasks.Task ApplyAutoRetrainDataSettingsAsync()
         {
             string profile = _aflAutoProfile?.Text?.Trim();
             if (string.IsNullOrWhiteSpace(profile))
@@ -1944,34 +1976,38 @@ namespace PHM_Project_DockPanel.UI.DataAnalysis
                 return;
             }
             string label = _aflAutoProfileLabel?.Text?.Trim() ?? "";
+            string recentDays = NudCurrent(_aflAutoRecentDays, 30m).ToString("0", CultureInfo.InvariantCulture);
 
             string airflowUrl = _aflUrl?.Text?.Trim() ?? Services.ServerSettings.Current.AirflowUrl;
             var s2 = Services.ServerSettings.Current;
 
             _aflBtnAutoProfileApply.Enabled = false;
             _aflAutoStatusLbl.ForeColor     = Color.DodgerBlue;
-            _aflAutoStatusLbl.Text          = "프로파일 저장 중…";
+            _aflAutoStatusLbl.Text          = "설정 저장 중…";
 
             using (var client = new Services.Core.AirflowClient(airflowUrl, s2.AirflowUser, s2.AirflowPassword))
             {
                 var r1 = await client.SetVariableAsync(AutoRetrainProfileVar, profile);
                 var r2 = await client.SetVariableAsync(AutoRetrainProfileLabelVar, label);
+                var r3 = await client.SetVariableAsync(AutoRetrainRecentDaysVar, recentDays);
 
-                if (r1.Ok && r2.Ok)
+                if (r1.Ok && r2.Ok && r3.Ok)
                 {
-                    _aflAutoStatusLbl.Text      = $"프로파일 저장됨: {profile}";
+                    string recentDesc = recentDays == "0" ? "전체 히스토리" : $"최근 {recentDays}일";
+                    _aflAutoStatusLbl.Text      = $"설정 저장됨: {profile} / {recentDesc}";
                     _aflAutoStatusLbl.ForeColor = Color.LightGreen;
                     AppendDlLog(
-                        $"[Airflow] 자동 재학습 프로파일 변경: {profile}" +
-                        (string.IsNullOrEmpty(label) ? "" : $" ({label})"),
+                        $"[Airflow] 자동 재학습 설정 변경: 프로파일={profile}" +
+                        (string.IsNullOrEmpty(label) ? "" : $" ({label})") +
+                        $", {recentDesc}",
                         Color.LightGreen);
                 }
                 else
                 {
-                    string err = !r1.Ok ? r1.Error : r2.Error;
-                    _aflAutoStatusLbl.Text      = "프로파일 저장 실패: " + err;
+                    string err = !r1.Ok ? r1.Error : (!r2.Ok ? r2.Error : r3.Error);
+                    _aflAutoStatusLbl.Text      = "설정 저장 실패: " + err;
                     _aflAutoStatusLbl.ForeColor = Color.OrangeRed;
-                    AppendDlLog($"[Airflow] 자동 재학습 프로파일 저장 실패: {err}", Color.OrangeRed);
+                    AppendDlLog($"[Airflow] 자동 재학습 설정 저장 실패: {err}", Color.OrangeRed);
                 }
             }
 

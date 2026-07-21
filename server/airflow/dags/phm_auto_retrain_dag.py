@@ -46,6 +46,18 @@ On/Off:
   "<프로파일>_isoforest"에 저장됩니다. 프로파일/라벨은 스케줄과 달리 태스크 실행
   시점에 읽으므로, 값을 바꾸면 DAG 재파싱을 기다리지 않고 다음 실행부터 바로 반영됩니다.
 
+최근 N일 데이터만 사용(드리프트 반영): 기본적으로 최근 30일 이내에 수집된 CSV만
+  학습에 사용합니다(전체 히스토리 대신). 장비 상태가 서서히 변하는(드리프트) 것을
+  "정상"으로 계속 따라가되, 파일명 앞부분의 타임스탬프(yyyyMMdd_HHmmss)를 기준으로
+  판단합니다(recent_data_filter.py — 파일 전송 중 mtime이 바뀌어도 영향받지 않음).
+  0으로 설정하면 비활성화(전체 히스토리, 수동 트리거와 동일). C# AIForm의 "최근 N일"
+  입력 + "적용" 버튼이 Airflow Variable phm_auto_retrain_recent_days 를 갱신하며,
+  프로파일과 마찬가지로 태스크 실행 시점에 읽어 다음 실행부터 바로 반영됩니다.
+  ⚠ 윈도우를 너무 좁게 잡으면 드물게만 나오는 정상 패턴을 놓쳐 재학습 직후 오탐이
+  늘 수 있고, 반대로 그 기간에 미검출 결함이 섞여 있었다면 그걸 "정상"으로 학습해
+  버릴 수 있습니다 — 데이터 검증 없이 연속 수집 데이터를 그대로 쓰는 한 피할 수 없는
+  트레이드오프이니 너무 짧게 잡지 않는 것을 권장합니다.
+
 실제 학습 로직은 phm_retrain_dag.py 의 태스크 함수를 그대로 재사용합니다
 (축 감지, 프로파일 디렉토리, 학습 스크립트 실행 등 ~800줄 로직 중복 방지).
 수동으로 conf를 지정해 이 DAG를 트리거하면(예: 테스트 목적) 그 값이 항상
@@ -58,11 +70,13 @@ On/Off:
   PHM_AUTO_RETRAIN_EPOCHS        : 자동 재학습 시 학습 epoch 수 (기본: 50)
   PHM_AUTO_RETRAIN_PROFILE       : Variable "phm_auto_retrain_profile" 미설정 시 기본값 (기본: auto_retrain)
   PHM_AUTO_RETRAIN_PROFILE_LABEL : Variable "phm_auto_retrain_profile_label" 미설정 시 기본값 (기본: 자동 재학습)
+  PHM_AUTO_RETRAIN_RECENT_DAYS   : Variable "phm_auto_retrain_recent_days" 미설정 시 기본값 (기본: 30, 0=비활성)
 
 Airflow Variable:
   phm_auto_retrain_schedule      : cron 식 또는 "@daily" 등 매크로. AIForm "주기"에서 갱신.
   phm_auto_retrain_profile       : 자동 재학습 저장 프로파일명. AIForm "프로파일"에서 갱신.
   phm_auto_retrain_profile_label : 프로파일 표시 이름(선택). AIForm "라벨"에서 갱신.
+  phm_auto_retrain_recent_days   : 최근 N일 데이터만 사용(0=전체). AIForm "최근 N일"에서 갱신.
 """
 
 from __future__ import annotations
@@ -128,6 +142,12 @@ _AUTO_PROFILE_LABEL_VAR = "phm_auto_retrain_profile_label"
 _AUTO_PROFILE_ENV       = os.getenv("PHM_AUTO_RETRAIN_PROFILE", "auto_retrain")
 _AUTO_PROFILE_LABEL_ENV = os.getenv("PHM_AUTO_RETRAIN_PROFILE_LABEL", "자동 재학습")
 
+# 최근 N일 이내 수집된 CSV만 학습에 사용 — 데이터 드리프트 반영용. 0이면 비활성
+# (전체 히스토리, 수동 트리거와 동일한 기존 동작). 프로파일과 마찬가지로 태스크
+# 실행 시점에 읽으므로 재파싱을 기다리지 않고 다음 실행부터 바로 반영된다.
+_AUTO_RECENT_DAYS_VAR = "phm_auto_retrain_recent_days"
+_AUTO_RECENT_DAYS_ENV = os.getenv("PHM_AUTO_RETRAIN_RECENT_DAYS", "30")
+
 
 def _with_auto_defaults(func):
     """
@@ -169,11 +189,20 @@ def _with_auto_defaults(func):
             conf["isoforest_profile_label"] = f"{conf['profile_label']} (IsoForest)"
             changed = True
 
+        if "recent_days" not in conf:
+            try:
+                recent_days = float(Variable.get(_AUTO_RECENT_DAYS_VAR, default_var=_AUTO_RECENT_DAYS_ENV))
+            except (TypeError, ValueError):
+                recent_days = 0.0
+            conf["recent_days"] = recent_days if recent_days > 0 else None
+            changed = True
+
         if changed:
             dag_run.conf = conf
             print(f"[PHM][auto_retrain] conf 기본값 적용(스케줄 실행): "
                   f"train_modes={conf['train_modes']}, epochs={conf['epochs']}, "
-                  f"profile={conf['profile']}, isoforest_profile={conf['isoforest_profile']}", flush=True)
+                  f"profile={conf['profile']}, isoforest_profile={conf['isoforest_profile']}, "
+                  f"recent_days={conf['recent_days']}", flush=True)
         return func(**context)
     _wrapped.__name__ = getattr(func, "__name__", "wrapped")
     return _wrapped
