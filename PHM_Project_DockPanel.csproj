@@ -170,6 +170,7 @@
     <Compile Include="Services\Core\AirflowClient.cs" />
     <Compile Include="Services\Core\InferenceServerClient.cs" />
     <Compile Include="Services\Core\ContinuousInferenceService.cs" />
+    <Compile Include="Services\Core\AnomalySnapshotWriter.cs" />
     <Compile Include="Services\Core\ServerSettings.cs" />
     <Compile Include="UI\DataCollection\ServerSettingsForm.cs">
       <SubType>Form</SubType>

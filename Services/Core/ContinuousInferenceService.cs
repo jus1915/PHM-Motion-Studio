@@ -55,6 +55,15 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly System.Collections.Generic.Dictionary<int, float> _latestTorqueScores
             = new System.Collections.Generic.Dictionary<int, float>();
 
+        // ── 이상 탐지 PNG 스냅샷 (rising-edge 트리거 + 쿨다운으로 반복 저장 방지) ──
+        // 폴링 루프(LoopAsync) 안에서 순차적으로만 접근되므로 락 불필요(기존 _latestAccelScore 등과 동일 패턴).
+        private readonly Dictionary<string, bool> _wasAnomalous = new Dictionary<string, bool>();
+        private readonly Dictionary<string, DateTime> _lastSnapshotUtc = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, (string ClassName, float? Confidence, DateTime Utc)> _latestCls
+            = new Dictionary<string, (string ClassName, float? Confidence, DateTime Utc)>();
+        private static readonly TimeSpan SnapshotCooldown = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan ClsCacheMaxAge   = TimeSpan.FromSeconds(10);
+
         /// <summary>
         /// CLS(결함진단) 추론 활성화 여부. 기본 false — AE 이상탐지만 실행.
         /// true로 설정 시 RunClsInferenceAll / RunCombinedClsAll 호출.
@@ -413,6 +422,27 @@ namespace PHM_Project_DockPanel.Services.Core
                     _latestAccelScore = result.AnomalyScore;
                 else if (sensorType == "torque" && axis.HasValue)
                     _latestTorqueScores[axis.Value] = result.AnomalyScore;
+
+                // ── 이상 탐지 rising-edge → PNG 스냅샷 저장 ──────────────────
+                // 매 폴링(수백ms)마다가 아니라 "정상→이상 전환" 순간에만 1장 저장하고,
+                // 같은 (sensorType, axis)에 대해서는 쿨다운 동안 추가 저장을 막아
+                // 한 번의 이상 상태가 오래 지속돼도 파일이 쏟아지지 않게 한다.
+                string snapKey = SnapshotKey(sensorType, axis);
+                bool wasAnomalous;
+                _wasAnomalous.TryGetValue(snapKey, out wasAnomalous);
+                _wasAnomalous[snapKey] = result.IsAnomaly;
+
+                if (result.IsAnomaly && !wasAnomalous)
+                {
+                    DateTime lastSaved;
+                    bool cooling = _lastSnapshotUtc.TryGetValue(snapKey, out lastSaved) &&
+                                   (DateTime.UtcNow - lastSaved) < SnapshotCooldown;
+                    if (!cooling)
+                    {
+                        _lastSnapshotUtc[snapKey] = DateTime.UtcNow;
+                        SaveAnomalySnapshot(csvPath, sensorType, axis, window, nCh, result, snapKey);
+                    }
+                }
             }
 
             AppEvents.RaiseInferenceResult(sensorType, result);
@@ -446,6 +476,14 @@ namespace PHM_Project_DockPanel.Services.Core
                     $"[CLS 추론 오류] sensorType={sensorType} axis={axis?.ToString() ?? "null"}" +
                     $"  nCh={nCh}  windowLen={window.Length}  →  {combined.Error}");
                 return;
+            }
+
+            // 최신 결함 분류 캐시 — RunAeInference가 이상 탐지 스냅샷을 저장할 때
+            // (같은 sensorType/axis 기준으로) "예상 원인"으로 함께 표시하기 위함.
+            if (combined.ClsAvailable)
+            {
+                string clsKey = SnapshotKey(sensorType, axis);
+                _latestCls[clsKey] = (combined.ClsClassName, combined.ClsConfidence, DateTime.UtcNow);
             }
 
             // CLS 결과만 발행 (AE는 RunAeInference에서 별도 발행)
@@ -672,6 +710,76 @@ namespace PHM_Project_DockPanel.Services.Core
             }
 
             return result.ToArray();
+        }
+
+        // ──────────────────────────────────────────────────────────────────────
+        //  이상 탐지 PNG 스냅샷
+        // ──────────────────────────────────────────────────────────────────────
+
+        private static string SnapshotKey(string sensorType, int? axis)
+            => $"{sensorType}_{(axis.HasValue ? axis.Value.ToString() : "null")}";
+
+        /// <summary>
+        /// 스냅샷 표시용 채널 이름만 다시 조회합니다 — CSV 헤더 첫 줄만 별도로 읽어
+        /// GetSignalColumnIndices와 동일한 규칙으로 이름을 뽑습니다(ReadLastWindow는
+        /// 값만 반환하고 이름은 반환하지 않으므로, 기존 시그니처를 건드리지 않기 위해
+        /// 이상 탐지 시(드묾)에만 실행되는 이 헬퍼를 별도로 둠).
+        /// </summary>
+        private static string[] GetChannelNamesForSnapshot(string csvPath, string sensorType, int? axis)
+        {
+            try
+            {
+                string headerLine;
+                using (var fs = new FileStream(csvPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var sr = new StreamReader(fs))
+                    headerLine = sr.ReadLine();
+                if (string.IsNullOrEmpty(headerLine)) return null;
+
+                string[] headers = headerLine.Split(',');
+                int[] cols = GetSignalColumnIndices(headers, sensorType, axis);
+                var names = new string[cols.Length];
+                for (int i = 0; i < cols.Length; i++)
+                    names[i] = headers[cols[i]].Trim();
+                return names;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// 이상 탐지 rising-edge에서 호출됩니다. 방금 점수를 계산한 바로 그 window를 그대로
+        /// 재사용해 PNG로 저장하므로 데이터 드리프트/타이밍 오차가 없습니다.
+        /// </summary>
+        private void SaveAnomalySnapshot(
+            string csvPath, string sensorType, int? axis,
+            float[] window, int nCh, InferenceResult result, string snapKey)
+        {
+            try
+            {
+                string[] channelNames = GetChannelNamesForSnapshot(csvPath, sensorType, axis);
+
+                string clsClassName = null;
+                float? clsConfidence = null;
+                (string ClassName, float? Confidence, DateTime Utc) cls;
+                if (_latestCls.TryGetValue(snapKey, out cls) && (DateTime.UtcNow - cls.Utc) < ClsCacheMaxAge)
+                {
+                    clsClassName  = cls.ClassName;
+                    clsConfidence = cls.Confidence;
+                }
+
+                string outDir = Path.Combine(
+                    Path.GetDirectoryName(csvPath) ?? ".", "Anomalies");
+
+                AnomalySnapshotWriter.Save(
+                    outDir, window, nCh, channelNames,
+                    sensorType, axis, result.ModelType,
+                    result.AnomalyScore, result.Threshold,
+                    clsClassName, clsConfidence,
+                    AppEvents.RaiseLog);
+            }
+            catch (Exception ex)
+            {
+                AppEvents.RaiseLog($"[이상 탐지] 스냅샷 준비 실패: {ex.Message}");
+            }
         }
 
         public void Dispose()

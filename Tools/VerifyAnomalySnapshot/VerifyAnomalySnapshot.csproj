@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>VerifyAnomalySnapshot</AssemblyName>
+    <!-- 검증 전용 콘솔 도구. AnomalySnapshotWriter를 합성 데이터로 구동해 PNG가
+         실제로 정상 렌더링되는지 확인합니다. 배포 대상 아님. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\PHM_Project_DockPanel.csproj" />
+  </ItemGroup>
+
+</Project>
