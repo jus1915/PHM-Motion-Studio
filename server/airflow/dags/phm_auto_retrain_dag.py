@@ -256,6 +256,10 @@ with DAG(
         python_callable=reload_inference_cache,
     )
 
-    [
-        t_ae_accel, t_ae_torque_global, t_ae_combined_global, t_isoforest_accel,
-    ] >> t_reload
+    # PyTorch(ae_*) 3개를 병렬로 돌리면 CPU 전용 빌드라 GPU 없이 같은 코어를 나눠 쓰며
+    # 서로 경합해 개별 태스크가 순차 실행보다 훨씬 느려진다(실측: 4개 동시 실행 시
+    # ae_accel_auto/ae_combined_global_auto가 1시간 넘게 걸림 — isoforest_accel_auto는
+    # sklearn이라 6분 30초 만에 끝남). PyTorch 태스크 3개는 순차 실행으로 묶어 서로
+    # CPU를 뺏지 않게 하고, 가벼운 isoforest_accel만 별도로 병렬 실행한다.
+    t_ae_accel >> t_ae_torque_global >> t_ae_combined_global >> t_reload
+    t_isoforest_accel >> t_reload
