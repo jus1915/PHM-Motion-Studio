@@ -29,6 +29,8 @@ namespace PHM_Project_DockPanel.Services.Core
         private readonly System.Collections.Generic.Dictionary<string, int> _windowSizes
             = new System.Collections.Generic.Dictionary<string, int>();
         private int _intervalMs = DefaultIntervalMs;
+        private DateTime _lastWindowSizeRefreshUtc = DateTime.MinValue;
+        private static readonly TimeSpan WindowSizeRefreshInterval = TimeSpan.FromSeconds(30);
 
         /// <summary>sensor_type별 activity_rms_thr 캐시. 0.0 이면 필터 비활성.</summary>
         private readonly System.Collections.Generic.Dictionary<string, double> _activityRmsThresholds
@@ -149,6 +151,7 @@ namespace PHM_Project_DockPanel.Services.Core
         /// <summary>서버 /model_info 를 조회해 _windowSizes, _activityRmsThresholds, _intervalMs 를 갱신합니다.</summary>
         private async Task RefreshWindowSizesAsync(CancellationToken ct)
         {
+            _lastWindowSizeRefreshUtc = DateTime.UtcNow;
             try
             {
                 var info = await _client.GetModelInfoAsync().ConfigureAwait(false);
@@ -191,6 +194,12 @@ namespace PHM_Project_DockPanel.Services.Core
             {
                 try { await Task.Delay(_intervalMs, ct); }
                 catch { break; }
+
+                // 자동 재학습이 현재 활성 프로파일의 모델을 조용히 교체(reload)하는 경우
+                // ProfileActivated 이벤트가 발생하지 않으므로, 주기적으로도 재조회해
+                // 학습 시점 window_size와 추론 시점 window_size가 어긋나지 않도록 한다.
+                if (DateTime.UtcNow - _lastWindowSizeRefreshUtc >= WindowSizeRefreshInterval)
+                    await RefreshWindowSizesAsync(ct);
 
                 // ── (1) AE 추론: Idle/Pos 무관하게 항상 실행 ──────────────────
                 //   • 가속도: 단일 센서 → axis = null, Op 필터 없음
