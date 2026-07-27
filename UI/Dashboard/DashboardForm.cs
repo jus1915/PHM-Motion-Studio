@@ -820,6 +820,11 @@ namespace PHM_Project_DockPanel.UI.Dashboard
                     if (ok)
                     {
                         AppEvents.RaiseLog($"[프로파일] 전환 완료: {item.Name}  ({item.ModelCount}개 모델)");
+                        // ContinuousInferenceService에 window_size 등 즉시 재조회를 알림 —
+                        // 안 그러면 이전 프로파일 기준 window_size로 계속 요청을 보내
+                        // 새 프로파일 모델(예: window_size가 다른 IsolationForest)에 대해
+                        // 계속 "요청 데이터 부족" 오류가 난다.
+                        AppEvents.RaiseProfileActivated(item.Name);
                         // 칩/EMA/차트 상태 리셋
                         _chartEma.Clear();
                         _chartMaEma.Clear();

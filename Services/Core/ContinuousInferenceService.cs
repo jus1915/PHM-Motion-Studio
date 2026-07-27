@@ -86,6 +86,16 @@ namespace PHM_Project_DockPanel.Services.Core
             _torqueLogger     = torqueLogger;
             _getAxisOperation = getAxisOperation;
             _axes             = axes;
+
+            // 프로파일이 전환되면(Dashboard "적용" 버튼) window_size 등을 즉시 재조회 —
+            // 그렇지 않으면 이전 프로파일 기준 window_size로 계속 요청을 보내 새 프로파일의
+            // 모델(예: window_size가 다른 IsolationForest)에 계속 HTTP 400이 발생한다.
+            AppEvents.ProfileActivated += OnProfileActivated;
+        }
+
+        private void OnProfileActivated(string profile)
+        {
+            _ = RefreshWindowSizesAsync(CancellationToken.None);
         }
 
         // 기존 코드와의 하위 호환 오버로드
@@ -784,6 +794,7 @@ namespace PHM_Project_DockPanel.Services.Core
 
         public void Dispose()
         {
+            AppEvents.ProfileActivated -= OnProfileActivated;
             Stop();
             if (_client != null) _client.Dispose();
         }

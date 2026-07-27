@@ -142,5 +142,16 @@ namespace PHM_Project_DockPanel.Services
         public static event Action SequenceStarted;
         public static void RaiseSequenceStarted()
             => SequenceStarted?.Invoke();
+
+        // ── 추론 서버 활성 프로파일 전환 ──────────────────────────────────────
+        /// <summary>
+        /// DashboardForm에서 프로파일을 전환(POST /profiles/activate 성공)했을 때 발생합니다.
+        /// ContinuousInferenceService가 이 이벤트를 구독해 window_size 등을 즉시 재조회합니다 —
+        /// 그렇지 않으면 이전 프로파일 기준 window_size로 계속 요청을 보내 새 프로파일의
+        /// 모델(예: window_size가 다른 IsolationForest)에 대해 계속 HTTP 400이 발생합니다.
+        /// </summary>
+        public static event Action<string> ProfileActivated;
+        public static void RaiseProfileActivated(string profile)
+            => ProfileActivated?.Invoke(profile);
     }
 }
